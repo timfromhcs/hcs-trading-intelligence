@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -9,11 +10,15 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
 from hcs_trader.domain.signing import (
+    ApprovedRiskDecision,
     KeystoreError,
     SignedTransaction,
     SignerPolicy,
+    SignerPolicyViolation,
     SignerTamperingError,
+    SigningUnsupported,
     ValidatedTransactionPlan,
+    signing_capabilities,
 )
 from hcs_trader.keystore import decrypt_keystore_record
 
@@ -65,12 +70,85 @@ def decode_and_verify_payload(
         )
 
 
-class IsolatedSigner:
-    """Isolated signing boundary holding keystore records and immutable policy."""
+PauseState = Callable[[], bool]
+RiskDecisionLookup = Callable[[str], ApprovedRiskDecision | None]
 
-    def __init__(self, policy: SignerPolicy) -> None:
+
+class IsolatedSigner:
+    """Isolated signing boundary holding keystore records and immutable policy.
+
+    The signer reads the persisted execution pause and the persisted risk
+    decision through injected read-only callables at signing time, so a pause
+    or a revoked decision recorded after construction still blocks signing.
+
+    EVM (``eip155``) and UTXO (``bip122``) signing paths are placeholders that
+    do not produce chain-valid transactions. They raise ``SigningUnsupported``
+    unless ``allow_test_only_signing`` is explicitly set (tests only).
+    """
+
+    def __init__(
+        self,
+        policy: SignerPolicy,
+        *,
+        pause_state: PauseState,
+        risk_decision_lookup: RiskDecisionLookup,
+        allow_test_only_signing: bool = False,
+    ) -> None:
         self.policy = policy
+        self._pause_state = pause_state
+        self._risk_decision_lookup = risk_decision_lookup
+        self._allow_test_only_signing = allow_test_only_signing
         self._keystore: dict[tuple[str, str], dict[str, Any]] = {}
+        self._signed_idempotency_keys: set[str] = set()
+
+    def _assert_not_paused(self) -> None:
+        try:
+            paused = self._pause_state()
+        except Exception as err:
+            raise SignerPolicyViolation(
+                "Signing rejected: execution pause state unavailable"
+            ) from err
+        if paused is not False:
+            raise SignerPolicyViolation("Signing rejected: execution is paused")
+
+    def _assert_risk_decision(self, plan: ValidatedTransactionPlan) -> None:
+        try:
+            decision = self._risk_decision_lookup(plan.risk_decision_id)
+        except Exception as err:
+            raise SignerPolicyViolation(
+                f"Signing rejected: risk decision '{plan.risk_decision_id}' "
+                "lookup failed"
+            ) from err
+        if decision is None:
+            raise SignerPolicyViolation(
+                f"Signing rejected: risk decision '{plan.risk_decision_id}' not found"
+            )
+        if decision.decision_id != plan.risk_decision_id:
+            raise SignerTamperingError(
+                f"Signing rejected: risk decision id '{decision.decision_id}' "
+                f"does not match plan '{plan.risk_decision_id}'"
+            )
+        if decision.allowed is not True:
+            raise SignerPolicyViolation(
+                f"Signing rejected: risk decision '{plan.risk_decision_id}' "
+                "is not approved"
+            )
+        if decision.plan_hash != plan.plan_hash:
+            raise SignerTamperingError(
+                "Signing rejected: risk decision plan hash does not match plan"
+            )
+
+    def _assert_namespace_supported(self, chain_ns: str) -> None:
+        capability = signing_capabilities().get(chain_ns)
+        if capability is None:
+            raise SigningUnsupported(
+                f"Signing rejected: no signer exists for namespace '{chain_ns}'"
+            )
+        if capability.requires_test_only_flag and not self._allow_test_only_signing:
+            raise SigningUnsupported(
+                f"Signing rejected: '{chain_ns}' signing is a test-only "
+                f"placeholder and not chain-valid. {capability.note}"
+            )
 
     def register_keystore_record(self, record: dict[str, Any]) -> None:
         """Register an encrypted keystore record."""
@@ -115,14 +193,30 @@ class IsolatedSigner:
         at: datetime,
     ) -> SignedTransaction:
         """Validate policy, decode payload, and produce a signed transaction."""
-        # 1. Deterministic policy check
+        # 1. Persisted kill switch / execution pause (read at signing time)
+        self._assert_not_paused()
+
+        # 2. Deterministic policy check
         self.policy.validate_plan(plan, at)
 
-        # 2. Independent payload decoding & consistency check
+        # 3. Bind to a persisted, approved risk decision for this exact plan
+        self._assert_risk_decision(plan)
+
+        # 4. Refuse to sign the same idempotency key twice
+        if plan.idempotency_key in self._signed_idempotency_keys:
+            raise SignerPolicyViolation(
+                f"Signing rejected: idempotency key '{plan.idempotency_key}' "
+                "was already signed"
+            )
+
+        # 5. Only namespaces with an available signer (placeholders gated)
+        chain_ns = plan.canonical_chain_id.split(":", 1)[0]
+        self._assert_namespace_supported(chain_ns)
+
+        # 6. Independent payload decoding & consistency check
         decode_and_verify_payload(plan, unsigned_payload)
 
-        # 3. Key retrieval
-        chain_ns = plan.canonical_chain_id.split(":", 1)[0]
+        # 7. Key retrieval
         record_key = (chain_ns, plan.signer_address)
         record = self._keystore.get(record_key)
         if record is None:
@@ -131,7 +225,7 @@ class IsolatedSigner:
                 f"in namespace {chain_ns}"
             )
 
-        # 4. Narrow decryption and signing
+        # 8. Narrow decryption and signing
         raw_secret = decrypt_keystore_record(record, passphrase)
         try:
             if chain_ns == "solana":
@@ -141,7 +235,9 @@ class IsolatedSigner:
                 priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(raw_secret)
                 signature = priv_key.sign(unsigned_payload)
             else:
-                # SECP256K1 ECDSA signing for EVM / Bitcoin / UTXO
+                # TEST-ONLY PLACEHOLDER: SECP256K1 ECDSA over SHA-256 of the
+                # JSON envelope. Not keccak/RLP (EVM) nor sighash/PSBT (UTXO);
+                # reachable only with allow_test_only_signing=True.
                 if len(raw_secret) != 32:
                     raise KeystoreError("SECP256K1 private key must be 32 bytes")
                 ec_priv = ec.derive_private_key(
@@ -154,6 +250,7 @@ class IsolatedSigner:
 
         raw_tx_hex = unsigned_payload.hex() + signature.hex()
         tx_hash = hashlib.sha256(bytes.fromhex(raw_tx_hex)).hexdigest()
+        self._signed_idempotency_keys.add(plan.idempotency_key)
 
         return SignedTransaction(
             plan_hash=plan.plan_hash,

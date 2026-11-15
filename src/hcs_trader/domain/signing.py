@@ -26,6 +26,68 @@ class KeystoreError(SignerError):
     """Keystore encryption, decryption or access failed."""
 
 
+class SigningUnsupported(SignerError):
+    """No chain-valid signing implementation exists for the requested namespace."""
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedRiskDecision:
+    """Read-only view of a persisted risk decision the signer must bind to."""
+
+    decision_id: str
+    plan_hash: str
+    allowed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SigningCapability:
+    """Honest description of what the signer can produce for a chain namespace."""
+
+    namespace: str
+    chain_valid: bool
+    requires_test_only_flag: bool
+    note: str
+
+
+_SIGNING_CAPABILITIES: dict[str, SigningCapability] = {
+    "eip155": SigningCapability(
+        namespace="eip155",
+        chain_valid=False,
+        requires_test_only_flag=True,
+        note=(
+            "Placeholder only: SECP256K1 ECDSA over SHA-256 of a JSON test "
+            "envelope. Not Ethereum keccak-256/RLP/EIP-1559 signing; output is "
+            "not a broadcastable transaction."
+        ),
+    ),
+    "bip122": SigningCapability(
+        namespace="bip122",
+        chain_valid=False,
+        requires_test_only_flag=True,
+        note=(
+            "Placeholder only: SECP256K1 ECDSA over SHA-256 of a JSON test "
+            "envelope. Not Bitcoin/Litecoin/DigiByte sighash or PSBT signing; "
+            "output is not a broadcastable transaction."
+        ),
+    ),
+    "solana": SigningCapability(
+        namespace="solana",
+        chain_valid=False,
+        requires_test_only_flag=False,
+        note=(
+            "Ed25519 signature over the supplied payload bytes. The payload is a "
+            "JSON test envelope, not a serialized Solana transaction message, so "
+            "the output is not broadcastable."
+        ),
+    ),
+}
+
+
+def signing_capabilities() -> dict[str, SigningCapability]:
+    """Return the per-namespace signing capability report (a fresh copy)."""
+    return dict(_SIGNING_CAPABILITIES)
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedTransactionPlan:
     canonical_chain_id: str

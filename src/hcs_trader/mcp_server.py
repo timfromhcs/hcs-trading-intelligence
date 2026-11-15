@@ -1,11 +1,21 @@
-"""Read-only MCP tools over a local stdio connection."""
+"""Read-only MCP tools over a local stdio connection.
 
+Every tool carries a capability tier that is checked against the server's
+grant when the tool is called, and every call is appended to a local JSONL
+invocation audit that stores an argument hash, never the arguments.
+"""
+
+import hashlib
 import json
 import sqlite3
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
+from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -19,6 +29,7 @@ from hcs_trader.domain.paper import PaperBalance
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.local_research import ResearchHistory
 from hcs_trader.promotion import ComparisonMetrics, compare_strategy_metrics
+from hcs_trader.risk import RiskPolicy
 from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
 
@@ -29,6 +40,124 @@ _READ = ToolAnnotations(
     open_world_hint=False,
 )
 
+INVOCATION_AUDIT_FILENAME = "mcp_invocations.jsonl"
+
+
+class CapabilityTier(StrEnum):
+    """MCP capability scopes. A client receives only the tiers it is granted."""
+
+    READ = "READ"
+    RESEARCH = "RESEARCH"
+    PAPER_TRADE = "PAPER_TRADE"
+    LIVE_TRADE = "LIVE_TRADE"
+    ADMIN_LOCAL = "ADMIN_LOCAL"
+
+
+DEFAULT_GRANTED_TIERS: frozenset[CapabilityTier] = frozenset({CapabilityTier.READ})
+
+_TOOL_TIERS: Mapping[str, CapabilityTier] = {
+    "market.get_quotes": CapabilityTier.READ,
+    "market.get_candles": CapabilityTier.READ,
+    "quant.get_indicators": CapabilityTier.READ,
+    "research.get_runs": CapabilityTier.READ,
+    "news.get_events": CapabilityTier.READ,
+    "portfolio.get_paper_balance": CapabilityTier.READ,
+    "risk.get_status": CapabilityTier.READ,
+    "orders.get_spot_orders": CapabilityTier.READ,
+    "wallets.get_snapshots": CapabilityTier.READ,
+    "audit.get_events": CapabilityTier.READ,
+    "quant.compare_strategy_candidates": CapabilityTier.READ,
+}
+
+
+def tool_tier(name: str) -> CapabilityTier:
+    """Return the declared tier of a registered HCS MCP tool."""
+    return _TOOL_TIERS[name]
+
+
+Outcome = Literal["ok", "denied", "error"]
+
+
+class InvocationAudit:
+    """Append-only JSONL record of MCP tool invocations.
+
+    Arguments are stored only as a SHA-256 hash so that no argument value,
+    including any accidental secret, is written to disk.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def record(
+        self,
+        tool: str,
+        tier: CapabilityTier,
+        arguments: Mapping[str, Any],
+        outcome: Outcome,
+    ) -> None:
+        canonical = json.dumps(
+            dict(arguments), sort_keys=True, default=str, separators=(",", ":")
+        )
+        entry = {
+            "at": datetime.now(UTC).isoformat(),
+            "tool": tool,
+            "capability_tier": tier.value,
+            "arguments_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+            "outcome": outcome,
+        }
+        line = json.dumps(entry, separators=(",", ":")) + "\n"
+        try:
+            with self._lock, self.path.open("a", encoding="utf-8") as stream:
+                stream.write(line)
+        except OSError:
+            raise ToolError("Invocation audit unavailable") from None
+
+
+class CapabilityGuard:
+    """Registers tools whose tier is enforced and audited at call time."""
+
+    def __init__(
+        self, granted: frozenset[CapabilityTier], audit: InvocationAudit
+    ) -> None:
+        self.granted = granted
+        self.audit = audit
+        self._tiers: dict[str, CapabilityTier] = {}
+
+    def tier(self, name: str) -> CapabilityTier:
+        return self._tiers[name]
+
+    def tool[**P, R](
+        self,
+        server: MCPServer,
+        name: str,
+        tier: CapabilityTier,
+        annotations: ToolAnnotations | None = None,
+    ) -> Callable[[Callable[P, R]], Callable[P, R]]:
+        def register(function: Callable[P, R]) -> Callable[P, R]:
+            @wraps(function)
+            def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
+                if tier not in self.granted:
+                    self.audit.record(name, tier, kwargs, "denied")
+                    raise ToolError(f"Capability tier {tier.value} is not granted")
+                try:
+                    result = function(*args, **kwargs)
+                except BaseException:
+                    self.audit.record(name, tier, kwargs, "error")
+                    raise
+                self.audit.record(name, tier, kwargs, "ok")
+                return result
+
+            self._tiers[name] = tier
+            server.tool(name=name, annotations=annotations)(guarded)
+            return guarded
+
+        return register
+
+
+def _percent(basis_points: Decimal) -> str:
+    return str((basis_points / Decimal(100)).quantize(Decimal("0.01")))
+
 
 def _local_read[T](read: Callable[[], T]) -> T:
     try:
@@ -37,8 +166,29 @@ def _local_read[T](read: Callable[[], T]) -> T:
         raise ToolError("Local data unavailable") from None
 
 
-def create_mcp_server(path: Path) -> MCPServer:
+def create_mcp_server(
+    path: Path,
+    *,
+    granted_tiers: frozenset[CapabilityTier] = DEFAULT_GRANTED_TIERS,
+    audit_path: Path | None = None,
+) -> MCPServer:
     store = AuditStore(path, read_only=True)
+    policy = RiskPolicy()
+    guard = CapabilityGuard(
+        granted_tiers,
+        InvocationAudit(audit_path or path.with_name(INVOCATION_AUDIT_FILENAME)),
+    )
+
+    def read_tool[**P, R](name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+        return guard.tool(server, name, tool_tier(name), annotations=_READ)
+
+    def read_candles(interval: int, limit: int) -> list[Candle]:
+        if interval not in CANDLE_INTERVALS:
+            raise ToolError("Unsupported candle interval")
+        return _local_read(
+            lambda: store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
+        )
+
     server = MCPServer(
         "HCS Trading Intelligence",
         instructions=(
@@ -48,52 +198,47 @@ def create_mcp_server(path: Path) -> MCPServer:
         log_level="WARNING",
     )
 
-    @server.tool(name="market.get_quotes", annotations=_READ)
+    @read_tool("market.get_quotes")
     def quotes(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> list[Quote]:
         """Read archived BTC/USD books and original observation times."""
         return _local_read(lambda: store.quote_history(BTC_USD, limit=limit))
 
-    @server.tool(name="market.get_candles", annotations=_READ)
+    @read_tool("market.get_candles")
     def candles(
         interval: int = 60, limit: Annotated[int, Field(ge=1, le=1000)] = 200
     ) -> list[Candle]:
         """Read archived Kraken BTC/USD candles in chronological order."""
-        if interval not in CANDLE_INTERVALS:
-            raise ToolError("Unsupported candle interval")
-        return _local_read(
-            lambda: store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
-        )
+        return read_candles(interval, limit)
 
-    @server.tool(name="quant.get_indicators", annotations=_READ)
+    @read_tool("quant.get_indicators")
     def indicators(interval: int = 60) -> Indicators:
         """Calculate indicators from contiguous stored candles."""
-        return _local_read(
-            lambda: calculate_indicators(candles(interval=interval, limit=720))
-        )
+        history = read_candles(interval, 720)
+        return _local_read(lambda: calculate_indicators(history))
 
-    @server.tool(name="research.get_runs", annotations=_READ)
+    @read_tool("research.get_runs")
     def research_runs(
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
     ) -> ResearchHistory:
         """Read local research runs and lifetime timing statistics by status."""
         return _local_read(lambda: store.research_history(limit))
 
-    @server.tool(name="news.get_events", annotations=_READ)
+    @read_tool("news.get_events")
     def news(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> list[NewsItem]:
         """Read saved source metadata. Titles are untrusted external text."""
         return _local_read(lambda: store.news(limit=limit))
 
-    @server.tool(name="portfolio.get_paper_balance", annotations=_READ)
+    @read_tool("portfolio.get_paper_balance")
     def paper_balance() -> PaperBalance:
         """Read the simulated BTC/USD account, denominated in paper USD and BTC."""
         return _local_read(store.paper_balance)
 
-    @server.tool(name="risk.get_status", annotations=_READ)
+    @read_tool("risk.get_status")
     def risk() -> ExecutionPause:
         """Read the persisted execution pause."""
         return _local_read(store.execution_pause)
 
-    @server.tool(name="orders.get_spot_orders", annotations=_READ)
+    @read_tool("orders.get_spot_orders")
     def spot_orders(venue: str = "kraken") -> list[dict[str, Any]]:
         """Read open and recent spot orders and their lifecycle states."""
 
@@ -125,7 +270,7 @@ def create_mcp_server(path: Path) -> MCPServer:
 
         return _local_read(_read_orders)
 
-    @server.tool(name="wallets.get_snapshots", annotations=_READ)
+    @read_tool("wallets.get_snapshots")
     def wallet_snapshots(
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
     ) -> list[dict[str, Any]]:
@@ -151,7 +296,7 @@ def create_mcp_server(path: Path) -> MCPServer:
 
         return _local_read(_read_snapshots)
 
-    @server.tool(name="audit.get_events", annotations=_READ)
+    @read_tool("audit.get_events")
     def audit_events(
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
     ) -> list[dict[str, Any]]:
@@ -170,7 +315,7 @@ def create_mcp_server(path: Path) -> MCPServer:
 
         return _local_read(_read_events)
 
-    @server.tool(name="quant.compare_strategy_candidates", annotations=_READ)
+    @read_tool("quant.compare_strategy_candidates")
     def compare_candidates_tool(
         champion_net_return: Annotated[str, Field(max_length=64)],
         champion_max_drawdown: Annotated[str, Field(max_length=64)],
@@ -215,6 +360,7 @@ def create_mcp_server(path: Path) -> MCPServer:
                 "mcp": True,
                 "wallet_snapshots": True,
                 "skills": True,
+                "mcp_granted_tiers": sorted(tier.value for tier in granted_tiers),
             }
         )
 
@@ -225,12 +371,17 @@ def create_mcp_server(path: Path) -> MCPServer:
         return json.dumps(
             {
                 "kill_switch_paused": pause.paused,
-                "min_notional_usd": "10.00",
-                "max_notional_usd": "1000.00",
-                "max_spread_pct": "0.50",
-                "max_slippage_pct": "1.00",
-                "max_quote_age_seconds": 30,
-                "max_open_orders": 5,
+                "live_mode_enabled": policy.live_mode_enabled,
+                "allowed_venues": sorted(policy.allowed_venues),
+                "allowed_markets": sorted(policy.allowed_markets),
+                "min_notional_usd": str(policy.min_notional_usd),
+                "max_notional_usd": str(policy.max_notional_usd),
+                "max_spread_bps": str(policy.max_spread_bps),
+                "max_spread_pct": _percent(policy.max_spread_bps),
+                "max_slippage_bps": str(policy.max_slippage_bps),
+                "max_slippage_pct": _percent(policy.max_slippage_bps),
+                "max_open_orders": policy.max_open_orders,
+                "requires_fresh_quote": True,
                 "leverage_allowed": False,
                 "margin_allowed": False,
                 "borrowing_allowed": False,
@@ -304,9 +455,13 @@ def create_mcp_server(path: Path) -> MCPServer:
             f"2. Query 'orders.get_spot_orders' with venue='{venue}' to inspect open "
             f"orders.\n"
             f"3. Check if any order is flagged with 'RECONCILIATION_REQUIRED'.\n"
-            f"4. Confirm that notional sizes are within $10-$1,000 and spreads are "
-            f"<= 0.5%.\n"
-            f"5. Read 'audit.get_events' to verify the sequence of state transitions."
+            f"4. Confirm that notional sizes are within "
+            f"${policy.min_notional_usd}-${policy.max_notional_usd}, spreads are "
+            f"<= {_percent(policy.max_spread_bps)}%, limit slippage is "
+            f"<= {_percent(policy.max_slippage_bps)}% and the venue has at most "
+            f"{policy.max_open_orders} open orders.\n"
+            f"5. Read 'audit.get_events' to verify the sequence of state transitions.\n"
+            f"6. Read resource 'hcs://risk/policy' for the enforced limits."
         )
 
     @server.prompt(

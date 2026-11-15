@@ -1,6 +1,8 @@
+import csv
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -62,3 +64,14 @@ def test_import_is_idempotent_and_candles_are_readable_offline(
         assert client.get("/api/v1/market/candles?limit=1").json() == candles[1:]
         assert client.get("/api/v1/market/candles?interval=5").json() == []
         assert client.get("/api/v1/market/candles?interval=7").status_code == 422
+
+        exported = client.get("/api/v1/market/candles.csv")
+        assert exported.headers["content-type"] == "text/csv; charset=utf-8"
+        assert "btc-usd-60m.csv" in exported.headers["content-disposition"]
+        rows = list(csv.DictReader(StringIO(exported.text)))
+        assert len(rows) == 2
+        for candle, row in zip(candles, rows, strict=True):
+            assert row == {name: str(value) for name, value in candle.items()}
+        empty = client.get("/api/v1/market/candles.csv?interval=5")
+        assert empty.text.splitlines() == [",".join(rows[0])]
+        assert client.get("/api/v1/market/candles.csv?limit=1001").status_code == 422

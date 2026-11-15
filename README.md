@@ -25,6 +25,8 @@ Start with `uv run --locked hcs-trader serve --public-market-data` to opt into `
 
 Run `uv run --locked hcs-trader import-candles --interval 60` to fetch and store closed Kraken BTC/USD hourly candles. `GET /api/v1/market/candles?interval=60` reads the stored candles offline in chronological order.
 
+Download the same candles as CSV from `GET /api/v1/market/candles.csv?interval=60`. Both formats support the `limit` query parameter and include source and observation timestamps.
+
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 Licensed under Apache-2.0. Made with love by timfromhcs and hcsmedia.

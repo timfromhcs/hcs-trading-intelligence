@@ -1,5 +1,6 @@
 """Read-only status endpoints for the loopback application."""
 
+import csv
 import json
 import logging
 import sqlite3
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from io import StringIO
 from pathlib import Path
 from typing import Annotated
 
@@ -223,6 +225,29 @@ def create_app(
             )
             for candle in candles
         ]
+
+    @app.get(
+        "/api/v1/market/candles.csv",
+        response_class=Response,
+        responses={200: {"content": {"text/csv": {"schema": {"type": "string"}}}}},
+    )
+    def candle_csv(
+        interval: int = 60, limit: Annotated[int, Query(ge=1, le=1000)] = 720
+    ) -> Response:
+        candles = candle_history(interval, limit)
+        output = StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=list(CandleRecord.model_fields))
+        writer.writeheader()
+        writer.writerows(candle.model_dump(mode="json") for candle in candles)
+        filename = f"btc-usd-{interval}m.csv"
+        return Response(
+            output.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

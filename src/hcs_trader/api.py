@@ -27,6 +27,7 @@ from hcs_trader.domain.market_data import Candle, DataQuality
 from hcs_trader.domain.news import NewsItem
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.storage import AuditStore
+from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
 
 _logger = logging.getLogger(__name__)
 LOOPBACK_HOST = "127.0.0.1"
@@ -245,6 +246,17 @@ def create_app(
     ) -> BacktestResult:
         try:
             return run_backtest(read_candles(interval, limit), config)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @app.post("/api/v1/backtests/walk-forward")
+    def walk_forward_backtest(
+        config: WalkForwardConfig,
+        interval: int = 60,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 720,
+    ) -> WalkForwardResult:
+        try:
+            return walk_forward(read_candles(interval, limit), config)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
 

@@ -11,6 +11,7 @@ from hcs_trader.backtest import BacktestConfig, run_backtest
 from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.market_data import Candle
 from hcs_trader.storage import AuditStore
+from hcs_trader.walk_forward import PeriodPair, WalkForwardConfig, walk_forward
 
 
 def fixture_candles() -> list[Candle]:
@@ -90,3 +91,66 @@ def test_offline_backtest_route_validates_inputs(tmp_path: Path) -> None:
             api.post("/api/v1/backtests", json={**config, "fee_bps": "-1"}).status_code
             == 422
         )
+
+
+def test_walk_forward_keeps_test_and_holdout_out_of_selection(tmp_path: Path) -> None:
+    hour = timedelta(hours=1)
+    template = fixture_candles()[0]
+    candles = [
+        replace(
+            template,
+            opened_at=template.opened_at + index * hour,
+            received_at=template.received_at + index * hour,
+            volume=Decimal(20),
+        )
+        for index in range(16)
+    ]
+    config = WalkForwardConfig(6, 3, 4, (PeriodPair(2, 3), PeriodPair(2, 4)))
+    result = walk_forward(candles, config)
+    first, second = result.folds
+    assert first.started_at == candles[6].opened_at
+    assert first.ended_at == second.started_at == candles[9].opened_at
+    assert second.ended_at == result.holdout.started_at
+    assert result.holdout.evaluated_candles == 4
+    assert result.holdout.selected == PeriodPair(2, 3)
+    assert result.holdout.strategy.fills == ()
+    (buy,) = result.holdout.benchmark.fills
+    assert buy.filled_at == result.holdout.started_at
+
+    altered = candles[:12] + [
+        replace(candle, close=Decimal(101)) for candle in candles[12:]
+    ]
+    changed = walk_forward(altered, config)
+    assert changed.folds == result.folds
+    assert changed.holdout.selected == result.holdout.selected
+    assert changed.holdout.training_return == result.holdout.training_return
+    assert (
+        changed.holdout.selection_dataset_sha256
+        == result.holdout.selection_dataset_sha256
+    )
+    assert (
+        changed.holdout.strategy.dataset_sha256
+        != result.holdout.strategy.dataset_sha256
+    )
+
+    store = AuditStore(tmp_path / "history.sqlite")
+    store.initialize()
+    store.record_candles(candles)
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        response = api.post(
+            "/api/v1/backtests/walk-forward",
+            json={
+                "training_candles": 6,
+                "test_candles": 3,
+                "holdout_candles": 4,
+                "candidates": [{"fast": 2, "slow": 3}, {"fast": 2, "slow": 4}],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["holdout"]["benchmark"]["strategy"] == "buy-and-hold"
+
+
+def test_walk_forward_api_rejects_insufficient_history(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "walk-forward.sqlite")
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        assert api.post("/api/v1/backtests/walk-forward", json={}).status_code == 422

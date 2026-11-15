@@ -84,8 +84,15 @@ class BacktestResult:
     fills: tuple[SimulatedFill, ...]
 
 
-def run_backtest(candles: Sequence[Candle], config: BacktestConfig) -> BacktestResult:
-    if len(candles) < config.slow_period + 1:
+def run_backtest(
+    candles: Sequence[Candle],
+    config: BacktestConfig,
+    *,
+    trade_start: int | None = None,
+    buy_and_hold: bool = False,
+) -> BacktestResult:
+    start = config.slow_period if trade_start is None else trade_start
+    if not config.slow_period <= start < len(candles):
         raise ValueError(
             "Need a full strategy warm-up and at least one execution candle"
         )
@@ -117,11 +124,15 @@ def run_backtest(candles: Sequence[Candle], config: BacktestConfig) -> BacktestR
         dataset.update(repr(record).encode("utf-8"))
 
     with localcontext(Context(prec=34)):
-        return _replay(candles, config, dataset.hexdigest())
+        return _replay(candles, config, dataset.hexdigest(), start, buy_and_hold)
 
 
 def _replay(
-    candles: Sequence[Candle], config: BacktestConfig, dataset_hash: str
+    candles: Sequence[Candle],
+    config: BacktestConfig,
+    dataset_hash: str,
+    start: int,
+    buy_and_hold: bool,
 ) -> BacktestResult:
     cash = peak = equity = config.starting_cash
     quantity = drawdown = fees = _ZERO
@@ -131,11 +142,13 @@ def _replay(
     impact = (config.spread_bps / 2 + config.slippage_bps) / 10_000
 
     for index, candle in enumerate(candles):
-        if len(closes) >= config.slow_period:
+        if index >= start:
             fast = sum(closes[-config.fast_period :], _ZERO) / config.fast_period
             slow = sum(closes[-config.slow_period :], _ZERO) / config.slow_period
             previous = candles[index - 1]
-            side: Literal["buy", "sell"] = "buy" if fast > slow else "sell"
+            side: Literal["buy", "sell"] = (
+                "buy" if buy_and_hold or fast > slow else "sell"
+            )
             price = candle.open * (1 + impact if side == "buy" else 1 - impact)
             if side == "buy":
                 requested = (
@@ -178,7 +191,7 @@ def _replay(
         closes.append(candle.close)
 
     return BacktestResult(
-        STRATEGY,
+        "buy-and-hold" if buy_and_hold else STRATEGY,
         dataset_hash,
         len(candles),
         config,

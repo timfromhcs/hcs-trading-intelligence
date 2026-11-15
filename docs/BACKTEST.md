@@ -6,4 +6,10 @@ The simulator applies the target at the following candle's open. It assumes that
 
 Results include the strategy version, a SHA-256 fingerprint of normalized market inputs, the full configuration, simulated fills, fees, net return, and peak-to-trough drawdown at candle closes. Open inventory is marked at the final close. The report omits hypothetical liquidation costs on inventory that remains open.
 
-The current model covers contiguous, archived spot candles for one market. Its results are for research. Order-book replay, measured latency, portfolio benchmarks and walk-forward or holdout evaluation remain future work.
+The current model covers contiguous, archived spot candles for one market. Its results are for research. Order-book replay, measured latency and portfolio-wide benchmarks remain future work.
+
+## Walk-forward evaluation
+
+`POST /api/v1/backtests/walk-forward` evaluates candidate SMA periods using expanding training windows and successive, non-overlapping test windows. Candidates share simulation parameters and begin at the same warm-up boundary. Training net return selects the candidate, with ties following request order. Each test starts with fresh cash and uses preceding closes for warm-up. The benchmark attempts a buy at the start of each scored window under the same allocation, costs, and liquidity model, then holds its filled quantity.
+
+The final window is excluded from all candidate selection. A final candidate is fitted on the development segment and scored once per request against that holdout. Rerunning the endpoint with new candidates can indirectly expose the holdout to tuning. Research promotion will require a separately managed sealed dataset and immutable experiment record.

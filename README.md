@@ -19,7 +19,7 @@ Open the dashboard on the loopback address `http://127.0.0.1:8765`. The service 
 
 Run `uv run --locked pytest` for the Python suite. Build the frontend before running `uv build` to package the dashboard with the wheel.
 
-Start with `uv run --locked hcs-trader serve --public-market-data` to opt into `DATA_ONLY` mode. Request `GET /api/v1/market/quotes` for the BTC/USD best bid and ask, timestamps and quality status. See the [data source notes](docs/DATA_SOURCES.md).
+Start with `uv run --locked hcs-trader serve --public-market-data` to opt into `DATA_ONLY` mode. The BTC/USD dashboard panel and `GET /api/v1/market/quotes` show the best bid and ask, timestamps and quote quality. See the [data source notes](docs/DATA_SOURCES.md).
 
 `GET /api/v1/market/quotes/history?limit=100` reads previously stored quotes from SQLite and works with provider access disabled.
 

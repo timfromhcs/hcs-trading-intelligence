@@ -38,3 +38,7 @@ dd { margin: 0; }
 .capabilities div:last-child { padding-bottom: 0; }
 .available { color: #37d39a; }
 .muted { color: var(--muted); }
+.quote-status > p { margin: 0.75rem 0 0; }
+.quote-warning { color: #ffbf5a; }
+.quote-prices dd { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.quote-time, .quote-prices .quote-time { color: var(--muted); font-size: 0.875rem; font-weight: 400; }

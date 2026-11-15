@@ -28,6 +28,7 @@
 - Added read-only native Ethereum balance checks against a local RPC node.
 - Added read-only native Solana balance checks with a mainnet-beta genesis pin.
 - Added Bitcoin Core confirmed UTXO balance reads with exact satoshi conversion.
+- Added Litecoin and DigiByte confirmed UTXO balance reads and pinned the genesis block for all UTXO adapters.
 
 ## 0.1.0 — development foundation
 

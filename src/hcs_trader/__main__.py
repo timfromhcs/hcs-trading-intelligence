@@ -46,8 +46,10 @@ from hcs_trader.model_manifest import verify_model_manifest
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
 from hcs_trader.wallets import (
+    UTXO_NETWORKS,
     LocalWalletRpc,
     SolanaBalance,
+    UtxoNetwork,
     WalletBalance,
     WalletUnavailable,
 )
@@ -175,7 +177,9 @@ async def solana_balance(address: str, port: int) -> SolanaBalance:
         return await LocalWalletRpc(client, port).solana_balance(address)
 
 
-async def bitcoin_balance(address: str, port: int, cookie_file: Path) -> WalletBalance:
+async def utxo_balance(
+    address: str, port: int, cookie_file: Path, network: UtxoNetwork
+) -> WalletBalance:
     with cookie_file.open(encoding="utf-8") as handle:
         cookie = handle.read(1025).strip()
     username, separator, credential = cookie.partition(":")
@@ -186,11 +190,11 @@ async def bitcoin_balance(address: str, port: int, cookie_file: Path) -> WalletB
         or not credential
         or any(char.isspace() for char in credential)
     ):
-        raise ValueError("Expected a Bitcoin Core authentication cookie")
+        raise ValueError(f"Expected a {network.name} Core authentication cookie")
     async with httpx2.AsyncClient(
         auth=httpx2.BasicAuth(username, credential), trust_env=False
     ) as client:
-        return await LocalWalletRpc(client, port).bitcoin_balance(address)
+        return await LocalWalletRpc(client, port).utxo_balance(address, network)
 
 
 async def serve(market_data: bool, paper_mode: bool = False) -> None:
@@ -285,12 +289,13 @@ def main() -> None:
     )
     sol_parser.add_argument("address")
     sol_parser.add_argument("--port", type=int, default=8899)
-    btc_parser = commands.add_parser(
-        "btc-balance", help="Scan BTC UTXOs at a local node"
-    )
-    btc_parser.add_argument("address")
-    btc_parser.add_argument("--port", type=int, default=8332)
-    btc_parser.add_argument("--cookie-file", type=Path, required=True)
+    for command, network in UTXO_NETWORKS.items():
+        node_parser = commands.add_parser(
+            command, help=f"Scan {network.name} UTXOs at a local node"
+        )
+        node_parser.add_argument("address")
+        node_parser.add_argument("--port", type=int, default=network.port)
+        node_parser.add_argument("--cookie-file", type=Path, required=True)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -365,16 +370,19 @@ def main() -> None:
         except (WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(TypeAdapter(SolanaBalance).dump_json(sol).decode("utf-8"))
-    elif arguments.command == "btc-balance":
+    elif arguments.command in UTXO_NETWORKS:
         try:
-            bitcoin = asyncio.run(
-                bitcoin_balance(
-                    arguments.address, arguments.port, arguments.cookie_file
+            balance = asyncio.run(
+                utxo_balance(
+                    arguments.address,
+                    arguments.port,
+                    arguments.cookie_file,
+                    UTXO_NETWORKS[arguments.command],
                 )
             )
         except (OSError, WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
-        print(TypeAdapter(WalletBalance).dump_json(bitcoin).decode("utf-8"))
+        print(TypeAdapter(WalletBalance).dump_json(balance).decode("utf-8"))
     else:
         print(Status().model_dump_json())
 

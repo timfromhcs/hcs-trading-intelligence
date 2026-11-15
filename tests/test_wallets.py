@@ -4,10 +4,10 @@ import httpx2
 import pytest
 
 from hcs_trader.wallets import (
-    BTC,
     ETH,
     SOL,
     SOL_GENESIS,
+    UTXO_NETWORKS,
     LocalWalletRpc,
     WalletUnavailable,
 )
@@ -131,16 +131,24 @@ async def test_solana_rejects_bad_addresses_and_wrong_cluster() -> None:
 
 
 @pytest.mark.anyio
-async def test_bitcoin_uses_a_single_address_descriptor_and_preserves_satoshi() -> None:
+@pytest.mark.parametrize("command", ["btc-balance", "ltc-balance", "dgb-balance"])
+async def test_utxo_uses_a_single_address_descriptor_and_preserves_base_units(
+    command: str,
+) -> None:
+    network = UTXO_NETWORKS[command]
     address = "1" + "a" * 25
     calls = []
 
     def node(request: httpx2.Request) -> httpx2.Response:
-        assert str(request.url) == "http://127.0.0.1:8332/"
+        assert str(request.url) == f"http://127.0.0.1:{network.port}/"
         body = json.loads(request.content)
+        assert body["jsonrpc"] == network.rpc_version
         calls.append(body["method"])
         if body["method"] == "getblockchaininfo":
             result = '{"chain":"main","initialblockdownload":false}'
+        elif body["method"] == "getblockhash":
+            assert body["params"] == [0]
+            result = json.dumps(network.genesis)
         elif body["method"] == "validateaddress":
             assert body["params"] == [address]
             result = '{"isvalid":true}'
@@ -152,18 +160,26 @@ async def test_bitcoin_uses_a_single_address_descriptor_and_preserves_satoshi() 
                 '{"success":true,"height":1000,'
                 f'"bestblock":"{block}","total_amount":12345678.12345679}}'
             )
+        version = (
+            '"jsonrpc":"2.0",' if network.rpc_version == "2.0" else '"error":null,'
+        )
         return httpx2.Response(
-            200, content=f'{{"jsonrpc":"2.0","id":"{body["id"]}","result":{result}}}'
+            200, content=f'{{{version}"id":"{body["id"]}","result":{result}}}'
         )
 
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(node)) as client:
-        rpc = LocalWalletRpc(client, 8332)
+        rpc = LocalWalletRpc(client, network.port)
         with pytest.raises(ValueError):
-            await rpc.bitcoin_balance("1abc)#raw(00)")
+            await rpc.utxo_balance("1abc)#raw(00)", network)
         assert calls == []
-        balance = await rpc.bitcoin_balance(address)
-    assert calls == ["getblockchaininfo", "validateaddress", "scantxoutset"]
-    assert balance.asset == str(BTC)
+        balance = await rpc.utxo_balance(address, network)
+    assert calls == [
+        "getblockchaininfo",
+        "getblockhash",
+        "validateaddress",
+        "scantxoutset",
+    ]
+    assert balance.asset == str(network.asset)
     assert balance.base_units == "1234567812345679"
     assert balance.block_number == 1000 and balance.decimals == 8
 
@@ -188,3 +204,23 @@ async def test_bitcoin_rejects_wrong_network_or_syncing_node(
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(node)) as client:
         with pytest.raises(WalletUnavailable, match="synced mainnet"):
             await LocalWalletRpc(client, 8332).bitcoin_balance("1" + "a" * 25)
+
+
+@pytest.mark.anyio
+async def test_litecoin_rejects_bitcoin_even_if_node_reports_mainnet() -> None:
+    def node(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        if body["method"] == "getblockchaininfo":
+            result: object = {"chain": "main", "initialblockdownload": False}
+        else:
+            assert body["method"] == "getblockhash"
+            result = UTXO_NETWORKS["btc-balance"].genesis
+        return httpx2.Response(
+            200, json={"id": body["id"], "result": result, "error": None}
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(node)) as client:
+        with pytest.raises(WalletUnavailable, match="Litecoin genesis"):
+            await LocalWalletRpc(client, 9332).utxo_balance(
+                "1" + "a" * 25, UTXO_NETWORKS["ltc-balance"]
+            )

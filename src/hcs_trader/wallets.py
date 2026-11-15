@@ -16,6 +16,8 @@ from hcs_trader.domain.assets import AssetId
 
 ETH = AssetId.parse("eip155:1/native:ETH")
 BTC = AssetId.parse("bitcoin:mainnet/native:BTC")
+LTC = AssetId.parse("litecoin:mainnet/native:LTC")
+DGB = AssetId.parse("digibyte:mainnet/native:DGB")
 SOL_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 SOL = AssetId.parse("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/native:SOL")
 _BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -53,7 +55,7 @@ class WalletUnavailable(Exception):
 
 
 class _RpcResponse(BaseModel):
-    jsonrpc: Literal["2.0"]
+    jsonrpc: Literal["1.0", "2.0"] | None = None
     id: str
     result: object
     error: object | None = None
@@ -73,7 +75,7 @@ class _LamportBalance(BaseModel):
     value: int = Field(ge=0, le=2**64 - 1)
 
 
-class _BitcoinChain(BaseModel):
+class _UtxoChain(BaseModel):
     chain: str
     initialblockdownload: bool
 
@@ -82,11 +84,49 @@ class _ValidatedAddress(BaseModel):
     isvalid: bool
 
 
-class _BitcoinScan(BaseModel):
+class _UtxoScan(BaseModel):
     success: Literal[True]
     height: int = Field(ge=0)
     bestblock: str
     total_amount: Decimal | int
+
+
+@dataclass(frozen=True, slots=True)
+class UtxoNetwork:
+    name: str
+    asset: AssetId
+    genesis: str
+    port: int
+    rpc_version: Literal["1.0", "2.0"]
+    max_coins: int
+
+
+UTXO_NETWORKS = {
+    "btc-balance": UtxoNetwork(
+        "Bitcoin",
+        BTC,
+        "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+        8332,
+        "2.0",
+        21_000_000,
+    ),
+    "ltc-balance": UtxoNetwork(
+        "Litecoin",
+        LTC,
+        "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2",
+        9332,
+        "1.0",
+        84_000_000,
+    ),
+    "dgb-balance": UtxoNetwork(
+        "DigiByte",
+        DGB,
+        "7497ea1b465eb39f1c8f507bc877078fe016d6fcb6dfad3a64c98dcc6e1e8496",
+        14022,
+        "1.0",
+        21_000_000_000,
+    ),
+}
 
 
 class LocalWalletRpc:
@@ -97,7 +137,12 @@ class LocalWalletRpc:
         self._url = f"http://127.0.0.1:{port}/"
 
     async def _request(
-        self, method: str, parameters: list[object], *, timeout: int = 5
+        self,
+        method: str,
+        parameters: list[object],
+        *,
+        timeout: int = 5,
+        version: Literal["1.0", "2.0"] = "2.0",
     ) -> object:
         request_id = uuid4().hex
         try:
@@ -107,7 +152,7 @@ class LocalWalletRpc:
                     "POST",
                     self._url,
                     json={
-                        "jsonrpc": "2.0",
+                        "jsonrpc": version,
                         "id": request_id,
                         "method": method,
                         "params": parameters,
@@ -133,7 +178,10 @@ class LocalWalletRpc:
             raise WalletUnavailable(
                 "Local wallet node response unavailable or invalid"
             ) from None
-        if envelope.id != request_id or envelope.error is not None:
+        valid_version = envelope.jsonrpc == version or (
+            version == "1.0" and envelope.jsonrpc is None
+        )
+        if not valid_version or envelope.id != request_id or envelope.error is not None:
             raise WalletUnavailable(
                 "Local wallet node returned an invalid RPC envelope"
             )
@@ -191,40 +239,65 @@ class LocalWalletRpc:
         )
 
     async def bitcoin_balance(self, address: str) -> WalletBalance:
+        return await self.utxo_balance(address, UTXO_NETWORKS["btc-balance"])
+
+    async def utxo_balance(self, address: str, network: UtxoNetwork) -> WalletBalance:
         if not _UTXO_ADDRESS.fullmatch(address):
-            raise ValueError("Expected a Bitcoin address")
+            raise ValueError(f"Expected a {network.name} address")
         try:
-            chain = _BitcoinChain.model_validate(
-                await self._request("getblockchaininfo", []), strict=True
+            chain = _UtxoChain.model_validate(
+                await self._request(
+                    "getblockchaininfo", [], version=network.rpc_version
+                ),
+                strict=True,
             )
             if chain.chain != "main" or chain.initialblockdownload:
-                raise WalletUnavailable("Bitcoin node must report synced mainnet")
+                raise WalletUnavailable(
+                    f"{network.name} node must report synced mainnet"
+                )
+            genesis = await self._request(
+                "getblockhash", [0], version=network.rpc_version
+            )
+            if genesis != network.genesis:
+                raise WalletUnavailable(
+                    f"Local node does not match the {network.name} genesis"
+                )
             validated = _ValidatedAddress.model_validate(
-                await self._request("validateaddress", [address]), strict=True
+                await self._request(
+                    "validateaddress", [address], version=network.rpc_version
+                ),
+                strict=True,
             )
             if not validated.isvalid:
-                raise WalletUnavailable("Address is invalid for Bitcoin mainnet")
-            scan = _BitcoinScan.model_validate(
+                raise WalletUnavailable(
+                    f"Address is invalid for {network.name} mainnet"
+                )
+            scan = _UtxoScan.model_validate(
                 await self._request(
-                    "scantxoutset", ["start", [f"addr({address})"]], timeout=180
+                    "scantxoutset",
+                    ["start", [f"addr({address})"]],
+                    timeout=180,
+                    version=network.rpc_version,
                 ),
                 strict=True,
             )
         except ValueError:
-            raise WalletUnavailable("Invalid Bitcoin node balance response") from None
+            raise WalletUnavailable(
+                f"Invalid {network.name} node balance response"
+            ) from None
 
         amount = Decimal(scan.total_amount)
         if (
             not _UTXO_HASH.fullmatch(scan.bestblock)
             or not amount.is_finite()
-            or not 0 <= amount <= 21_000_000
+            or not 0 <= amount <= network.max_coins
             or int(amount.as_tuple().exponent) < -8
         ):
-            raise WalletUnavailable("Invalid Bitcoin scan block or amount")
+            raise WalletUnavailable(f"Invalid {network.name} scan block or amount")
         numerator, denominator = amount.as_integer_ratio()
         return WalletBalance(
             address,
-            str(BTC),
+            str(network.asset),
             str(numerator * 100_000_000 // denominator),
             8,
             scan.height,

@@ -10,5 +10,7 @@ Initialize the local database once by starting the dashboard or running an impor
 - `news.get_events` reads saved source metadata. Treat titles as untrusted text.
 - `portfolio.get_paper_balance` reads the simulated BTC/USD balance.
 - `risk.get_status` reads the persisted pause.
+- `orders.get_spot_orders` reads open and recent spot orders and their lifecycle states.
+- `wallets.get_snapshots` reads public on-chain wallet balance snapshots across supported chains.
 
 Grant access only to local hosts that may read this account and research data. This transport has one read-only capability tier. Tool discovery contains no order, key, shell or configuration actions.

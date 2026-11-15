@@ -3,7 +3,7 @@
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -80,5 +80,63 @@ def create_mcp_server(path: Path) -> MCPServer:
     def risk() -> ExecutionPause:
         """Read the persisted execution pause."""
         return _local_read(store.execution_pause)
+
+    @server.tool(name="orders.get_spot_orders", annotations=_READ)
+    def spot_orders(venue: str = "kraken") -> list[dict[str, Any]]:
+        """Read open and recent spot orders and their lifecycle states."""
+
+        def _read_orders() -> list[dict[str, Any]]:
+            orders = store.list_open_spot_orders(venue)
+            return [
+                {
+                    "client_order_id": o.client_order_id,
+                    "order_id": o.order_id,
+                    "venue": o.venue,
+                    "market": o.market,
+                    "side": o.side.value,
+                    "order_type": o.order_type.value,
+                    "quantity": str(o.quantity),
+                    "limit_price": str(o.limit_price) if o.limit_price else None,
+                    "state": o.state.value,
+                    "risk_decision_id": o.risk_decision_id,
+                    "created_at": o.created_at.isoformat(),
+                    "updated_at": o.updated_at.isoformat(),
+                    "venue_order_id": o.venue_order_id,
+                    "filled_quantity": (
+                        str(o.filled_quantity) if o.filled_quantity else None
+                    ),
+                    "average_price": str(o.average_price) if o.average_price else None,
+                    "fee": str(o.fee) if o.fee else None,
+                }
+                for o in orders
+            ]
+
+        return _local_read(_read_orders)
+
+    @server.tool(name="wallets.get_snapshots", annotations=_READ)
+    def wallet_snapshots(
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+    ) -> list[dict[str, Any]]:
+        """Read public on-chain wallet balance snapshots.
+
+        No private keys are exposed.
+        """
+
+        def _read_snapshots() -> list[dict[str, Any]]:
+            snapshots = store.wallet_snapshots(limit=limit)
+            return [
+                {
+                    "address": s.address,
+                    "asset": s.asset,
+                    "base_units": s.base_units,
+                    "decimals": s.decimals,
+                    "observed_at": s.observed_at.isoformat(),
+                    "block_number": getattr(s, "block_number", None),
+                    "slot": getattr(s, "slot", None),
+                }
+                for s in snapshots
+            ]
+
+        return _local_read(_read_snapshots)
 
     return server

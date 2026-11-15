@@ -38,4 +38,8 @@ Each tool call that passes argument validation appends one JSON line to `mcp_inv
 
 Unexpected exceptions inside a tool reach the client only as `Error executing tool <name>`, without internal details.
 
+### SDK version
+
+`pyproject.toml` pins `mcp>=2.3,<3`, and `uv.lock` resolves `mcp` 2.3.0 (published 2026-10-02). The range tracks the official Python SDK v2 line and excludes a future v3. The 1.x line receives security fixes only. Upgrade within v2 through the locked dependency review and rerun the MCP tests.
+
 Grant access only to local hosts that may read this account and research data. Tool discovery contains no order, key, shell or configuration actions.

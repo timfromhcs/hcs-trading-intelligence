@@ -1,0 +1,57 @@
+name: Bug report
+description: Report incorrect behaviour in HCS Trading Intelligence.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here; follow SECURITY.md instead.
+        Never paste seed phrases, private keys, API keys, keystore passwords, real wallet addresses or personal transaction data.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `hcs-trader --version` or the Git commit SHA.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Operating mode
+      options: [OFFLINE, DATA_ONLY, PAPER, LIVE, Not applicable]
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Windows 11 x64, macOS 15 arm64, Ubuntu 24.04 x64
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic data, fixtures, regtest, devnet or testnet where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour and redacted logs
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I removed all secrets, wallet material and personal data from this report.
+          required: true

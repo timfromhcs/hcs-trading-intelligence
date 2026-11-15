@@ -2,13 +2,25 @@ name: Foundation checks
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
+  schedule:
+    - cron: '17 3 * * 1'
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
+    # Artifacts are only built and uploaded after the security gate passes.
+    needs: security
+    if: github.event_name != 'schedule'
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +83,10 @@ jobs:
 
   security:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,13 +95,14 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: '0.13.5'
-      - run: uv audit --locked
-      - run: uv audit --locked --only-group packaging
+      - run: mkdir -p security-reports
+      - run: uv audit --locked 2>&1 | tee security-reports/uv-audit.txt
+      - run: uv audit --locked --only-group packaging 2>&1 | tee security-reports/uv-audit-packaging.txt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
-      - run: npm audit --prefix frontend
+      - run: npm audit --prefix frontend 2>&1 | tee security-reports/npm-audit.txt
       - name: Scan Git history for secrets
         shell: bash
         run: |
@@ -93,4 +110,10 @@ jobs:
           curl --fail --silent --show-error --location --output gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
           printf '%s  %s\n' 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb gitleaks.tar.gz | sha256sum --check
           tar -xzf gitleaks.tar.gz gitleaks
-          ./gitleaks git --redact "$GITHUB_WORKSPACE"
+          ./gitleaks git --redact --report-format json --report-path "$GITHUB_WORKSPACE/security-reports/gitleaks.json" "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-reports-${{ github.sha }}
+          path: security-reports/
+          if-no-files-found: warn

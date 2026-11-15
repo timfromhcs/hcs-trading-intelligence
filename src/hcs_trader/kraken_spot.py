@@ -16,6 +16,8 @@ from hcs_trader.domain.lifecycle import OrderState
 
 KRAKEN_PAIR_MAP = {
     "BTC/USD": "XXBTZUSD",
+    "LTC/USD": "XLTCZUSD",
+    "ETH/USD": "XETHZUSD",
 }
 
 

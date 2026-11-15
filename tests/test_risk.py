@@ -104,13 +104,13 @@ def test_risk_rejects_disallowed_venue() -> None:
 
 def test_risk_rejects_disallowed_market() -> None:
     engine = RiskEngine(_active_policy())
-    order = _sample_order(market="ETH/USD")
+    order = _sample_order(market="DGB/USD")
     quote = _sample_quote()
     now = datetime.now(UTC)
 
     decision = engine.evaluate_order(order, quote, DataQuality.FRESH, 0, "v1.0.0", now)
     assert not decision.allowed
-    assert "ETH/USD" in (decision.reason or "")
+    assert "DGB/USD" in (decision.reason or "")
 
 
 def test_risk_rejects_unapproved_strategy() -> None:

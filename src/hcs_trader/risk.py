@@ -28,7 +28,7 @@ class RiskPolicy:
     live_mode_enabled: bool = False
     kill_switch_active: bool = False
     allowed_venues: frozenset[str] = frozenset({"kraken"})
-    allowed_markets: frozenset[str] = frozenset({"BTC/USD"})
+    allowed_markets: frozenset[str] = frozenset({"BTC/USD", "LTC/USD", "ETH/USD"})
     min_notional_usd: Decimal = Decimal("10.00")
     max_notional_usd: Decimal = Decimal("1000.00")
     max_spread_bps: Decimal = Decimal("100.00")  # 1.00%

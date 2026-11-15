@@ -353,3 +353,229 @@ dd { margin: 0; }
 }
 
 
+
+/* Strategy Candidates & Promotion Ladder */
+.candidates-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.candidates-desc {
+  margin: 0.5rem 0 1rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.candidate-register-bar {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.btn-register,
+.btn-promote,
+.btn-refresh {
+  font-size: 0.85rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 0.35rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: #171e2b;
+  color: #fff;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-register:hover:not(:disabled),
+.btn-promote:hover:not(:disabled),
+.btn-refresh:hover:not(:disabled) {
+  border-color: var(--cyan);
+  background: #202b3d;
+}
+
+.btn-promote {
+  background: rgba(38, 166, 154, 0.2);
+  border-color: #26a69a;
+  color: #37d39a;
+}
+
+.btn-promote:hover:not(:disabled) {
+  background: rgba(38, 166, 154, 0.35);
+}
+
+.btn-register {
+  background: rgba(41, 98, 255, 0.2);
+  border-color: #2962ff;
+  color: #70a1ff;
+}
+
+.btn-register:hover:not(:disabled) {
+  background: rgba(41, 98, 255, 0.35);
+}
+
+.candidates-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.candidate-card {
+  padding: 1rem;
+  background: rgba(16, 20, 29, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.candidate-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.candidate-header h4 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.candidate-meta {
+  font-size: 0.8rem;
+}
+
+.candidate-meta code {
+  color: var(--cyan);
+  font-family: monospace;
+}
+
+.stage-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.25rem 0.6rem;
+  border-radius: 0.25rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stage-research {
+  background: rgba(160, 174, 192, 0.2);
+  color: #a0aec0;
+  border: 1px solid #718096;
+}
+
+.stage-unit_tested {
+  background: rgba(66, 153, 225, 0.2);
+  color: #63b3ed;
+  border: 1px solid #4299e1;
+}
+
+.stage-backtested {
+  background: rgba(159, 122, 234, 0.2);
+  color: #b794f4;
+  border: 1px solid #9f7aea;
+}
+
+.stage-walk_forward_passed {
+  background: rgba(102, 126, 234, 0.2);
+  color: #7f9cf5;
+  border: 1px solid #667eea;
+}
+
+.stage-paper_shadow {
+  background: rgba(56, 178, 172, 0.2);
+  color: #4fd1c5;
+  border: 1px solid #38b2ac;
+}
+
+.stage-paper_approved {
+  background: rgba(72, 187, 120, 0.2);
+  color: #68d391;
+  border: 1px solid #48bb78;
+}
+
+.stage-live_canary {
+  background: rgba(237, 137, 54, 0.2);
+  color: #f6ad55;
+  border: 1px solid #ed8936;
+}
+
+.stage-live_bounded {
+  background: rgba(55, 211, 154, 0.25);
+  color: #37d39a;
+  border: 1px solid #37d39a;
+}
+
+.stage-steps-bar {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.3rem 0;
+}
+
+.step-dot {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  transition: background 0.2s ease-in-out;
+}
+
+.step-dot.step-active {
+  background: #37d39a;
+}
+
+.candidate-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 0.6rem;
+}
+
+.candidate-params {
+  font-size: 0.8rem;
+}
+
+.candidate-params code {
+  color: #a0aec0;
+}
+
+.max-promoted {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #37d39a;
+}
+
+.alert-message {
+  padding: 0.6rem 0.9rem;
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  margin: 0.75rem 0;
+}
+
+.alert-success {
+  background: rgba(72, 187, 120, 0.15);
+  border: 1px solid #48bb78;
+  color: #68d391;
+}
+
+.alert-error {
+  background: rgba(245, 101, 101, 0.15);
+  border: 1px solid #e53e3e;
+  color: #fc8181;
+}
+
+.empty-state {
+  font-size: 0.85rem;
+  padding: 1.5rem;
+  text-align: center;
+  background: rgba(16, 20, 29, 0.5);
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+}

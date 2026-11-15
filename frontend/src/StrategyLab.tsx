@@ -38,6 +38,28 @@ interface BacktestResult {
   fills: SimulatedFill[];
 }
 
+export interface StrategyCandidate {
+  candidate_id: string;
+  name: string;
+  version: string;
+  stage: string;
+  parameters: Record<string, unknown>;
+  dataset_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+const PROMOTION_LADDER = [
+  "RESEARCH",
+  "UNIT_TESTED",
+  "BACKTESTED",
+  "WALK_FORWARD_PASSED",
+  "PAPER_SHADOW",
+  "PAPER_APPROVED",
+  "LIVE_CANARY",
+  "LIVE_BOUNDED",
+] as const;
+
 type IndicatorsState =
   | { state: "loading" }
   | { state: "unavailable" }
@@ -54,6 +76,14 @@ function formatDecimal(val: string | null, digits = 2): string {
   return Number.isFinite(num) ? num.toFixed(digits) : val;
 }
 
+function getNextStage(current: string): string | null {
+  const idx = PROMOTION_LADDER.indexOf(current as (typeof PROMOTION_LADDER)[number]);
+  if (idx >= 0 && idx + 1 < PROMOTION_LADDER.length) {
+    return PROMOTION_LADDER[idx + 1];
+  }
+  return null;
+}
+
 export function StrategyLab() {
   const [indState, setIndState] = useState<IndicatorsState>({ state: "loading" });
   const [fastPeriod, setFastPeriod] = useState(10);
@@ -62,6 +92,28 @@ export function StrategyLab() {
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
+
+  const [candidates, setCandidates] = useState<StrategyCandidate[]>([]);
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
+  const [candidateActionMessage, setCandidateActionMessage] = useState<string | null>(null);
+  const [candidateActionError, setCandidateActionError] = useState<string | null>(null);
+  const [registering, setRegistering] = useState(false);
+  const [promotingId, setPromotingId] = useState<string | null>(null);
+
+  async function loadCandidates() {
+    setLoadingCandidates(true);
+    try {
+      const res = await fetch("/api/v1/strategies/candidates", { cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as StrategyCandidate[];
+        setCandidates(data);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingCandidates(false);
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -77,6 +129,7 @@ export function StrategyLab() {
         (indicators) => setIndState({ state: "ready", indicators }),
         () => setIndState({ state: "unavailable" }),
       );
+    loadCandidates();
     return () => controller.abort();
   }, []);
 
@@ -120,6 +173,63 @@ export function StrategyLab() {
       setBacktestError(err instanceof Error ? err.message : "Backtest execution error");
     } finally {
       setBacktestRunning(false);
+    }
+  }
+
+  async function handleRegisterCandidate() {
+    if (!backtestResult) return;
+    setRegistering(true);
+    setCandidateActionError(null);
+    setCandidateActionMessage(null);
+    try {
+      const res = await fetch("/api/v1/strategies/candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: `SMA Crossover (${fastPeriod}/${slowPeriod})`,
+          version: "1.0.0",
+          parameters: { fast: fastPeriod, slow: slowPeriod },
+          dataset_hash: backtestResult.dataset_sha256,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Registration failed" }));
+        throw new Error(err.detail || "Failed to register candidate");
+      }
+      setCandidateActionMessage("Candidate successfully registered in RESEARCH stage!");
+      await loadCandidates();
+    } catch (err: unknown) {
+      setCandidateActionError(err instanceof Error ? err.message : "Error registering candidate");
+    } finally {
+      setRegistering(false);
+    }
+  }
+
+  async function handlePromoteCandidate(candidate: StrategyCandidate) {
+    const next = getNextStage(candidate.stage);
+    if (!next) return;
+    setPromotingId(candidate.candidate_id);
+    setCandidateActionError(null);
+    setCandidateActionMessage(null);
+    try {
+      const res = await fetch(`/api/v1/strategies/candidates/${candidate.candidate_id}/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_stage: next,
+          shadow_fills: 5,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Promotion failed" }));
+        throw new Error(err.detail || `Promotion gate rejected transition to ${next}`);
+      }
+      setCandidateActionMessage(`Successfully promoted candidate to ${next}!`);
+      await loadCandidates();
+    } catch (err: unknown) {
+      setCandidateActionError(err instanceof Error ? err.message : "Error promoting candidate");
+    } finally {
+      setPromotingId(null);
     }
   }
 
@@ -249,20 +359,22 @@ export function StrategyLab() {
         </form>
 
         {backtestError && (
-          <div role="alert" className="alert-banner alert-danger">
+          <div className="quote-warning" role="alert">
             {backtestError}
           </div>
         )}
 
         {backtestResult && (
           <div className="backtest-results">
-            <h4>Simulation Output ({backtestResult.strategy})</h4>
+            <h4>Backtest Performance ({backtestResult.strategy})</h4>
             <div className="status-grid result-grid">
               <div>
                 <dt>Net Return</dt>
                 <dd
                   className={
-                    Number(backtestResult.net_return) >= 0 ? "available" : "quote-warning"
+                    Number(backtestResult.net_return) >= 0
+                      ? "positive-val"
+                      : "negative-val"
                   }
                 >
                   {(Number(backtestResult.net_return) * 100).toFixed(2)}%
@@ -298,6 +410,17 @@ export function StrategyLab() {
               </div>
             )}
 
+            <div className="candidate-register-bar">
+              <button
+                type="button"
+                className="btn-register"
+                onClick={handleRegisterCandidate}
+                disabled={registering}
+              >
+                {registering ? "Registering…" : "Register Strategy as Promotion Candidate"}
+              </button>
+            </div>
+
             {backtestResult.fills.length > 0 && (
               <div className="backtest-fills">
                 <h5>Recent Simulation Fills</h5>
@@ -318,6 +441,93 @@ export function StrategyLab() {
                 </ul>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      <div className="candidates-section">
+        <div className="section-heading">
+          <h3>Strategy Promotion Ladder &amp; Candidates</h3>
+          <button
+            type="button"
+            className="btn-refresh"
+            onClick={loadCandidates}
+            disabled={loadingCandidates}
+          >
+            {loadingCandidates ? "Refreshing…" : "Refresh Ladder"}
+          </button>
+        </div>
+        <p className="muted candidates-desc">
+          Deterministic 8-stage promotion ladder with fail-closed gates (AGENTS.md §8 &amp; §9).
+          Strategies cannot jump stages or trade live without explicit operator verification.
+        </p>
+
+        {candidateActionMessage && (
+          <div className="alert-message alert-success" role="status">
+            {candidateActionMessage}
+          </div>
+        )}
+        {candidateActionError && (
+          <div className="alert-message alert-error" role="alert">
+            {candidateActionError}
+          </div>
+        )}
+
+        {candidates.length === 0 ? (
+          <p className="muted empty-state">
+            No registered strategy candidates yet. Run a backtest above and register it to start the promotion pipeline.
+          </p>
+        ) : (
+          <div className="candidates-list">
+            {candidates.map((cand) => {
+              const nextStage = getNextStage(cand.stage);
+              const stageIndex = PROMOTION_LADDER.indexOf(cand.stage as (typeof PROMOTION_LADDER)[number]);
+              return (
+                <div key={cand.candidate_id} className="candidate-card">
+                  <div className="candidate-header">
+                    <div>
+                      <h4>{cand.name}</h4>
+                      <span className="candidate-meta muted">
+                        Version: {cand.version} · Dataset: <code>{cand.dataset_hash.slice(0, 12)}…</code>
+                      </span>
+                    </div>
+                    <span className={`stage-badge stage-${cand.stage.toLowerCase()}`}>
+                      {cand.stage}
+                    </span>
+                  </div>
+
+                  <div className="stage-steps-bar" aria-label="Promotion Progress">
+                    {PROMOTION_LADDER.map((stg, i) => (
+                      <div
+                        key={stg}
+                        className={`step-dot ${i <= stageIndex ? "step-active" : ""}`}
+                        title={`Stage ${i + 1}: ${stg}`}
+                      />
+                    ))}
+                  </div>
+
+                  <div className="candidate-footer">
+                    <div className="candidate-params muted">
+                      Params: <code>{JSON.stringify(cand.parameters)}</code>
+                    </div>
+                    {nextStage ? (
+                      <button
+                        type="button"
+                        className="btn-promote"
+                        onClick={() => handlePromoteCandidate(cand)}
+                        disabled={promotingId === cand.candidate_id}
+                      >
+                        {promotingId === cand.candidate_id
+                          ? "Evaluating Gate…"
+                          : `Promote to ${nextStage}`}
+                      </button>
+                    ) : (
+                      <span className="max-promoted">Fully Promoted (LIVE_BOUNDED)</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

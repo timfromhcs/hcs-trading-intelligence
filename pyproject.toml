@@ -13,6 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "HCS.media" }]
 dependencies = [
     "fastapi>=0.163.1",
+    "httpx2>=2.16.0",
     "platformdirs>=4.14.5",
     "uvicorn>=0.54.0",
 ]
@@ -22,7 +23,6 @@ hcs-trader = "hcs_trader.__main__:main"
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.16.0",
     "mypy",
     "pytest",
     "pytest-cov",

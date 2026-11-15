@@ -49,9 +49,20 @@ The active authorization permits the local promotion gate to record `LIVE_CANARY
 ## Solana Jupiter swap adapter
 
 The `JupiterSwapAdapter` provides bounded routing and calldata inspection for Solana swaps:
-- **Allowlists:** Jupiter v6 program (`JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`), SPL Token Program, System Program, Compute Budget Program, and verified token mints (`SOL`, `USDC`, `USDT`).
+- **Allowlists (version `JUPITER_PROGRAM_ALLOWLIST_VERSION`):** Jupiter v6 program (`JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`), SPL Token Program, System Program, Compute Budget Program, Associated Token Account program (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`), and verified Solana mainnet-beta token mints (`SOL`, `USDC`, `USDT`). Any other program is rejected. Token-2022 (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`) stays rejected pending a separate review of its extensions.
+- **Associated Token Account rule:** The ATA program is accepted only for `CreateIdempotent` (instruction data is exactly the single byte `1`). The payer and wallet owner must equal the expected signer, the mint must be allowlisted, and the token program account must be the classic SPL Token program. `Create`, `RecoverNested` and any other data fail closed. The caller must pass `signer=` when an ATA instruction is present.
 - **Route checks:** Enforces freshness ($\le 30\text{s}$), max slippage, max price impact, and allowlisted intermediate token hops.
-- **Instruction safety:** Inspects all instruction accounts and program invocations in the transaction payload to prevent unauthorized approvals or third-party program calls.
+- **Instruction safety:** Inspects every instruction's program in the transaction payload to prevent unauthorized approvals or third-party program calls.
+
+### Swap API V2 `/build` response
+
+The adapter targets the [Jupiter Swap API V2 `/build`](https://developers.jup.ag/docs/swap/build) endpoint (`https://api.jup.ag/swap/v2/build`). `/build` returns separate instruction fields, not a flat list. `normalize_build_instructions` maps them in transaction order: `computeBudgetInstructions`, `setupInstructions`, `swapInstruction`, `cleanupInstruction` (nullable), `otherInstructions`, `tipInstruction` (nullable). Each instruction must have a `programId`, an `accounts` list of `{pubkey, isSigner, isWritable}` and base64 `data`. An unknown top-level instruction field, a missing `swapInstruction` or a malformed instruction fails closed. The `swapInstruction` must invoke the Jupiter program. The legacy flat `instructions` payload is still accepted for compatibility.
+
+Prefer `/build`: it returns raw instructions that the application inspects and assembles itself. Per the Jupiter documentation, `/build` charges no Jupiter platform fee. V2 requests need an `x-api-key` header in production, and the key's rate limits apply. The application does not ship a Jupiter API key. The operator configures one locally.
+
+### Network support and testing
+
+Jupiter is deployed on Solana mainnet only ([development basics](https://developers.jup.ag/docs/get-started/development-basics)). **Devnet routing is not supported.** The mint allowlist contains mainnet-beta mints only. Tests use synthetic `/build` fixtures derived from the documented response type plus local inspection. CI never calls the live Jupiter API, and there is no live Jupiter submission path. Before any live Jupiter use, recorded mainnet `/build` fixtures and local transaction simulation must pass.
 
 ## EVM spot swap adapter
 

@@ -801,8 +801,8 @@ class AuditStore:
                 for r in rows
             ]
 
-    def record_startup(self) -> AuditEvent:
-        event = AuditEvent(uuid4().hex, datetime.now(UTC).isoformat(), "app.started")
+    def record_audit_event(self, kind: str) -> AuditEvent:
+        event = AuditEvent(uuid4().hex, datetime.now(UTC).isoformat(), kind)
         with self._connect() as connection, connection:
             connection.execute(
                 "INSERT INTO audit_events (event_id, recorded_at, kind)"
@@ -811,6 +811,9 @@ class AuditStore:
             )
         return event
 
+    def record_startup(self) -> AuditEvent:
+        return self.record_audit_event("app.started")
+
     def latest_event(self) -> AuditEvent | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -818,6 +821,15 @@ class AuditStore:
                 " ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
         return AuditEvent(*row) if row is not None else None
+
+    def list_audit_events(self, limit: int = 50) -> list[AuditEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT event_id, recorded_at, kind FROM audit_events"
+                " ORDER BY rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [AuditEvent(*row) for row in rows]
 
     def backup(self, target: Path) -> None:
         """Write a snapshot to a new destination using SQLite's online backup API."""

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { AuditLog } from "./AuditLog";
 import { MarketQuote } from "./MarketQuote";
 import { NewsTimeline } from "./NewsTimeline";
 import { PaperPortfolio } from "./PaperPortfolio";
@@ -109,6 +110,7 @@ function App() {
         {snapshot.state === "ready" && <SpotOrders />}
         {snapshot.state === "ready" && <WalletSnapshots />}
         {snapshot.state === "ready" && <NewsTimeline />}
+        {snapshot.state === "ready" && <AuditLog />}
         {snapshot.state === "ready" && (
           <section className="panel" aria-labelledby="capabilities-heading">
             <h2 id="capabilities-heading">Capabilities</h2>

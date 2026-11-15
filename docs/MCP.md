@@ -12,5 +12,6 @@ Initialize the local database once by starting the dashboard or running an impor
 - `risk.get_status` reads the persisted pause.
 - `orders.get_spot_orders` reads open and recent spot orders and their lifecycle states.
 - `wallets.get_snapshots` reads public on-chain wallet balance snapshots across supported chains.
+- `audit.get_events` reads the append-only audit event log.
 
 Grant access only to local hosts that may read this account and research data. This transport has one read-only capability tier. Tool discovery contains no order, key, shell or configuration actions.

@@ -139,4 +139,23 @@ def create_mcp_server(path: Path) -> MCPServer:
 
         return _local_read(_read_snapshots)
 
+    @server.tool(name="audit.get_events", annotations=_READ)
+    def audit_events(
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+    ) -> list[dict[str, Any]]:
+        """Read the append-only audit event log."""
+
+        def _read_events() -> list[dict[str, Any]]:
+            events = store.list_audit_events(limit=limit)
+            return [
+                {
+                    "event_id": e.event_id,
+                    "recorded_at": e.recorded_at,
+                    "kind": e.kind,
+                }
+                for e in events
+            ]
+
+        return _local_read(_read_events)
+
     return server

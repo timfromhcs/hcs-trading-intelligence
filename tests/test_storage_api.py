@@ -265,3 +265,20 @@ def test_risk_pause_resume_endpoints(tmp_path: Path) -> None:
 
         # Confirm status resumed
         assert client.get("/api/v1/risk/status").json()["paused"] is False
+
+
+def test_audit_events_endpoint(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    store.record_startup()
+    store.set_execution_pause(True)
+
+    app = create_app(store)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        resp = client.get("/api/v1/audit/events?limit=10")
+        assert resp.status_code == 200
+        events = resp.json()
+        assert len(events) >= 2
+        kinds = [e["kind"] for e in events]
+        assert "execution.paused" in kinds
+        assert "app.started" in kinds

@@ -76,6 +76,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "risk.get_status",
             "orders.get_spot_orders",
             "wallets.get_snapshots",
+            "audit.get_events",
         }
         assert all(
             tool.annotations and tool.annotations.read_only_hint for tool in tools
@@ -100,6 +101,13 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         assert isinstance(wallets_resp.content[0], TextContent)
         wallet_data = json.loads(wallets_resp.content[0].text)
         assert wallet_data["asset"] == "ETH"
+
+        audit_resp = await client.call_tool("audit.get_events", {"limit": 10})
+        assert len(audit_resp.content) >= 1
+        assert isinstance(audit_resp.content[0], TextContent)
+        audit_data = json.loads(audit_resp.content[0].text)
+        assert "event_id" in audit_data
+        assert "kind" in audit_data
 
         out_of_range = await client.call_tool("market.get_candles", {"limit": 1001})
         assert out_of_range.is_error

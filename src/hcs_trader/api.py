@@ -128,6 +128,12 @@ class StoredReport(ReportPayload):
     recorded_at: datetime
 
 
+class AuditEventResponse(BaseModel):
+    event_id: str
+    recorded_at: str
+    kind: str
+
+
 class PaperPortfolio(BaseModel):
     mode: Literal["PAPER"] = "PAPER"
     cash_currency: Literal["USD"] = "USD"
@@ -531,6 +537,25 @@ def create_app(
             raise
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Spot order storage unavailable") from error
+
+    @app.get("/api/v1/audit/events")
+    def list_audit_events(
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> list[AuditEventResponse]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            events = store.list_audit_events(limit=limit)
+            return [
+                AuditEventResponse(
+                    event_id=e.event_id,
+                    recorded_at=e.recorded_at,
+                    kind=e.kind,
+                )
+                for e in events
+            ]
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Audit event storage unavailable") from error
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

@@ -188,6 +188,8 @@ def main() -> None:
     )
     score_parser.add_argument("commitment")
     score_parser.add_argument("file", type=Path)
+    commands.add_parser("pause-execution", help="Persist the local execution pause")
+    commands.add_parser("resume-execution", help="Clear the local execution pause")
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -228,6 +230,12 @@ def main() -> None:
                 score_research(arguments.commitment, arguments.file)
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
+    elif arguments.command in {"pause-execution", "resume-execution"}:
+        paused = arguments.command == "pause-execution"
+        store = local_store()
+        store.initialize()
+        store.set_execution_pause(paused)
+        print("Execution paused." if paused else "Execution pause cleared.")
     else:
         print(Status().model_dump_json())
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hcs_trader import __main__ as launcher
 from hcs_trader.api import create_app
 from hcs_trader.data.kraken import BTC_USD
 from hcs_trader.data.quotes import QuoteService
@@ -173,4 +174,63 @@ def test_paper_order_enforces_simulation_limits(
         )
         assert response.status_code == 409
         assert reason in response.json()["detail"]
+        assert api.get("/api/v1/paper/fills").json() == []
+
+
+def test_persistent_pause_blocks_orders_until_explicit_local_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = AuditStore(tmp_path / "paused.sqlite")
+    monkeypatch.setattr(launcher, "local_store", lambda: AuditStore(store.path))
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "pause-execution"])
+    launcher.main()
+    assert "paused" in capsys.readouterr().out
+    first_pause = store.execution_pause()
+    assert first_pause.paused and first_pause.changed_at is not None
+    launcher.main()
+    assert store.execution_pause() == first_pause
+    event = store.latest_event()
+    assert event is not None and event.kind == "execution.paused"
+    provider = QuoteFixture()
+    app = create_app(
+        store, quote_service=QuoteService(provider, BTC_USD), paper_mode=True
+    )
+    order = {"idempotency_key": "pause-test", "side": "buy", "quantity": "0.01"}
+    with TestClient(app, base_url="http://127.0.0.1") as api:
+        assert api.get("/api/v1/risk/status").json()["paused"] is True
+        assert api.get("/api/v1/system/status").json()["execution_available"] is False
+        rejected = api.post("/api/v1/orders/paper", json=order)
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"] == "Execution is paused"
+        assert provider.calls == 0
+        monkeypatch.setattr("sys.argv", ["hcs-trader", "resume-execution"])
+        launcher.main()
+        assert api.get("/api/v1/risk/status").json()["paused"] is False
+        assert api.post("/api/v1/orders/paper", json=order).status_code == 200
+
+
+def test_pause_during_quote_refresh_blocks_financial_side_effect(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "paused.sqlite")
+
+    class PausingProvider(QuoteFixture):
+        async def get_quote(self, market: MarketId) -> Quote:
+            store.set_execution_pause(True)
+            return await super().get_quote(market)
+
+    app = create_app(
+        store, quote_service=QuoteService(PausingProvider(), BTC_USD), paper_mode=True
+    )
+    with TestClient(app, base_url="http://127.0.0.1") as api:
+        rejected = api.post(
+            "/api/v1/orders/paper",
+            json={
+                "idempotency_key": "paused-in-flight",
+                "side": "buy",
+                "quantity": "0.01",
+            },
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"] == "Execution is paused"
         assert api.get("/api/v1/paper/fills").json() == []

@@ -24,6 +24,8 @@ class PaperExecution:
         if existing is not None:
             return existing
 
+        if (await asyncio.to_thread(self._store.execution_pause)).paused:
+            raise PaperRejected("Execution is paused")
         snapshot = await self._quotes.snapshot()
         quote = snapshot.quote
         if (

@@ -20,10 +20,11 @@ from hcs_trader.domain.paper import (
     PaperConflict,
     PaperFill,
     PaperOrder,
+    PaperRejected,
     book_fill,
 )
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 _PAPER_FILL = TypeAdapter(PaperFill)
 
 
@@ -38,6 +39,12 @@ class AuditEvent:
 class ResearchRecord:
     recorded_at: datetime
     payload: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPause:
+    paused: bool
+    changed_at: datetime | None
 
 
 class AuditStore:
@@ -180,7 +187,51 @@ class AuditStore:
                     ) STRICT
                     """
                 )
-                connection.execute("PRAGMA user_version = 9")
+            if version < 10:
+                connection.execute(
+                    """
+                    CREATE TABLE execution_pause (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+                        changed_at TEXT
+                    ) STRICT
+                    """
+                )
+                connection.execute("INSERT INTO execution_pause VALUES (1, 0, NULL)")
+                connection.execute("PRAGMA user_version = 10")
+
+    @staticmethod
+    def _execution_pause(connection: sqlite3.Connection) -> ExecutionPause:
+        row = connection.execute(
+            "SELECT paused, changed_at FROM execution_pause WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise sqlite3.DatabaseError("Missing execution pause state")
+        paused, changed_at = row
+        return ExecutionPause(
+            bool(paused), datetime.fromisoformat(changed_at) if changed_at else None
+        )
+
+    def execution_pause(self) -> ExecutionPause:
+        with self._connect() as connection:
+            return self._execution_pause(connection)
+
+    def set_execution_pause(self, paused: bool) -> ExecutionPause:
+        with self._connect() as connection, connection:
+            now = datetime.now(UTC).isoformat()
+            updated = connection.execute(
+                "UPDATE execution_pause SET paused = ?, changed_at = ? "
+                "WHERE id = 1 AND paused <> ?",
+                (int(paused), now, int(paused)),
+            )
+            if updated.rowcount:
+                kind = "execution.paused" if paused else "execution.resumed"
+                connection.execute(
+                    "INSERT INTO audit_events (event_id, recorded_at, kind)"
+                    " VALUES (?, ?, ?)",
+                    (uuid4().hex, now, kind),
+                )
+            return self._execution_pause(connection)
 
     def record_paper_fill(
         self,
@@ -197,6 +248,8 @@ class AuditStore:
             if existing is not None:
                 return existing
 
+            if self._execution_pause(connection).paused:
+                raise PaperRejected("Execution is paused")
             balance = self._paper_balance(connection)
             fill = book_fill(balance, order, price, fee, datetime.now(UTC), quote)
             connection.execute(

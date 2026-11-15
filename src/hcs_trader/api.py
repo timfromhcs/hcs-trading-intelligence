@@ -36,7 +36,7 @@ from hcs_trader.domain.paper import (
 )
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.paper_execution import PaperExecution
-from hcs_trader.storage import AuditStore
+from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
 
 _logger = logging.getLogger(__name__)
@@ -182,9 +182,16 @@ def create_app(
             return Status(
                 mode=Mode.PAPER if paper is not None else Mode.DATA_ONLY,
                 network_enabled=True,
-                execution_available=paper is not None,
+                execution_available=paper is not None and not execution_pause().paused,
             )
         return Status()
+
+    @app.get("/api/v1/risk/status")
+    def execution_pause() -> ExecutionPause:
+        try:
+            return store.execution_pause()
+        except (sqlite3.Error, ValueError) as error:
+            raise HTTPException(503, "Execution pause state unavailable") from error
 
     @app.get("/api/v1/system/config")
     def config() -> PublicConfig:

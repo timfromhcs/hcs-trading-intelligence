@@ -23,6 +23,7 @@
 - Added a durable execution pause with local controls and transactional enforcement.
 - Displayed the simulated portfolio, recent fills and execution pause in the dashboard.
 - Added a read-only MCP server over local stdio.
+- Added a local indicator research brief with optional schema-checked llama.cpp commentary.
 
 ## 0.1.0 — development foundation
 

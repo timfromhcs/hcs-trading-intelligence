@@ -33,6 +33,13 @@ from hcs_trader.holdout import (
     freeze_candidate,
     score_holdout,
 )
+from hcs_trader.indicators import calculate_indicators
+from hcs_trader.local_research import (
+    LlamaCppProvider,
+    NoneModelProvider,
+    ResearchReport,
+    research_report,
+)
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
@@ -120,6 +127,28 @@ def score_research(commitment: str, path: Path) -> None:
     print(store.finalize_holdout(commitment, result))
 
 
+async def market_research(
+    interval: int, port: int, alias: str | None, token_file: Path | None
+) -> ResearchReport:
+    store = local_store()
+    store.initialize()
+    evidence = calculate_indicators(
+        store.candle_history(BTC_USD, SOURCE, interval, limit=720)
+    )
+    if alias is None and token_file is None:
+        return await research_report(evidence, NoneModelProvider())
+    if alias is None or token_file is None:
+        raise ValueError("A local model alias and token file are required together")
+    with token_file.open(encoding="utf-8") as handle:
+        token = handle.read(1025).strip()
+    if not token or len(token) > 1024 or any(char.isspace() for char in token):
+        raise ValueError("Local model token file must contain one token")
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await research_report(
+            evidence, LlamaCppProvider(client, port, alias, token)
+        )
+
+
 async def serve(market_data: bool, paper_mode: bool = False) -> None:
     store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -192,6 +221,15 @@ def main() -> None:
     commands.add_parser("pause-execution", help="Persist the local execution pause")
     commands.add_parser("resume-execution", help="Clear the local execution pause")
     commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
+    research_parser = commands.add_parser(
+        "research-brief", help="Read an offline research brief"
+    )
+    research_parser.add_argument(
+        "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
+    )
+    research_parser.add_argument("--llama-port", type=int, default=9931)
+    research_parser.add_argument("--model-alias")
+    research_parser.add_argument("--token-file", type=Path)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -240,6 +278,19 @@ def main() -> None:
         print("Execution paused." if paused else "Execution pause cleared.")
     elif arguments.command == "mcp":
         create_mcp_server(local_store().path).run(transport="stdio")
+    elif arguments.command == "research-brief":
+        try:
+            report = asyncio.run(
+                market_research(
+                    arguments.interval,
+                    arguments.llama_port,
+                    arguments.model_alias,
+                    arguments.token_file,
+                )
+            )
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
     else:
         print(Status().model_dump_json())
 

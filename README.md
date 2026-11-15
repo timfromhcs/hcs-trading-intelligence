@@ -21,6 +21,8 @@ Run `uv run --locked pytest` for the Python suite. Build the frontend before run
 
 Local MCP clients can read archived data using the [stdio server](docs/MCP.md).
 
+`hcs-trader research-brief` returns an offline indicator summary with optional [local llama.cpp commentary](docs/LOCAL_RESEARCH.md).
+
 Start with `uv run --locked hcs-trader serve --public-market-data` to opt into `DATA_ONLY` mode. The BTC/USD dashboard panel and `GET /api/v1/market/quotes` show the best bid and ask, timestamps and quote quality. See the [data source notes](docs/DATA_SOURCES.md).
 
 `GET /api/v1/market/quotes/history?limit=100` reads previously stored quotes from SQLite and works with provider access disabled.

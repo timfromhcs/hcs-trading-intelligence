@@ -29,3 +29,7 @@ Use `hcs-trader tx-status eth HASH` or `hcs-trader tx-status sol SIGNATURE` for 
 Address-wide transaction history, token balances, address derivation, signing and broadcast are separate milestones.
 
 Add `--save` to any balance command to keep the most recently observed snapshot for that chain and public address in local SQLite. `GET /api/v1/wallets` serves those snapshots offline with their original observation time and block or slot. These are previously observed balances. A fresh read requires rerunning the relevant command against the local node. A regular balance command prints its result without saving it.
+
+## Litecoin and DigiByte public testnets
+
+Litecoin and DigiByte checks stay regtest-only. Regtest is the reference test environment for both chains, and public testnet checks are deferred. Neither project publishes an official testnet faucet. DigiByte's public testnet has been reset repeatedly (currently testnet26) and further changes are expected around the planned DigiDollar activation in late 2026. A future DigiByte testnet profile must pin the network by its full genesis hash, as the existing profiles do, so a reset network is rejected instead of silently accepted.

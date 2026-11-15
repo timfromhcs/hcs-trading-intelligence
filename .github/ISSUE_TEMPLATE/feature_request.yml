@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a feature or improvement.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        V1 is spot-only. Leverage, margin, perpetuals, options, lending, auto-yield, automated staking, copy trading and unrestricted bridges are out of scope (AGENTS.md section 0.4).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what blocks you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Safety and risk considerations
+      description: Effects on custody, signing, risk limits, agent or MCP permissions, network access and data licensing.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

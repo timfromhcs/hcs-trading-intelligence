@@ -29,3 +29,7 @@ Initialize the local database once by starting the dashboard or running an impor
 - `release_checklist`: Standardized template for auditing the 30 V1.0.0 release criteria from AGENTS.md Section 18.
 
 Grant access only to local hosts that may read this account and research data. This transport has one read-only capability tier. Tool discovery contains no order, key, shell or configuration actions.
+
+### SDK version
+
+`pyproject.toml` pins `mcp>=2.3,<3`, and `uv.lock` resolves `mcp` 2.3.0 (published 2026-10-02). The range tracks the official Python SDK v2 line and excludes a future v3. The 1.x line receives security fixes only. Upgrade within v2 through the locked dependency review and rerun the MCP tests.

@@ -11,6 +11,14 @@ On 2026-11-15, Windows x64 with an AMD Ryzen 7 7735HS ran the publisher's **LFM2
 - Windows CPU archive SHA-256 `3c128703eca49ad2a70ad51bbf5e1ce36121070a33f27c275804e3f3d5567e48`
 - GGUF SHA-256 `7e6f72643caafc9a68256686638c4d7916f2cec76d1df478d4c3ddcd95a6aed4`
 
+### Model license and runtime notes
+
+LFM refers to Liquid AI's LFM model family. The verified LFM2.5-350M GGUF is published under the **LFM Open License v1.0** (Hugging Face license identifier `lfm1.0`). This is a source-available license, not an OSI open-source license. It limits commercial use to entities below an annual revenue threshold of US$10,000,000. Anyone who redistributes the weights or derivatives must include a copy of the license and the required notices. Read the full terms before use. [License file](https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/blob/main/LICENSE)
+
+The application never bundles or downloads model weights. The operator obtains the GGUF and accepts its license. It runs only through the existing operator-managed llama.cpp adapter described below, and the manifest `license` field records the operator's declaration.
+
+llama.cpp b12423 is newer than the llama.cpp v1.0.0 server hardening release. Do not enable the server's own `--tools` or `--mcp-servers-config` options for this integration. The application supplies the only tool, a frozen read-only indicator snapshot, and the server needs no other tool or MCP access.
+
 The CLI used an isolated SQLite database containing 48 ascending synthetic BTC/USD hourly candles. The direct brief completed in 984 ms and the two-request tool brief in 1,219 ms, measured over one run each after server startup. Both saved status `available`, reported deterministic RSI(14) of 100 and returned `NO_TRADE`. The tool run completed both the validated indicator call and the schema-checked response. Generated commentary was terse and sometimes echoed indicator names or values. This test establishes interoperability for the pinned configuration. Commentary quality and other configurations need separate evaluation.
 
 To repeat against a configured local archive, start the pinned server and run both CLI modes with a matching manifest. The original test used a generated temporary token and a free loopback port.

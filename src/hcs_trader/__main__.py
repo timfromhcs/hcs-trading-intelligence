@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import sqlite3
 import warnings
 from dataclasses import replace
 from datetime import date
@@ -27,6 +28,7 @@ from hcs_trader.data.kraken import (
 )
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.wallet import SolanaBalance, WalletBalance, WalletSnapshot
 from hcs_trader.holdout import (
     CANDIDATE_JSON,
     MAX_HOLDOUT_BYTES,
@@ -43,14 +45,12 @@ from hcs_trader.local_research import (
 )
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
-from hcs_trader.storage import AuditStore
+from hcs_trader.storage import WALLET_SNAPSHOT, AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
 from hcs_trader.wallets import (
     UTXO_NETWORKS,
     LocalWalletRpc,
-    SolanaBalance,
     UtxoNetwork,
-    WalletBalance,
     WalletUnavailable,
 )
 
@@ -284,11 +284,17 @@ def main() -> None:
     )
     wallet_parser.add_argument("address")
     wallet_parser.add_argument("--port", type=int, default=8545)
+    wallet_parser.add_argument(
+        "--save", action="store_true", help="Save the observed balance locally"
+    )
     sol_parser = commands.add_parser(
         "sol-balance", help="Read SOL balance from a local node"
     )
     sol_parser.add_argument("address")
     sol_parser.add_argument("--port", type=int, default=8899)
+    sol_parser.add_argument(
+        "--save", action="store_true", help="Save the observed balance locally"
+    )
     for command, network in UTXO_NETWORKS.items():
         node_parser = commands.add_parser(
             command, help=f"Scan {network.name} UTXOs at a local node"
@@ -296,6 +302,9 @@ def main() -> None:
         node_parser.add_argument("address")
         node_parser.add_argument("--port", type=int, default=network.port)
         node_parser.add_argument("--cookie-file", type=Path, required=True)
+        node_parser.add_argument(
+            "--save", action="store_true", help="Save the observed balance locally"
+        )
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -358,31 +367,35 @@ def main() -> None:
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
-    elif arguments.command == "eth-balance":
+    elif arguments.command in {"eth-balance", "sol-balance", *UTXO_NETWORKS}:
         try:
-            balance = asyncio.run(ethereum_balance(arguments.address, arguments.port))
-        except (WalletUnavailable, ValueError) as error:
-            parser.exit(1, f"{error}\n")
-        print(TypeAdapter(WalletBalance).dump_json(balance).decode("utf-8"))
-    elif arguments.command == "sol-balance":
-        try:
-            sol = asyncio.run(solana_balance(arguments.address, arguments.port))
-        except (WalletUnavailable, ValueError) as error:
-            parser.exit(1, f"{error}\n")
-        print(TypeAdapter(SolanaBalance).dump_json(sol).decode("utf-8"))
-    elif arguments.command in UTXO_NETWORKS:
-        try:
-            balance = asyncio.run(
-                utxo_balance(
-                    arguments.address,
-                    arguments.port,
-                    arguments.cookie_file,
-                    UTXO_NETWORKS[arguments.command],
+            snapshot: WalletSnapshot
+            if arguments.command == "eth-balance":
+                snapshot = asyncio.run(
+                    ethereum_balance(arguments.address, arguments.port)
                 )
-            )
+            elif arguments.command == "sol-balance":
+                snapshot = asyncio.run(
+                    solana_balance(arguments.address, arguments.port)
+                )
+            else:
+                snapshot = asyncio.run(
+                    utxo_balance(
+                        arguments.address,
+                        arguments.port,
+                        arguments.cookie_file,
+                        UTXO_NETWORKS[arguments.command],
+                    )
+                )
+            if arguments.save:
+                store = local_store()
+                store.initialize()
+                store.save_wallet_snapshot(snapshot)
+        except sqlite3.Error:
+            parser.exit(1, "Wallet snapshot storage unavailable\n")
         except (OSError, WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
-        print(TypeAdapter(WalletBalance).dump_json(balance).decode("utf-8"))
+        print(WALLET_SNAPSHOT.dump_json(snapshot).decode("utf-8"))
     else:
         print(Status().model_dump_json())
 

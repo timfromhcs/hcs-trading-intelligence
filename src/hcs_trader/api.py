@@ -34,6 +34,7 @@ from hcs_trader.domain.paper import (
     PaperOrder,
     PaperRejected,
 )
+from hcs_trader.domain.wallet import WalletSnapshot
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.storage import AuditStore, ExecutionPause
@@ -74,6 +75,7 @@ class Capabilities(BaseModel):
     paper_orders: bool = False
     live_orders: bool = False
     mcp: bool = True
+    wallet_snapshots: bool = True
 
 
 class QuoteResponse(BaseModel):
@@ -424,6 +426,16 @@ def create_app(
             raise HTTPException(409, str(error)) from error
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Paper ledger unavailable") from error
+
+    @app.get("/api/v1/wallets")
+    def wallet_snapshots(
+        response: Response, limit: Annotated[int, Query(ge=1, le=100)] = 25
+    ) -> list[WalletSnapshot]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return store.wallet_snapshots(limit=limit)
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Wallet snapshot storage unavailable") from error
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

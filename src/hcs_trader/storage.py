@@ -23,9 +23,11 @@ from hcs_trader.domain.paper import (
     PaperRejected,
     book_fill,
 )
+from hcs_trader.domain.wallet import WalletSnapshot
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _PAPER_FILL = TypeAdapter(PaperFill)
+WALLET_SNAPSHOT = TypeAdapter(WalletSnapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +206,50 @@ class AuditStore:
                     """
                 )
                 connection.execute("INSERT INTO execution_pause VALUES (1, 0, NULL)")
-                connection.execute("PRAGMA user_version = 10")
+            if version < 11:
+                connection.execute(
+                    """
+                    CREATE TABLE wallet_snapshots (
+                        asset TEXT NOT NULL,
+                        address TEXT NOT NULL,
+                        observed_at TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        PRIMARY KEY (asset, address)
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 11")
+
+    def save_wallet_snapshot(self, snapshot: WalletSnapshot) -> None:
+        with self._connect() as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO wallet_snapshots (asset, address, observed_at, payload)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (asset, address) DO UPDATE
+                SET observed_at = excluded.observed_at, payload = excluded.payload
+                WHERE excluded.observed_at > wallet_snapshots.observed_at
+                """,
+                (
+                    snapshot.asset,
+                    snapshot.address,
+                    snapshot.observed_at.isoformat(timespec="microseconds"),
+                    WALLET_SNAPSHOT.dump_json(snapshot).decode("utf-8"),
+                ),
+            )
+
+    def wallet_snapshots(self, *, limit: int) -> list[WalletSnapshot]:
+        if not 1 <= limit <= 100:
+            raise ValueError("Wallet snapshot limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload FROM wallet_snapshots
+                ORDER BY observed_at DESC, asset, address LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [WALLET_SNAPSHOT.validate_json(payload) for (payload,) in rows]
 
     @staticmethod
     def _execution_pause(connection: sqlite3.Connection) -> ExecutionPause:

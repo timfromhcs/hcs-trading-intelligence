@@ -13,6 +13,7 @@ import httpx2
 from pydantic import BaseModel, Field
 
 from hcs_trader.domain.assets import AssetId
+from hcs_trader.domain.wallet import SolanaBalance, WalletBalance
 
 ETH = AssetId.parse("eip155:1/native:ETH")
 BTC = AssetId.parse("bitcoin:mainnet/native:BTC")
@@ -26,28 +27,6 @@ _HASH = re.compile(r"0x[0-9a-fA-F]{64}")
 _ADDRESS = re.compile(r"0x[0-9a-f]{40}")
 _UTXO_ADDRESS = re.compile(r"[A-Za-z0-9]{14,90}")
 _UTXO_HASH = re.compile(r"[0-9a-fA-F]{64}")
-
-
-@dataclass(frozen=True, slots=True)
-class WalletBalance:
-    address: str
-    asset: str
-    base_units: str
-    decimals: int
-    block_number: int
-    block_hash: str
-    observed_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class SolanaBalance:
-    address: str
-    asset: str
-    base_units: str
-    decimals: int
-    slot: int
-    genesis_hash: str
-    observed_at: datetime
 
 
 class WalletUnavailable(Exception):

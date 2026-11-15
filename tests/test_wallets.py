@@ -1,8 +1,16 @@
 import json
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx2
 import pytest
+from fastapi.testclient import TestClient
 
+from hcs_trader import __main__ as launcher
+from hcs_trader.api import create_app
+from hcs_trader.domain.wallet import SolanaBalance, WalletBalance
+from hcs_trader.storage import AuditStore
 from hcs_trader.wallets import (
     ETH,
     SOL,
@@ -224,3 +232,41 @@ async def test_litecoin_rejects_bitcoin_even_if_node_reports_mainnet() -> None:
             await LocalWalletRpc(client, 9332).utxo_balance(
                 "1" + "a" * 25, UTXO_NETWORKS["ltc-balance"]
             )
+
+
+def test_snapshot_save_is_opt_in_and_offline_api_keeps_latest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "wallet.sqlite"
+    now = datetime.now(UTC)
+    ethereum = WalletBalance(_ADDRESS, str(ETH), "123", 18, 35, _BLOCK_HASH, now)
+
+    async def read_fixture(address: str, port: int) -> WalletBalance:
+        assert address == _ADDRESS and port == 8545
+        return ethereum
+
+    monkeypatch.setattr(launcher, "ethereum_balance", read_fixture)
+    monkeypatch.setattr(launcher, "local_store", lambda: AuditStore(path))
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "eth-balance", _ADDRESS])
+    launcher.main()
+    assert not path.exists()
+    assert json.loads(capsys.readouterr().out)["base_units"] == "123"
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "eth-balance", _ADDRESS, "--save"])
+    launcher.main()
+
+    store = AuditStore(path)
+    store.save_wallet_snapshot(
+        replace(ethereum, observed_at=now - timedelta(seconds=1), base_units="456")
+    )
+    solana = SolanaBalance(
+        "1" * 32, str(SOL), "789", 9, 100, SOL_GENESIS, now + timedelta(seconds=1)
+    )
+    store.save_wallet_snapshot(solana)
+    with TestClient(create_app(AuditStore(path)), base_url="http://127.0.0.1") as api:
+        result = api.get("/api/v1/wallets")
+        assert result.headers["cache-control"] == "no-store"
+        recent, prior = result.json()
+        assert recent["asset"] == str(SOL) and recent["slot"] == 100
+        assert prior["asset"] == str(ETH) and prior["base_units"] == "123"
+        assert api.get("/api/v1/wallets?limit=1").json() == [recent]
+        assert api.get("/api/v1/wallets?limit=101").status_code == 422

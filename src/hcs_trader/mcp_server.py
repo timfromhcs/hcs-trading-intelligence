@@ -3,6 +3,8 @@
 import json
 import sqlite3
 from collections.abc import Callable
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -11,11 +13,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field, ValidationError
 
+from hcs_trader.backtest import BacktestConfig, BacktestResult, SimulatedFill
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
 from hcs_trader.domain.paper import PaperBalance
 from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.promotion import compare_champion_challenger
 from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
 
@@ -159,6 +163,67 @@ def create_mcp_server(path: Path) -> MCPServer:
             ]
 
         return _local_read(_read_events)
+
+    @server.tool(name="quant.compare_strategy_candidates", annotations=_READ)
+    def compare_candidates_tool(
+        champion_net_return: str,
+        champion_max_drawdown: str,
+        champion_trades: int,
+        challenger_net_return: str,
+        challenger_max_drawdown: str,
+        challenger_trades: int,
+    ) -> dict[str, Any]:
+        """Compare backtest results for champion/challenger outperformance."""
+        now = datetime.now(UTC)
+        dummy_config = BacktestConfig()
+
+        def _make_result(
+            name: str, net_ret: str, max_dd: str, trades: int
+        ) -> BacktestResult:
+            fills = tuple(
+                SimulatedFill(
+                    side="buy" if i % 2 == 0 else "sell",
+                    signal_at=now,
+                    filled_at=now,
+                    requested_quantity=Decimal("1"),
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    fee=Decimal("0.16"),
+                    partial=False,
+                )
+                for i in range(trades)
+            )
+            return BacktestResult(
+                strategy=name,
+                dataset_sha256="dummy",
+                candle_count=100,
+                dataset_opened_at=now,
+                dataset_closed_at=now,
+                config=dummy_config,
+                ending_cash=Decimal("10000"),
+                ending_quantity=Decimal("0"),
+                ending_equity=Decimal("10000") * (Decimal("1") + Decimal(net_ret)),
+                net_return=Decimal(net_ret),
+                max_drawdown=Decimal(max_dd),
+                total_fees=Decimal("0"),
+                fills=fills,
+            )
+
+        champ = _make_result(
+            "champion", champion_net_return, champion_max_drawdown, champion_trades
+        )
+        chall = _make_result(
+            "challenger",
+            challenger_net_return,
+            challenger_max_drawdown,
+            challenger_trades,
+        )
+        verdict = compare_champion_challenger("champion", champ, "challenger", chall)
+        return {
+            "challenger_wins": verdict.challenger_wins,
+            "reasons": verdict.reasons,
+            "metrics": verdict.metrics,
+        }
 
     @server.resource("hcs://system/capabilities", mime_type="application/json")
     def capabilities_resource() -> str:

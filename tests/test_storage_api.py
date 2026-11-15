@@ -40,7 +40,7 @@ def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("PRAGMA user_version").fetchone() == (12,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (13,)
 
 
 def test_v1_upgrade_retains_audit_and_deduplicates_quotes(tmp_path: Path) -> None:
@@ -299,3 +299,40 @@ def test_skills_endpoint(tmp_path: Path) -> None:
         assert "portfolio-operator" in names
         assert "risk-auditor" in names
         assert "release-engineer" in names
+
+
+def test_strategy_candidates_storage_and_api(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    app = create_app(store)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        create_resp = client.post(
+            "/api/v1/strategies/candidates",
+            json={
+                "name": "RSI Trend Candidate",
+                "version": "1.0.0",
+                "parameters": {"fast": 14, "slow": 28},
+                "dataset_hash": "sha-cand-01",
+            },
+        )
+        assert create_resp.status_code == 200
+        cand_data = create_resp.json()
+        cand_id = cand_data["candidate_id"]
+        assert cand_data["stage"] == "RESEARCH"
+
+        list_resp = client.get("/api/v1/strategies/candidates")
+        assert list_resp.status_code == 200
+        assert len(list_resp.json()) == 1
+
+        promote_resp = client.post(
+            f"/api/v1/strategies/candidates/{cand_id}/promote",
+            json={"target_stage": "UNIT_TESTED"},
+        )
+        assert promote_resp.status_code == 200
+        res = promote_resp.json()
+        assert res["candidate"]["stage"] == "UNIT_TESTED"
+        assert res["gate_result"]["passed"] is True
+
+        audit_events = store.list_audit_events(limit=5)
+        kinds = [e.kind for e in audit_events]
+        assert "strategy.promoted.unit_tested" in kinds

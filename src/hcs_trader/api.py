@@ -6,13 +6,14 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
@@ -37,6 +38,11 @@ from hcs_trader.domain.paper import (
 from hcs_trader.domain.wallet import WalletSnapshot
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.paper_execution import PaperExecution
+from hcs_trader.promotion import (
+    PromotionStage,
+    StrategyCandidate,
+    evaluate_promotion_gate,
+)
 from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
@@ -141,6 +147,19 @@ class SkillResponse(BaseModel):
     purpose: str
     capability_tier: str
     required_tools: list[str]
+
+
+class CreateCandidateRequest(BaseModel):
+    name: str
+    version: str
+    parameters: dict[str, Any] = {}
+    dataset_hash: str
+
+
+class PromoteCandidateRequest(BaseModel):
+    target_stage: PromotionStage
+    shadow_fills: int = 0
+    is_live_enabled: bool = False
 
 
 class PaperPortfolio(BaseModel):
@@ -579,6 +598,74 @@ def create_app(
             )
             for s in list_skills()
         ]
+
+    @app.get("/api/v1/strategies/candidates")
+    def list_candidates(
+        response: Response,
+        stage: PromotionStage | None = None,
+    ) -> list[StrategyCandidate]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return store.list_strategy_candidates(stage=stage)
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(
+                503, "Strategy candidate storage unavailable"
+            ) from error
+
+    @app.post("/api/v1/strategies/candidates")
+    def create_candidate(
+        req: CreateCandidateRequest, request: Request
+    ) -> StrategyCandidate:
+        _verify_local_origin(request, "Create candidate")
+        candidate = StrategyCandidate(
+            candidate_id=uuid4().hex,
+            name=req.name,
+            version=req.version,
+            stage=PromotionStage.RESEARCH,
+            parameters=req.parameters,
+            dataset_hash=req.dataset_hash,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        try:
+            store.save_strategy_candidate(candidate)
+            return candidate
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Failed to save strategy candidate") from error
+
+    @app.post("/api/v1/strategies/candidates/{candidate_id}/promote")
+    def promote_candidate_endpoint(
+        candidate_id: str,
+        req: PromoteCandidateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        _verify_local_origin(request, "Promote candidate")
+        candidate = store.get_strategy_candidate(candidate_id)
+        if candidate is None:
+            raise HTTPException(404, f"Strategy candidate '{candidate_id}' not found")
+        verdict = evaluate_promotion_gate(
+            candidate,
+            req.target_stage,
+            shadow_fills=req.shadow_fills,
+            is_live_enabled=req.is_live_enabled,
+        )
+        if not verdict.passed:
+            raise HTTPException(
+                409,
+                f"Promotion gate rejected: {'; '.join(verdict.reasons)}",
+            )
+        updated = store.update_candidate_stage(candidate_id, req.target_stage)
+        return {
+            "candidate": updated.model_dump(mode="json"),
+            "gate_result": {
+                "candidate_id": verdict.candidate_id,
+                "from_stage": verdict.from_stage.value,
+                "to_stage": verdict.to_stage.value,
+                "passed": verdict.passed,
+                "reasons": verdict.reasons,
+                "evaluated_at": verdict.evaluated_at.isoformat(),
+            },
+        }
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

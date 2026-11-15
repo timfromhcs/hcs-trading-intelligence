@@ -1,5 +1,6 @@
 """Versioned local SQLite storage for audit events and quote history."""
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -26,8 +27,9 @@ from hcs_trader.domain.paper import (
     book_fill,
 )
 from hcs_trader.domain.wallet import WalletSnapshot
+from hcs_trader.promotion import PromotionStage, StrategyCandidate
 
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _PAPER_FILL = TypeAdapter(PaperFill)
 WALLET_SNAPSHOT = TypeAdapter(WalletSnapshot)
 
@@ -249,6 +251,26 @@ class AuditStore:
                     "ON spot_orders (venue, market, state)"
                 )
                 connection.execute("PRAGMA user_version = 12")
+            if version < 13:
+                connection.execute(
+                    """
+                    CREATE TABLE strategy_candidates (
+                        candidate_id TEXT PRIMARY KEY NOT NULL,
+                        name TEXT NOT NULL,
+                        version TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        parameters TEXT NOT NULL,
+                        dataset_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX strategy_candidates_stage "
+                    "ON strategy_candidates (stage, updated_at DESC)"
+                )
+                connection.execute("PRAGMA user_version = 13")
 
     def save_wallet_snapshot(self, snapshot: WalletSnapshot) -> None:
         with self._connect() as connection, connection:
@@ -830,6 +852,116 @@ class AuditStore:
                 (limit,),
             ).fetchall()
         return [AuditEvent(*row) for row in rows]
+
+    def save_strategy_candidate(self, candidate: StrategyCandidate) -> None:
+        with self._connect() as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO strategy_candidates (
+                    candidate_id, name, version, stage, parameters,
+                    dataset_hash, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    name = excluded.name,
+                    version = excluded.version,
+                    stage = excluded.stage,
+                    parameters = excluded.parameters,
+                    dataset_hash = excluded.dataset_hash,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    candidate.candidate_id,
+                    candidate.name,
+                    candidate.version,
+                    candidate.stage.value,
+                    json.dumps(candidate.parameters),
+                    candidate.dataset_hash,
+                    candidate.created_at.isoformat(),
+                    candidate.updated_at.isoformat(),
+                ),
+            )
+
+    def get_strategy_candidate(self, candidate_id: str) -> StrategyCandidate | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT candidate_id, name, version, stage, parameters,
+                       dataset_hash, created_at, updated_at
+                FROM strategy_candidates WHERE candidate_id = ?
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return StrategyCandidate(
+                candidate_id=row[0],
+                name=row[1],
+                version=row[2],
+                stage=PromotionStage(row[3]),
+                parameters=json.loads(row[4]),
+                dataset_hash=row[5],
+                created_at=datetime.fromisoformat(row[6]),
+                updated_at=datetime.fromisoformat(row[7]),
+            )
+
+    def list_strategy_candidates(
+        self, stage: PromotionStage | None = None
+    ) -> list[StrategyCandidate]:
+        with self._connect() as connection:
+            if stage is not None:
+                rows = connection.execute(
+                    """
+                    SELECT candidate_id, name, version, stage, parameters,
+                           dataset_hash, created_at, updated_at
+                    FROM strategy_candidates WHERE stage = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (stage.value,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT candidate_id, name, version, stage, parameters,
+                           dataset_hash, created_at, updated_at
+                    FROM strategy_candidates
+                    ORDER BY updated_at DESC
+                    """
+                ).fetchall()
+            return [
+                StrategyCandidate(
+                    candidate_id=r[0],
+                    name=r[1],
+                    version=r[2],
+                    stage=PromotionStage(r[3]),
+                    parameters=json.loads(r[4]),
+                    dataset_hash=r[5],
+                    created_at=datetime.fromisoformat(r[6]),
+                    updated_at=datetime.fromisoformat(r[7]),
+                )
+                for r in rows
+            ]
+
+    def update_candidate_stage(
+        self, candidate_id: str, new_stage: PromotionStage
+    ) -> StrategyCandidate:
+        with self._connect() as connection, connection:
+            now = datetime.now(UTC).isoformat()
+            updated = connection.execute(
+                "UPDATE strategy_candidates SET stage = ?, updated_at = ? "
+                "WHERE candidate_id = ?",
+                (new_stage.value, now, candidate_id),
+            )
+            if updated.rowcount == 0:
+                raise ValueError(f"Strategy candidate '{candidate_id}' not found")
+            connection.execute(
+                "INSERT INTO audit_events (event_id, recorded_at, kind) "
+                "VALUES (?, ?, ?)",
+                (uuid4().hex, now, f"strategy.promoted.{new_stage.value.lower()}"),
+            )
+        candidate = self.get_strategy_candidate(candidate_id)
+        if candidate is None:
+            raise RuntimeError("Failed to reload updated candidate")
+        return candidate
 
     def backup(self, target: Path) -> None:
         """Write a snapshot to a new destination using SQLite's online backup API."""

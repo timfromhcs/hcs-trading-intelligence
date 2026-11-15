@@ -77,6 +77,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "orders.get_spot_orders",
             "wallets.get_snapshots",
             "audit.get_events",
+            "quant.compare_strategy_candidates",
         }
         assert all(
             tool.annotations and tool.annotations.read_only_hint for tool in tools
@@ -108,6 +109,22 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         audit_data = json.loads(audit_resp.content[0].text)
         assert "event_id" in audit_data
         assert "kind" in audit_data
+
+        compare_resp = await client.call_tool(
+            "quant.compare_strategy_candidates",
+            {
+                "champion_net_return": "0.10",
+                "champion_max_drawdown": "0.15",
+                "champion_trades": 10,
+                "challenger_net_return": "0.18",
+                "challenger_max_drawdown": "0.10",
+                "challenger_trades": 12,
+            },
+        )
+        assert len(compare_resp.content) == 1
+        assert isinstance(compare_resp.content[0], TextContent)
+        compare_data = json.loads(compare_resp.content[0].text)
+        assert compare_data["challenger_wins"] is True
 
         out_of_range = await client.call_tool("market.get_candles", {"limit": 1001})
         assert out_of_range.is_error

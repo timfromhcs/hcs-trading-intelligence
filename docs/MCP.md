@@ -13,6 +13,7 @@ Initialize the local database once by starting the dashboard or running an impor
 - `orders.get_spot_orders` reads open and recent spot orders and their lifecycle states.
 - `wallets.get_snapshots` reads public on-chain wallet balance snapshots across supported chains.
 - `audit.get_events` reads the append-only audit event log.
+- `quant.compare_strategy_candidates` compares two backtest results to evaluate champion/challenger outperformance.
 
 ### Resources
 - `hcs://system/capabilities`: Machine-readable JSON summary of system features and enabled adapters.

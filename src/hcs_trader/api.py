@@ -37,6 +37,7 @@ from hcs_trader.domain.paper import (
 from hcs_trader.domain.wallet import WalletSnapshot
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.paper_execution import PaperExecution
+from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
 
@@ -132,6 +133,14 @@ class AuditEventResponse(BaseModel):
     event_id: str
     recorded_at: str
     kind: str
+
+
+class SkillResponse(BaseModel):
+    name: str
+    version: str
+    purpose: str
+    capability_tier: str
+    required_tools: list[str]
 
 
 class PaperPortfolio(BaseModel):
@@ -556,6 +565,20 @@ def create_app(
             ]
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Audit event storage unavailable") from error
+
+    @app.get("/api/v1/skills")
+    def list_available_skills(response: Response) -> list[SkillResponse]:
+        response.headers["Cache-Control"] = "no-store"
+        return [
+            SkillResponse(
+                name=s.name,
+                version=s.version,
+                purpose=s.purpose,
+                capability_tier=s.capability_tier,
+                required_tools=s.required_tools,
+            )
+            for s in list_skills()
+        ]
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

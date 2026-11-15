@@ -19,6 +19,7 @@ def main() -> None:
         parser.error("The single-file build currently targets Windows")
     layout = "desktop-single" if args.onefile else "desktop"
     assets = ROOT / "src" / "hcs_trader" / "ui_assets"
+    skills = ROOT / "src" / "hcs_trader" / "skills"
     if not (assets / "index.html").is_file():
         raise SystemExit("Build the frontend before building the desktop application.")
 
@@ -41,6 +42,8 @@ def main() -> None:
             "hcs-trader",
             "--add-data",
             f"{assets}:hcs_trader/ui_assets",
+            "--add-data",
+            f"{skills}:hcs_trader/skills",
             str(ROOT / "scripts" / "desktop_entry.py"),
         ],
         cwd=ROOT,

@@ -52,4 +52,6 @@ HCS Trading Intelligence is built as a local-first, modular monolith designed fo
 3. **Custody & Signing Isolation:** Long-term reserves remain physically isolated in cold wallets outside the running application. Private keys for hot trading floats are stored encrypted using Scrypt KDF and AES-256-GCM with associated data binding. Signers independently decode and validate transaction payloads against pre-approved plans before generating signatures.
 4. **Spot-Only, Fail-Closed Execution:** The execution engine strictly prohibits margin, borrowing, leverage, or bridge operations. If a submission encounters an ambiguous network response or timeout, it immediately transitions to `RECONCILIATION_REQUIRED` and halts further orders until venue reconciliation confirms state.
 5. **Durable Kill Switch:** The emergency pause is persisted in SQLite across process restarts and crashes. When triggered, all new order submissions and signings are blocked.
+6. **Portable Agent Skills:** Structured, versioned `SKILL.md` specifications in `src/hcs_trader/skills/` (`market-research`, `strategy-lab`, `portfolio-operator`, `risk-auditor`, `release-engineer`) define strict capability tiers, trusted/untrusted data boundaries, ordered workflows, stop conditions, and explicit forbidden actions.
+
 

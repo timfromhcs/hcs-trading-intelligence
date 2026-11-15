@@ -282,3 +282,20 @@ def test_audit_events_endpoint(tmp_path: Path) -> None:
         kinds = [e["kind"] for e in events]
         assert "execution.paused" in kinds
         assert "app.started" in kinds
+
+
+def test_skills_endpoint(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    app = create_app(store)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        resp = client.get("/api/v1/skills")
+        assert resp.status_code == 200
+        skills = resp.json()
+        assert len(skills) == 5
+        names = {s["name"] for s in skills}
+        assert "market-research" in names
+        assert "strategy-lab" in names
+        assert "portfolio-operator" in names
+        assert "risk-auditor" in names
+        assert "release-engineer" in names

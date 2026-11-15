@@ -14,4 +14,16 @@ Initialize the local database once by starting the dashboard or running an impor
 - `wallets.get_snapshots` reads public on-chain wallet balance snapshots across supported chains.
 - `audit.get_events` reads the append-only audit event log.
 
+### Resources
+- `hcs://system/capabilities`: Machine-readable JSON summary of system features and enabled adapters.
+- `hcs://risk/policy`: Pre-trade risk policy bounds (notional limits, max spread, max slippage, kill-switch status).
+- `hcs://skills/registry`: Catalog of registered portable agent skills and required capability tiers.
+- `hcs://audit/recent`: Recent append-only audit events.
+
+### Prompts
+- `market_brief`: Standardized template for synthesizing prices, spreads, and news into a neutral market brief.
+- `risk_review`: Standardized template for inspecting open spot orders, spread thresholds, and kill-switch state.
+- `strategy_postmortem`: Standardized template for evaluating backtest simulation results and fee models.
+- `release_checklist`: Standardized template for auditing the 30 V1.0.0 release criteria from AGENTS.md Section 18.
+
 Grant access only to local hosts that may read this account and research data. This transport has one read-only capability tier. Tool discovery contains no order, key, shell or configuration actions.

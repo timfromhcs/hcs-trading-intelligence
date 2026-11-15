@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from mcp import Client, StdioServerParameters
-from mcp.types import TextContent
+from mcp.types import TextContent, TextResourceContents
 
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
@@ -113,6 +113,36 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         assert out_of_range.is_error
         unknown = await client.call_tool("orders.place_live", {"quantity": "1"})
         assert unknown.is_error
+
+        # Verify MCP Resources
+        resources = await client.list_resources()
+        resource_uris = {str(r.uri) for r in resources.resources}
+        assert "hcs://system/capabilities" in resource_uris
+        assert "hcs://risk/policy" in resource_uris
+        assert "hcs://skills/registry" in resource_uris
+        assert "hcs://audit/recent" in resource_uris
+
+        policy_res = await client.read_resource("hcs://risk/policy")
+        assert len(policy_res.contents) >= 1
+        content_item = policy_res.contents[0]
+        assert isinstance(content_item, TextResourceContents)
+        policy_data = json.loads(content_item.text)
+        assert policy_data["kill_switch_paused"] is True
+        assert policy_data["min_notional_usd"] == "10.00"
+
+        # Verify MCP Prompts
+        prompts = await client.list_prompts()
+        prompt_names = {p.name for p in prompts.prompts}
+        assert "market_brief" in prompt_names
+        assert "risk_review" in prompt_names
+        assert "strategy_postmortem" in prompt_names
+        assert "release_checklist" in prompt_names
+
+        brief = await client.get_prompt("market_brief", {"market": "BTC/USD"})
+        assert len(brief.messages) == 1
+        msg_content = brief.messages[0].content
+        assert isinstance(msg_content, TextContent)
+        assert "BTC/USD" in msg_content.text
 
 
 def test_read_only_database_rejects_storage_mutation(tmp_path: Path) -> None:

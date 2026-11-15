@@ -14,11 +14,13 @@ Initialize the local database once by starting the dashboard or running an impor
 - `orders.get_spot_orders` reads open and recent spot orders and their lifecycle states.
 - `wallets.get_snapshots` reads public on-chain wallet balance snapshots across supported chains.
 - `audit.get_events` reads the append-only audit event log.
+- `strategies.get_candidates` reads registered strategy candidates with optional promotion stage filter.
 - `quant.compare_strategy_candidates` compares supplied net return and maximum drawdown ratios alongside fill counts. A 10% return is `"0.10"`. The `*_trades` arguments count simulated fills. The verdict is advisory.
 
 ### Resources
 - `hcs://system/capabilities`: Machine-readable JSON summary of system features, enabled adapters and the MCP capability tiers this server grants (`mcp_granted_tiers`).
 - `hcs://risk/policy`: Pre-trade risk policy bounds built from the defaults of the enforced `RiskPolicy` (allowlisted venues and markets, notional limits, spread and slippage caps in basis points and percent, maximum open orders per venue) plus the persisted kill-switch status. With the current defaults the spread cap is 100 bps (1.00%) and the open-order cap is 2. Quote freshness is required (`requires_fresh_quote`); the age window is set by the quote-quality check, not by this resource.
+- `hcs://strategies/candidates`: Registered strategy candidates and their current promotion ladder stages.
 - `hcs://skills/registry`: Catalog of registered portable agent skills and required capability tiers.
 - `hcs://audit/recent`: Recent append-only audit events.
 

@@ -514,6 +514,24 @@ def main() -> None:
     commands.add_parser(
         "spot-canary-revoke", help="Revoke the local spot canary approval"
     )
+    strategy_list = commands.add_parser(
+        "strategy-list", help="List registered strategy candidates"
+    )
+    strategy_list.add_argument(
+        "--stage",
+        choices=[s.value for s in PromotionStage],
+        help="Filter candidates by promotion stage",
+    )
+    strategy_list.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_show = commands.add_parser(
+        "strategy-show", help="Show details of a registered strategy candidate"
+    )
+    strategy_show.add_argument("candidate_id", help="Candidate identifier")
+    strategy_show.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
     research_parser = argparse.ArgumentParser(add_help=False)
     research_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
@@ -691,6 +709,40 @@ def main() -> None:
             parser.exit(1, "Canary authorization was not confirmed\n")
         except (OSError, sqlite3.Error, RiskRejected, ValueError) as error:
             parser.exit(1, f"{error}\n")
+    elif arguments.command == "strategy-list":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            stage = PromotionStage(arguments.stage) if arguments.stage else None
+            candidates = store.list_strategy_candidates(stage=stage)
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(json.dumps([c.model_dump(mode="json") for c in candidates], indent=2))
+    elif arguments.command == "strategy-show":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            candidate = store.get_strategy_candidate(arguments.candidate_id)
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        if candidate is None:
+            parser.exit(1, f"Strategy candidate '{arguments.candidate_id}' not found\n")
+        data = candidate.model_dump(mode="json")
+        shadow = store.latest_shadow_run(candidate.candidate_id)
+        if shadow is not None:
+            data["latest_shadow_run_id"] = shadow[0]
+        data["has_canary_approval"] = store.has_spot_canary_approval(
+            candidate.candidate_id, datetime.now(UTC)
+        )
+        print(json.dumps(data, indent=2))
     elif arguments.command == "kraken-validate":
         try:
             validation = asyncio.run(

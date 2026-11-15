@@ -29,6 +29,7 @@ from hcs_trader.mcp_server import (
     create_mcp_server,
     tool_tier,
 )
+from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskPolicy
 from hcs_trader.storage import AuditStore
 
@@ -86,6 +87,18 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             observed_at=now,
         )
     )
+    store.save_strategy_candidate(
+        StrategyCandidate(
+            candidate_id="cand-mcp-01",
+            name="SMA-Trend",
+            version="1.0.0",
+            stage=PromotionStage.RESEARCH,
+            parameters={"fast": 10, "slow": 30},
+            dataset_hash="hash123",
+            created_at=now,
+            updated_at=now,
+        )
+    )
     transport = StdioServerParameters(
         command=sys.executable,
         args=[
@@ -109,6 +122,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "orders.get_spot_orders",
             "wallets.get_snapshots",
             "audit.get_events",
+            "strategies.get_candidates",
             "quant.compare_strategy_candidates",
         }
         assert all(
@@ -150,6 +164,22 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         assert "event_id" in audit_data
         assert "kind" in audit_data
 
+        cand_resp = await client.call_tool("strategies.get_candidates")
+        assert len(cand_resp.content) == 1
+        assert isinstance(cand_resp.content[0], TextContent)
+        cand_data = json.loads(cand_resp.content[0].text)
+        assert cand_data["candidate_id"] == "cand-mcp-01"
+        assert cand_data["stage"] == "RESEARCH"
+
+        cand_filtered = await client.call_tool(
+            "strategies.get_candidates", {"stage": "RESEARCH"}
+        )
+        assert not cand_filtered.is_error
+        cand_empty = await client.call_tool(
+            "strategies.get_candidates", {"stage": "LIVE_BOUNDED"}
+        )
+        assert cand_empty.content == []
+
         metrics = {
             "champion_net_return": "0.10",
             "champion_max_drawdown": "0.15",
@@ -181,6 +211,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         resource_uris = {str(r.uri) for r in resources.resources}
         assert "hcs://system/capabilities" in resource_uris
         assert "hcs://risk/policy" in resource_uris
+        assert "hcs://strategies/candidates" in resource_uris
         assert "hcs://skills/registry" in resource_uris
         assert "hcs://audit/recent" in resource_uris
 
@@ -387,6 +418,11 @@ async def test_every_resource_and_prompt_renders(tmp_path: Path) -> None:
         item = audit.contents[0]
         assert isinstance(item, TextResourceContents)
         assert any(event["kind"] == "fixture" for event in json.loads(item.text))
+
+        candidates = await client.read_resource("hcs://strategies/candidates")
+        item = candidates.contents[0]
+        assert isinstance(item, TextResourceContents)
+        assert json.loads(item.text) == []
 
         for name, arguments, expected in (
             ("market_brief", {"market": "ETH/USD"}, "ETH/USD"),

@@ -28,7 +28,11 @@ from hcs_trader.domain.news import NewsItem
 from hcs_trader.domain.paper import PaperBalance
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.local_research import ResearchHistory
-from hcs_trader.promotion import ComparisonMetrics, compare_strategy_metrics
+from hcs_trader.promotion import (
+    ComparisonMetrics,
+    PromotionStage,
+    compare_strategy_metrics,
+)
 from hcs_trader.risk import RiskPolicy
 from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
@@ -66,6 +70,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "orders.get_spot_orders": CapabilityTier.READ,
     "wallets.get_snapshots": CapabilityTier.READ,
     "audit.get_events": CapabilityTier.READ,
+    "strategies.get_candidates": CapabilityTier.READ,
     "quant.compare_strategy_candidates": CapabilityTier.READ,
 }
 
@@ -347,6 +352,27 @@ def create_mcp_server(
             "metrics": verdict.metrics,
         }
 
+    @read_tool("strategies.get_candidates")
+    def strategy_candidates_tool(
+        stage: Annotated[
+            str | None,
+            Field(description="Optional promotion stage filter"),
+        ] = None,
+    ) -> list[dict[str, Any]]:
+        """List registered strategy candidates and their promotion ladder stages."""
+
+        def _read_candidates() -> list[dict[str, Any]]:
+            filter_stage = None
+            if stage is not None:
+                try:
+                    filter_stage = PromotionStage(stage.strip().upper())
+                except ValueError as error:
+                    raise ToolError(f"Unknown promotion stage '{stage}'") from error
+            candidates = store.list_strategy_candidates(stage=filter_stage)
+            return [cand.model_dump(mode="json") for cand in candidates]
+
+        return _local_read(_read_candidates)
+
     @server.resource("hcs://system/capabilities", mime_type="application/json")
     def capabilities_resource() -> str:
         """Current system capabilities and feature availability."""
@@ -360,9 +386,20 @@ def create_mcp_server(
                 "mcp": True,
                 "wallet_snapshots": True,
                 "skills": True,
+                "strategy_candidates": True,
                 "mcp_granted_tiers": sorted(tier.value for tier in granted_tiers),
             }
         )
+
+    @server.resource("hcs://strategies/candidates", mime_type="application/json")
+    def strategy_candidates_resource() -> str:
+        """Registered strategy candidates and their promotion ladder stages."""
+
+        def _read() -> str:
+            candidates = store.list_strategy_candidates()
+            return json.dumps([cand.model_dump(mode="json") for cand in candidates])
+
+        return _local_read(_read)
 
     @server.resource("hcs://risk/policy", mime_type="application/json")
     def risk_policy_resource() -> str:

@@ -10,6 +10,8 @@
 - Added Jupiter Swap API V2 `/build` response inspection, instruction normalization, and Associated Token Account CreateIdempotent allowlisting.
 - Added MCP capability tiers (`READ`, `RESEARCH`, `PAPER_TRADE`, `LIVE_TRADE`, `ADMIN_LOCAL`), capability guard, JSONL invocation audit trail, and RiskPolicy defaults parity.
 - Added CodeQL, OpenSSF Scorecard, Dependabot, CODEOWNERS, Contributor Covenant 2.1, and expanded security policies.
+- Added `strategy-list` and `strategy-show` CLI commands for operator inspection of candidates and promotion states.
+- Added `strategies.get_candidates` tool and `hcs://strategies/candidates` resource to local MCP server.
 
 ## 0.2.0 — spot execution, isolated signing, research and dashboard UI (2026-11-15)
 

@@ -11,6 +11,7 @@ from hcs_trader.__main__ import main, market_research, watch_research
 from hcs_trader.api import create_app
 from hcs_trader.indicators import Indicators
 from hcs_trader.local_research import ResearchReport
+from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.storage import AuditStore
 
 
@@ -104,6 +105,63 @@ def test_scheduled_research_backs_off_and_restart_preserves_due_time(
                 pytest.fail("Two workers acquired the same lock")
     with AuditStore(path).research_worker_lock():
         assert store.research_schedule() == (due, 3)
+
+
+def test_strategy_cli_list_and_show(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "audit.sqlite"
+    store = AuditStore(path)
+    store.initialize()
+    now = datetime.now(UTC)
+    cand = StrategyCandidate(
+        candidate_id="cand-cli-01",
+        name="SMA Test",
+        version="1.0.0",
+        stage=PromotionStage.RESEARCH,
+        parameters={"fast": 10, "slow": 30},
+        dataset_hash="hash123",
+        created_at=now,
+        updated_at=now,
+    )
+    store.save_strategy_candidate(cand)
+    monkeypatch.setattr("hcs_trader.__main__.local_store", lambda: store)
+
+    # 1. list all
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "strategy-list"])
+    main()
+    listed = json.loads(capsys.readouterr().out)
+    assert len(listed) == 1
+    assert listed[0]["candidate_id"] == "cand-cli-01"
+
+    # 2. list with stage filter matching
+    monkeypatch.setattr(
+        "sys.argv", ["hcs-trader", "strategy-list", "--stage", "RESEARCH"]
+    )
+    main()
+    assert len(json.loads(capsys.readouterr().out)) == 1
+
+    # 3. list with stage filter non-matching
+    monkeypatch.setattr(
+        "sys.argv", ["hcs-trader", "strategy-list", "--stage", "LIVE_BOUNDED"]
+    )
+    main()
+    assert len(json.loads(capsys.readouterr().out)) == 0
+
+    # 4. show existing
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "strategy-show", "cand-cli-01"])
+    main()
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["candidate_id"] == "cand-cli-01"
+    assert shown["name"] == "SMA Test"
+    assert shown["has_canary_approval"] is False
+
+    # 5. show non-existent
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "strategy-show", "non-existent"])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 1
+    assert "not found" in capsys.readouterr().err
 
 
 def test_new_research_watch_runs_immediately_and_persists_next_execution(

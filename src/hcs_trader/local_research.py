@@ -8,6 +8,7 @@ import httpx2
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from hcs_trader.indicators import Indicators
+from hcs_trader.model_manifest import ModelMetadata
 
 _PROMPT_VERSION = "market-research-1"
 _MAX_TOKENS = 300
@@ -32,6 +33,9 @@ class ResearchReport:
     assessment: ResearchOutput | None = None
     model: str | None = None
     execution_decision: Literal["NO_TRADE"] = "NO_TRADE"
+    verified_artifact: ModelMetadata | None = None
+    max_generation_tokens: int = _MAX_TOKENS
+    temperature: int = 0
 
 
 class LocalModelProvider(Protocol):

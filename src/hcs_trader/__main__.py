@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import warnings
+from dataclasses import replace
 from datetime import date
 from getpass import GetPassWarning, getpass
 from importlib.metadata import version
@@ -41,6 +42,7 @@ from hcs_trader.local_research import (
     research_report,
 )
 from hcs_trader.mcp_server import create_mcp_server
+from hcs_trader.model_manifest import verify_model_manifest
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
 
@@ -128,25 +130,33 @@ def score_research(commitment: str, path: Path) -> None:
 
 
 async def market_research(
-    interval: int, port: int, alias: str | None, token_file: Path | None
+    interval: int,
+    port: int,
+    alias: str | None,
+    token_file: Path | None,
+    manifest_path: Path | None,
 ) -> ResearchReport:
     store = local_store()
     store.initialize()
     evidence = calculate_indicators(
         store.candle_history(BTC_USD, SOURCE, interval, limit=720)
     )
-    if alias is None and token_file is None:
+    if alias is None and token_file is None and manifest_path is None:
         return await research_report(evidence, NoneModelProvider())
-    if alias is None or token_file is None:
-        raise ValueError("A local model alias and token file are required together")
+    if token_file is None or manifest_path is None:
+        raise ValueError("A local model manifest and token file are required together")
+    metadata = verify_model_manifest(manifest_path)
+    if alias is not None and alias != metadata.alias:
+        raise ValueError("Requested model alias does not match the manifest")
     with token_file.open(encoding="utf-8") as handle:
         token = handle.read(1025).strip()
     if not token or len(token) > 1024 or any(char.isspace() for char in token):
         raise ValueError("Local model token file must contain one token")
     async with httpx2.AsyncClient(trust_env=False) as client:
-        return await research_report(
-            evidence, LlamaCppProvider(client, port, alias, token)
+        report = await research_report(
+            evidence, LlamaCppProvider(client, port, metadata.alias, token)
         )
+    return replace(report, verified_artifact=metadata)
 
 
 async def serve(market_data: bool, paper_mode: bool = False) -> None:
@@ -229,6 +239,7 @@ def main() -> None:
     )
     research_parser.add_argument("--llama-port", type=int, default=9931)
     research_parser.add_argument("--model-alias")
+    research_parser.add_argument("--model-manifest", type=Path)
     research_parser.add_argument("--token-file", type=Path)
     arguments = parser.parse_args()
     if arguments.command == "serve":
@@ -286,6 +297,7 @@ def main() -> None:
                     arguments.llama_port,
                     arguments.model_alias,
                     arguments.token_file,
+                    arguments.model_manifest,
                 )
             )
         except (OSError, ValueError) as error:

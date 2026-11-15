@@ -24,6 +24,7 @@
 - Displayed the simulated portfolio, recent fills and execution pause in the dashboard.
 - Added a read-only MCP server over local stdio.
 - Added a local indicator research brief with optional schema-checked llama.cpp commentary.
+- Added GGUF manifest validation and research report artifact metadata.
 
 ## 0.1.0 — development foundation
 

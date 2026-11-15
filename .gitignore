@@ -11,3 +11,4 @@ src/hcs_trader/ui_assets/
 .env
 .env.*
 *.sqlite*
+*.db

@@ -51,6 +51,23 @@ jobs:
             dist/desktop/*.tar.gz
             dist/desktop/*.tar.gz.sha256
           if-no-files-found: error
+      - name: Build and verify the Windows single-file executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv run --locked --group packaging python scripts/build_desktop.py --onefile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --locked python scripts/smoke_desktop.py --onefile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --locked python scripts/archive_desktop.py --onefile
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Windows'
+        with:
+          name: desktop-windows-single
+          path: |
+            dist/desktop-single/*.exe
+            dist/desktop-single/*.exe.sha256
+          if-no-files-found: error
 
   security:
     runs-on: ubuntu-latest

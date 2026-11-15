@@ -32,6 +32,7 @@
 - Added opt-in persistence and offline REST access for public-address wallet snapshots.
 - Added read-only Ethereum and Solana transaction status queries.
 - Added native desktop development builds with the embedded dashboard and CI smoke checks.
+- Added the Windows single-file executable build and checksum.
 
 ## 0.1.0 — development foundation
 

@@ -1,8 +1,10 @@
-"""Smoke-test a native desktop folder without using the default data directory."""
+"""Smoke-test a native desktop build with a separate data directory."""
 
+import argparse
 import json
 import os
 import re
+import shutil
 import subprocess  # noqa: S404
 from http.client import HTTPConnection
 from pathlib import Path
@@ -61,8 +63,15 @@ def _verify(process: subprocess.Popen[bytes], data: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--onefile", action="store_true")
+    args = parser.parse_args()
+    if args.onefile and os.name != "nt":
+        parser.error("The single-file build currently targets Windows")
     suffix = ".exe" if os.name == "nt" else ""
-    executable = (Path("dist") / "desktop" / _NAME / (_NAME + suffix)).resolve()
+    layout = Path("dist") / ("desktop-single" if args.onefile else "desktop")
+    program_dir = layout if args.onefile else layout / _NAME
+    executable = (program_dir / (_NAME + suffix)).resolve()
     with TemporaryDirectory(prefix="hcs-desktop-") as temporary:
         root = Path(temporary)
         data = root / "app data"
@@ -71,6 +80,12 @@ def main() -> None:
             process = subprocess.Popen(  # noqa: S603
                 [str(executable), "serve", "--data-dir", str(data)],
                 cwd=root,
+                env={
+                    **os.environ,
+                    "TEMP": str(root),
+                    "TMP": str(root),
+                    "TMPDIR": str(root),
+                },
                 stdout=output,
                 stderr=subprocess.STDOUT,
             )
@@ -80,7 +95,18 @@ def main() -> None:
             raise RuntimeError(f"{error}\n{log.read_text(errors='replace')}") from error
         finally:
             if process.poll() is None:
-                process.terminate()
+                if args.onefile:
+                    # The Windows bootloader runs a child containing the Python runtime.
+                    taskkill = shutil.which("taskkill")
+                    if taskkill is None:
+                        raise RuntimeError("Windows taskkill is unavailable")
+                    subprocess.run(  # noqa: S603
+                        [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                    )
+                else:
+                    process.terminate()
                 try:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:

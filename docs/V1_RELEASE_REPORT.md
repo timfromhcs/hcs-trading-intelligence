@@ -16,6 +16,10 @@ Audit date 2026-11-15. Baseline `origin/main` at `7093314`. The [implementation 
 - Real Windows x64 Litecoin Core v0.21.5.8 and DigiByte Core v9.26.7 regtest nodes both verified authenticated UTXO scans, separate snapshots and wrong-network rejection. [Litecoin and DigiByte evidence](WALLETS.md)
 - The server startup integration test verified that Kraken recovery is opt-in, issues only order queries and preserves unresolved state when the fixture has no match. Authenticated Kraken venue evidence remains open. [Execution evidence](EXECUTION.md)
 - Local tests exercise deterministic indicators, paper accounting, backtests, migrations, MCP stdio, wallet parsing, execution adapters and signer logic. Controlled adapter responses establish behavior under those fixtures.
+- The isolated signer is bound to persisted execution pause and approved risk decisions, enforcing idempotency and raising SigningUnsupported on non-chain-valid placeholders. [Signing evidence](SIGNING.md)
+- Jupiter Swap API V2 `/build` response inspection normalizes instructions and restricts Associated Token Account creation to `CreateIdempotent` for the signer on classic SPL Token mints. [Execution evidence](EXECUTION.md)
+- MCP enforces capability tiers (`READ`, `RESEARCH`, etc.) via `CapabilityGuard`, logs append-only SHA-256 argument hashed invocation records, and aligns risk policy defaults with `RiskPolicy`. [MCP evidence](MCP.md)
+- Hardened CI workflows are configured: CodeQL (Python, JS/TS), OpenSSF Scorecard, Dependabot, CODEOWNERS, Contributor Covenant 2.1, and security policies.
 
 ## Open release criteria
 

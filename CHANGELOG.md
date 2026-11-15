@@ -21,6 +21,7 @@
 - Added persistent paper balances and fills with weighted-average cost basis, fees and realized PnL.
 - Added explicit opt-in paper order simulation using verified Kraken BTC/USD quotes.
 - Added a durable execution pause with local controls and transactional enforcement.
+- Displayed the simulated portfolio, recent fills and execution pause in the dashboard.
 
 ## 0.1.0 — development foundation
 

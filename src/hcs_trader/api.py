@@ -133,6 +133,10 @@ class PaperPortfolio(BaseModel):
     balance: PaperBalance
 
 
+class PaperAccount(PaperPortfolio):
+    fills: list[PaperFill]
+
+
 def create_app(
     store: AuditStore,
     ui_assets: Path | None = None,
@@ -398,6 +402,12 @@ def create_app(
             return store.paper_fills(limit=limit)
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Paper ledger unavailable") from error
+
+    @app.get("/api/v1/paper/account")
+    def paper_account() -> PaperAccount:
+        fills = paper_fills(limit=10)
+        balance = fills[0].balance if fills else PaperBalance()
+        return PaperAccount(balance=balance, fills=fills)
 
     @app.post("/api/v1/orders/paper")
     async def paper_order(order: PaperOrder, request: Request) -> PaperFill:

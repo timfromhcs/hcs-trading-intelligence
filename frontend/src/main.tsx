@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MarketQuote } from "./MarketQuote";
 import { NewsTimeline } from "./NewsTimeline";
+import { PaperPortfolio } from "./PaperPortfolio";
 import "./styles.css";
 
 interface SystemStatus {
@@ -22,7 +23,7 @@ interface Capabilities {
 const capabilityLabels: Record<keyof Capabilities, string> = {
   api: "Local API",
   market_data: "Market data",
-  portfolio: "Portfolio",
+  portfolio: "Paper portfolio",
   paper_orders: "Paper orders",
   live_orders: "Live orders",
   mcp: "MCP",
@@ -98,6 +99,7 @@ function App() {
           </div>
         </section>
         {snapshot.state === "ready" && snapshot.capabilities.market_data && <MarketQuote />}
+        {snapshot.state === "ready" && snapshot.capabilities.portfolio && <PaperPortfolio />}
         {snapshot.state === "ready" && <NewsTimeline />}
         {snapshot.state === "ready" && (
           <section className="panel" aria-labelledby="capabilities-heading">

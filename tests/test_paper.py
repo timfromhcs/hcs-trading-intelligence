@@ -52,6 +52,10 @@ def test_paper_balance_cost_basis_fees_and_realized_pnl_survive_restart(
         assert summary["mode"] == "PAPER"
         assert Decimal(summary["balance"]["realized_pnl"]) == 45
         assert len(api.get("/api/v1/paper/fills").json()) == 3
+        account = api.get("/api/v1/paper/account").json()
+        assert (
+            account["balance"] == account["fills"][0]["balance"] == summary["balance"]
+        )
         assert api.get("/api/v1/paper/fills?limit=101").status_code == 422
 
 

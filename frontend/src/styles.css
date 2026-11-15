@@ -47,3 +47,9 @@ dd { margin: 0; }
 .news-list li:last-child { padding-bottom: 0; }
 .news-list h3 { margin: 0; font-size: 1rem; line-height: 1.45; }
 .news-list p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.875rem; line-height: 1.45; }
+.paper-balances dd, .paper-fills { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.paper-fills-heading { margin: 1.5rem 0 0; font-size: 1rem; }
+.paper-fills { list-style: none; padding: 0; margin-bottom: 0; }
+.paper-fills li { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; border-top: 1px solid var(--border); padding-block: 0.7rem; }
+.paper-fills li:last-child { padding-bottom: 0; }
+.paper-fills span, .paper-fills time { color: var(--muted); }

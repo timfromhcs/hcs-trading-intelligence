@@ -229,3 +229,39 @@ def test_spot_orders_api_endpoints(tmp_path: Path) -> None:
 
         # Not found
         assert client.get("/api/v1/orders/spot/non-existent").status_code == 404
+
+
+def test_risk_pause_resume_endpoints(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    app = create_app(store)
+
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        # Initial status is not paused
+        status_resp = client.get("/api/v1/risk/status")
+        assert status_resp.status_code == 200
+        assert status_resp.json()["paused"] is False
+
+        # Cross-site origin rejected
+        cross_resp = client.post(
+            "/api/v1/risk/pause",
+            headers={"sec-fetch-site": "cross-site", "origin": "http://evil.com"},
+        )
+        assert cross_resp.status_code == 403
+
+        # Trigger pause
+        pause_resp = client.post("/api/v1/risk/pause")
+        assert pause_resp.status_code == 200
+        assert pause_resp.json()["paused"] is True
+        assert pause_resp.json()["changed_at"] is not None
+
+        # Confirm status updated
+        assert client.get("/api/v1/risk/status").json()["paused"] is True
+
+        # Resume execution
+        resume_resp = client.post("/api/v1/risk/resume")
+        assert resume_resp.status_code == 200
+        assert resume_resp.json()["paused"] is False
+
+        # Confirm status resumed
+        assert client.get("/api/v1/risk/status").json()["paused"] is False

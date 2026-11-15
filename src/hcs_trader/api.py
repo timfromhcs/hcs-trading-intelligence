@@ -192,12 +192,35 @@ def create_app(
             )
         return Status()
 
+    def _verify_local_origin(request: Request, action_name: str) -> None:
+        origin = request.headers.get("origin")
+        if request.headers.get("sec-fetch-site") == "cross-site" or (
+            origin is not None and origin != f"http://{LOOPBACK_HOST}:{LOCAL_PORT}"
+        ):
+            raise HTTPException(403, f"{action_name} require a local origin")
+
     @app.get("/api/v1/risk/status")
     def execution_pause() -> ExecutionPause:
         try:
             return store.execution_pause()
         except (sqlite3.Error, ValueError) as error:
             raise HTTPException(503, "Execution pause state unavailable") from error
+
+    @app.post("/api/v1/risk/pause")
+    def trigger_pause(request: Request) -> ExecutionPause:
+        _verify_local_origin(request, "Risk controls")
+        try:
+            return store.set_execution_pause(True)
+        except (sqlite3.Error, ValueError) as error:
+            raise HTTPException(503, "Risk control unavailable") from error
+
+    @app.post("/api/v1/risk/resume")
+    def clear_pause(request: Request) -> ExecutionPause:
+        _verify_local_origin(request, "Risk controls")
+        try:
+            return store.set_execution_pause(False)
+        except (sqlite3.Error, ValueError) as error:
+            raise HTTPException(503, "Risk control unavailable") from error
 
     @app.get("/api/v1/system/config")
     def config() -> PublicConfig:
@@ -415,11 +438,7 @@ def create_app(
     async def paper_order(order: PaperOrder, request: Request) -> PaperFill:
         if paper is None:
             raise HTTPException(403, "Paper execution is disabled")
-        origin = request.headers.get("origin")
-        if request.headers.get("sec-fetch-site") == "cross-site" or (
-            origin is not None and origin != f"http://{LOOPBACK_HOST}:{LOCAL_PORT}"
-        ):
-            raise HTTPException(403, "Paper orders require a local origin")
+        _verify_local_origin(request, "Paper orders")
         try:
             return await paper.submit(order)
         except (PaperRejected, PaperConflict) as error:

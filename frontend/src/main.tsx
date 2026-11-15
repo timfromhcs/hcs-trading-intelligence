@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client";
 import { MarketQuote } from "./MarketQuote";
 import { NewsTimeline } from "./NewsTimeline";
 import { PaperPortfolio } from "./PaperPortfolio";
+import { RiskControls } from "./RiskControls";
+import { SpotOrders } from "./SpotOrders";
+import { WalletSnapshots } from "./WalletSnapshots";
 import "./styles.css";
 
 interface SystemStatus {
@@ -98,8 +101,11 @@ function App() {
             )}
           </div>
         </section>
+        {snapshot.state === "ready" && <RiskControls />}
         {snapshot.state === "ready" && snapshot.capabilities.market_data && <MarketQuote />}
         {snapshot.state === "ready" && snapshot.capabilities.portfolio && <PaperPortfolio />}
+        {snapshot.state === "ready" && <SpotOrders />}
+        {snapshot.state === "ready" && <WalletSnapshots />}
         {snapshot.state === "ready" && <NewsTimeline />}
         {snapshot.state === "ready" && (
           <section className="panel" aria-labelledby="capabilities-heading">

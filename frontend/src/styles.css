@@ -53,3 +53,187 @@ dd { margin: 0; }
 .paper-fills li { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; border-top: 1px solid var(--border); padding-block: 0.7rem; }
 .paper-fills li:last-child { padding-bottom: 0; }
 .paper-fills span, .paper-fills time { color: var(--muted); }
+
+/* Alerts and Notices */
+.alert-banner {
+  padding: 0.85rem 1.25rem;
+  margin: 1rem 0;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+.alert-danger {
+  background: rgba(255, 60, 60, 0.15);
+  border: 1px solid #ff4444;
+  color: #ff8294;
+}
+.custody-notice {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  background: rgba(0, 240, 255, 0.05);
+  border-left: 3px solid var(--cyan);
+  font-size: 0.875rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+/* Action Buttons */
+.btn-action {
+  font-weight: 600;
+  border-radius: 0.4rem;
+  padding: 0.6rem 1.25rem;
+  transition: opacity 0.2s;
+}
+.btn-danger {
+  background: #a31526;
+  border-color: #ff4444;
+  color: #fff;
+}
+.btn-danger:hover:not(:disabled) {
+  background: #c71f34;
+}
+.btn-resume {
+  background: #146c43;
+  border-color: #37d39a;
+  color: #fff;
+}
+.btn-resume:hover:not(:disabled) {
+  background: #198754;
+}
+
+/* Spot Orders */
+.order-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+}
+.order-item {
+  border-top: 1px solid var(--border);
+  padding-block: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.order-item:first-child {
+  border-top: none;
+}
+.order-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.95rem;
+}
+.order-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.25rem;
+  letter-spacing: 0.05em;
+}
+.badge-buy {
+  background: rgba(55, 211, 154, 0.2);
+  color: #37d39a;
+  border: 1px solid #37d39a;
+}
+.badge-sell {
+  background: rgba(255, 130, 148, 0.2);
+  color: #ff8294;
+  border: 1px solid #ff8294;
+}
+.order-price {
+  color: var(--muted);
+}
+.order-state {
+  margin-left: auto;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 0.25rem;
+}
+.order-state[data-state="FILLED"] {
+  background: rgba(55, 211, 154, 0.15);
+  color: #37d39a;
+}
+.order-state[data-state="ACKNOWLEDGED"],
+.order-state[data-state="SUBMITTED"] {
+  background: rgba(0, 240, 255, 0.15);
+  color: var(--cyan);
+}
+.order-state[data-state="RECONCILIATION_REQUIRED"] {
+  background: rgba(255, 60, 60, 0.25);
+  color: #ff8294;
+  border: 1px solid #ff4444;
+}
+.order-state[data-state="CANCELED"],
+.order-state[data-state="REJECTED"],
+.order-state[data-state="EXPIRED"] {
+  background: rgba(146, 161, 181, 0.15);
+  color: var(--muted);
+}
+.order-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.order-meta code {
+  color: #d1d5db;
+  font-family: monospace;
+}
+
+/* Risk Controls */
+.risk-content {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.risk-ok {
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+.risk-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+.risk-timestamp {
+  font-size: 0.85rem;
+}
+
+/* Wallets */
+.wallet-card dt {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.wallet-asset {
+  font-weight: 700;
+  color: #fff;
+}
+.wallet-address {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.wallet-balance {
+  display: block;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.4rem;
+}
+.wallet-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.3rem;
+}
+

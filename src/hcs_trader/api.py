@@ -14,7 +14,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
@@ -27,8 +27,15 @@ from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
 from hcs_trader.domain.news import NewsItem
-from hcs_trader.domain.paper import PaperBalance, PaperFill
+from hcs_trader.domain.paper import (
+    PaperBalance,
+    PaperConflict,
+    PaperFill,
+    PaperOrder,
+    PaperRejected,
+)
 from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
 
@@ -131,7 +138,12 @@ def create_app(
     ui_assets: Path | None = None,
     *,
     quote_service: QuoteService | None = None,
+    paper_mode: bool = False,
 ) -> FastAPI:
+    paper = (
+        PaperExecution(store, quote_service) if paper_mode and quote_service else None
+    )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store.initialize()
@@ -167,7 +179,11 @@ def create_app(
     @app.get("/api/v1/system/status")
     def status() -> Status:
         if quote_service is not None:
-            return Status(mode=Mode.DATA_ONLY, network_enabled=True)
+            return Status(
+                mode=Mode.PAPER if paper is not None else Mode.DATA_ONLY,
+                network_enabled=True,
+                execution_available=paper is not None,
+            )
         return Status()
 
     @app.get("/api/v1/system/config")
@@ -176,7 +192,9 @@ def create_app(
 
     @app.get("/api/v1/system/capabilities")
     def capabilities() -> Capabilities:
-        return Capabilities(market_data=quote_service is not None)
+        return Capabilities(
+            market_data=quote_service is not None, paper_orders=paper is not None
+        )
 
     @app.get("/api/v1/market/quotes")
     async def market_quote(response: Response) -> QuoteResponse:
@@ -371,6 +389,22 @@ def create_app(
     ) -> list[PaperFill]:
         try:
             return store.paper_fills(limit=limit)
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Paper ledger unavailable") from error
+
+    @app.post("/api/v1/orders/paper")
+    async def paper_order(order: PaperOrder, request: Request) -> PaperFill:
+        if paper is None:
+            raise HTTPException(403, "Paper execution is disabled")
+        origin = request.headers.get("origin")
+        if request.headers.get("sec-fetch-site") == "cross-site" or (
+            origin is not None and origin != f"http://{LOOPBACK_HOST}:{LOCAL_PORT}"
+        ):
+            raise HTTPException(403, "Paper orders require a local origin")
+        try:
+            return await paper.submit(order)
+        except (PaperRejected, PaperConflict) as error:
+            raise HTTPException(409, str(error)) from error
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Paper ledger unavailable") from error
 

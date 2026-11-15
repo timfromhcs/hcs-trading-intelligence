@@ -19,6 +19,7 @@
 - Added persistent, content-addressed backtest reports with an integrity check on retrieval.
 - Added a CLI workflow that freezes a research candidate before opening a committed holdout file.
 - Added persistent paper balances and fills with weighted-average cost basis, fees and realized PnL.
+- Added explicit opt-in paper order simulation using verified Kraken BTC/USD quotes.
 
 ## 0.1.0 — development foundation
 

@@ -119,18 +119,21 @@ def score_research(commitment: str, path: Path) -> None:
     print(store.finalize_holdout(commitment, result))
 
 
-async def serve(market_data: bool) -> None:
+async def serve(market_data: bool, paper_mode: bool = False) -> None:
     store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
         quotes = (
             QuoteService(
                 KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
             )
-            if market_data
+            if market_data or paper_mode
             else None
         )
         app = create_app(
-            store, Path(__file__).with_name("ui_assets"), quote_service=quotes
+            store,
+            Path(__file__).with_name("ui_assets"),
+            quote_service=quotes,
+            paper_mode=paper_mode,
         )
         config = uvicorn.Config(
             app,
@@ -149,10 +152,16 @@ def main() -> None:
     serve_parser = commands.add_parser(
         "serve", help="Run the read-only local status service"
     )
-    serve_parser.add_argument(
+    network_mode = serve_parser.add_mutually_exclusive_group()
+    network_mode.add_argument(
         "--public-market-data",
         action="store_true",
         help="Enable public Kraken quote requests",
+    )
+    network_mode.add_argument(
+        "--paper-market-data",
+        action="store_true",
+        help="Enable paper BTC/USD orders using public Kraken quotes",
     )
     import_parser = commands.add_parser(
         "import-candles", help="Import closed Kraken BTC/USD candles into local history"
@@ -181,7 +190,7 @@ def main() -> None:
     score_parser.add_argument("file", type=Path)
     arguments = parser.parse_args()
     if arguments.command == "serve":
-        asyncio.run(serve(arguments.public_market_data))
+        asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
     elif arguments.command == "import-candles":
         try:
             count = asyncio.run(import_candles(arguments.interval))

@@ -183,28 +183,46 @@ class AuditStore:
                 connection.execute("PRAGMA user_version = 9")
 
     def record_paper_fill(
-        self, order: PaperOrder, price: Decimal, fee: Decimal
+        self,
+        order: PaperOrder,
+        price: Decimal,
+        fee: Decimal,
+        *,
+        quote: Quote | None = None,
     ) -> PaperFill:
         with self._connect() as connection, connection:
             # Serialize both replay detection and accounting with competing fills.
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT payload FROM paper_fills WHERE order_key = ?",
-                (order.idempotency_key,),
-            ).fetchone()
-            if row is not None:
-                existing = _PAPER_FILL.validate_json(row[0])
-                if existing.order != order:
-                    raise PaperConflict("Paper order ID was already used")
+            existing = self._existing_paper_fill(connection, order)
+            if existing is not None:
                 return existing
 
             balance = self._paper_balance(connection)
-            fill = book_fill(balance, order, price, fee, datetime.now(UTC))
+            fill = book_fill(balance, order, price, fee, datetime.now(UTC), quote)
             connection.execute(
                 "INSERT INTO paper_fills (order_key, payload) VALUES (?, ?)",
                 (order.idempotency_key, _PAPER_FILL.dump_json(fill).decode("utf-8")),
             )
             return fill
+
+    @staticmethod
+    def _existing_paper_fill(
+        connection: sqlite3.Connection, order: PaperOrder
+    ) -> PaperFill | None:
+        row = connection.execute(
+            "SELECT payload FROM paper_fills WHERE order_key = ?",
+            (order.idempotency_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        fill = _PAPER_FILL.validate_json(row[0])
+        if fill.order != order:
+            raise PaperConflict("Paper order ID was already used")
+        return fill
+
+    def existing_paper_fill(self, order: PaperOrder) -> PaperFill | None:
+        with self._connect() as connection:
+            return self._existing_paper_fill(connection, order)
 
     @staticmethod
     def _paper_balance(connection: sqlite3.Connection) -> PaperBalance:

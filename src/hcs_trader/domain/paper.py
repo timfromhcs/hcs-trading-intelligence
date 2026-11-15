@@ -2,9 +2,11 @@
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Context, Decimal, localcontext
 from enum import StrEnum
+
+from hcs_trader.domain.market_data import DataQuality, Quote
 
 _ZERO = Decimal(0)
 
@@ -51,6 +53,7 @@ class PaperFill:
     fee: Decimal
     executed_at: datetime
     balance: PaperBalance
+    quote: Quote | None = None
 
 
 class PaperRejected(ValueError):
@@ -61,8 +64,24 @@ class PaperConflict(ValueError):
     """An order ID was reused with a different intent."""
 
 
+def simulated_terms(order: PaperOrder, quote: Quote) -> tuple[Decimal, Decimal]:
+    with localcontext(Context(prec=34)):
+        if (quote.ask - quote.bid) / quote.bid > Decimal("0.01"):
+            raise PaperRejected("Paper quote spread exceeds 100 basis points")
+        price = quote.ask if order.side is PaperSide.BUY else quote.bid
+        notional = price * order.quantity
+        if not 10 <= notional <= 1000:
+            raise PaperRejected("Paper order notional must be between 10 and 1000 USD")
+        return price, notional * Decimal("0.0025")
+
+
 def book_fill(
-    balance: PaperBalance, order: PaperOrder, price: Decimal, fee: Decimal, at: datetime
+    balance: PaperBalance,
+    order: PaperOrder,
+    price: Decimal,
+    fee: Decimal,
+    at: datetime,
+    quote: Quote | None = None,
 ) -> PaperFill:
     if (
         not price.is_finite()
@@ -72,6 +91,14 @@ def book_fill(
         or at.utcoffset() is None
     ):
         raise PaperRejected("Invalid simulated fill price, fee or execution time")
+    if (
+        quote is not None
+        and quote.quality_at(
+            at, max_age=timedelta(seconds=30), max_clock_skew=timedelta(seconds=2)
+        )
+        is not DataQuality.FRESH
+    ):
+        raise PaperRejected("Paper execution requires a fresh quote")
     with localcontext(Context(prec=34)):
         notional = order.quantity * price
         if order.side is PaperSide.BUY:
@@ -104,4 +131,4 @@ def book_fill(
                 balance.fees + fee,
                 balance.realized_pnl + proceeds - cost,
             )
-    return PaperFill(order, price, fee, at, next_balance)
+    return PaperFill(order, price, fee, at, next_balance, quote)

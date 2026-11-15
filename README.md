@@ -31,6 +31,8 @@ Run `uv run --locked hcs-trader import-news` to import Federal Reserve monetary-
 
 Run `uv run --locked hcs-trader import-macro` to import daily ECB USD-per-EUR reference rates. `GET /api/v1/macro/series` reads the locally observed values and revisions offline.
 
+Run `uv run --locked hcs-trader import-fred --as-of YYYY-MM-DD` in a terminal for a US CPI snapshot. Enter your own FRED API key at the hidden prompt. Retrieve saved values with `GET /api/v1/macro/series?source=fred`.
+
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 Licensed under Apache-2.0. Made with love by timfromhcs and hcsmedia.

@@ -14,7 +14,7 @@ from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +130,11 @@ class AuditStore:
                     "CREATE INDEX macro_series_history ON macro_observations "
                     "(source, series, observation_date DESC, id DESC)"
                 )
-                connection.execute("PRAGMA user_version = 5")
+            if version < 6:
+                connection.execute(
+                    "ALTER TABLE macro_observations ADD COLUMN vintage_date TEXT"
+                )
+                connection.execute("PRAGMA user_version = 6")
 
     def record_macro(self, observations: list[MacroObservation]) -> int:
         with self._connect() as connection, connection:
@@ -142,21 +146,37 @@ class AuditStore:
                 )
                 value = str(observation.value)
                 received_at = observation.received_at.isoformat(timespec="microseconds")
+                vintage = (
+                    observation.vintage_date.isoformat()
+                    if observation.vintage_date
+                    else None
+                )
                 connection.execute(
                     """
                     INSERT INTO macro_observations
-                        (source, series, observation_date, received_at, value)
+                        (source, series, observation_date, received_at,
+                         value, vintage_date)
                     WITH latest AS (
                         SELECT value, received_at FROM macro_observations
                         WHERE source = ? AND series = ? AND observation_date = ?
+                          AND vintage_date IS ?
                         ORDER BY id DESC LIMIT 1
                     )
-                    SELECT ?, ?, ?, ?, ?
+                    SELECT ?, ?, ?, ?, ?, ?
                     WHERE NOT EXISTS (
                         SELECT 1 FROM latest WHERE value = ? OR received_at >= ?
                     )
                     """,
-                    (*key, *key, received_at, value, value, received_at),
+                    (
+                        *key,
+                        vintage,
+                        *key,
+                        received_at,
+                        value,
+                        vintage,
+                        value,
+                        received_at,
+                    ),
                 )
             return connection.total_changes
 
@@ -168,7 +188,8 @@ class AuditStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT observation_date, received_at, value FROM macro_observations
+                SELECT observation_date, received_at, value, vintage_date
+                FROM macro_observations
                 WHERE source = ? AND series = ?
                 ORDER BY observation_date DESC, id DESC LIMIT ?
                 """,
@@ -181,8 +202,9 @@ class AuditStore:
                 date.fromisoformat(day),
                 datetime.fromisoformat(received),
                 Decimal(value),
+                date.fromisoformat(vintage) if vintage is not None else None,
             )
-            for day, received, value in reversed(rows)
+            for day, received, value, vintage in reversed(rows)
         ]
 
     def record_news(self, items: list[NewsItem]) -> int:

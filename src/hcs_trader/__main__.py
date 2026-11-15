@@ -2,6 +2,10 @@
 
 import argparse
 import asyncio
+import logging
+import warnings
+from datetime import date
+from getpass import GetPassWarning, getpass
 from importlib.metadata import version
 from pathlib import Path
 
@@ -12,6 +16,7 @@ from platformdirs import user_data_path
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
 from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
+from hcs_trader.data.fred import fetch_fred_cpi
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, KrakenQuoteProvider
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
@@ -46,6 +51,25 @@ async def import_macro() -> int:
     store = local_store()
     store.initialize()
     return store.record_macro(observations)
+
+
+async def import_fred(api_key: str, as_of: date | None) -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        observations = await fetch_fred_cpi(client, api_key, as_of=as_of)
+    store = local_store()
+    store.initialize()
+    return store.record_macro(observations)
+
+
+def _read_fred_key() -> str:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", GetPassWarning)
+        try:
+            return getpass("FRED API key: ")
+        except (GetPassWarning, EOFError, KeyboardInterrupt):
+            raise MacroUnavailable(
+                "FRED import requires a private terminal prompt"
+            ) from None
 
 
 async def serve(market_data: bool) -> None:
@@ -93,6 +117,8 @@ def main() -> None:
     commands.add_parser(
         "import-macro", help="Import daily ECB USD-per-EUR reference rates"
     )
+    fred_parser = commands.add_parser("import-fred", help="Import a FRED CPI snapshot")
+    fred_parser.add_argument("--as-of", type=date.fromisoformat)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data))
@@ -114,6 +140,15 @@ def main() -> None:
         except MacroUnavailable as error:
             parser.exit(1, f"{error}\n")
         print(f"Imported {count} new or revised ECB observations.")
+    elif arguments.command == "import-fred":
+        # This CLI process makes one credential-bearing request. Suppress URL traces.
+        logging.getLogger("httpx2").setLevel(logging.WARNING)
+        logging.getLogger("httpcore2").setLevel(logging.WARNING)
+        try:
+            count = asyncio.run(import_fred(_read_fred_key(), arguments.as_of))
+        except MacroUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new or revised FRED observations.")
     else:
         print(Status().model_dump_json())
 

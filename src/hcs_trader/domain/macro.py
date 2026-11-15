@@ -12,3 +12,4 @@ class MacroObservation:
     observation_date: date
     received_at: datetime
     value: Decimal
+    vintage_date: date | None = None

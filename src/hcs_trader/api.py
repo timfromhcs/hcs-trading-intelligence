@@ -11,14 +11,14 @@ from decimal import Decimal
 from enum import StrEnum
 from io import StringIO
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from hcs_trader.data import ecb
+from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.macro import MacroObservation
@@ -262,9 +262,11 @@ def create_app(
     @app.get("/api/v1/macro/series")
     def macro_series(
         limit: Annotated[int, Query(ge=1, le=1000)] = 250,
+        source: Literal["ecb", "fred"] = "ecb",
     ) -> list[MacroObservation]:
+        provider = ecb if source == "ecb" else fred
         try:
-            return store.macro_history(ecb.SOURCE, ecb.SERIES, limit=limit)
+            return store.macro_history(provider.SOURCE, provider.SERIES, limit=limit)
         except sqlite3.Error as error:
             raise HTTPException(503, "Macro storage unavailable") from error
 

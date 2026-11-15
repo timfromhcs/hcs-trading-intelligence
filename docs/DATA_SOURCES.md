@@ -19,3 +19,8 @@
 
 - Source ID `ecb-sdmx`, series `EXR.D.USD.EUR.SP00.A`. Values are US dollars per euro. The public SDMX API requires no key. A single manual import fetches up to 250 daily observations. [ECB data API](https://data.ecb.europa.eu/help/api/data)
 - Reference rates are economic observations. Trading venue quotes are supplied separately. The observation date describes the date of the reference rate, while `received_at` records when this installation first saw that value or revision. Initial downloads supply the currently published history. Historical publication times and complete historical vintages are outside this import's coverage. [ECB methodology](https://data.ecb.europa.eu/methodology/exchange-rates)
+
+## FRED US consumer price index
+
+- Source ID `fred`, series `CPIAUCSL`. The series is the seasonally adjusted index for all urban consumers. Each manual import requests up to 250 observations. FRED requires a registered API key. The CLI accepts it at a hidden terminal prompt for a single request. [Series](https://fred.stlouisfed.org/series/CPIAUCSL) · [FRED API terms](https://fred.stlouisfed.org/docs/api/terms_of_use.html)
+- An optional `--as-of` date selects a single FRED real-time snapshot. The API preserves the observation date, source snapshot date and local receipt time separately. A snapshot date describes the selected real-time period. Treat observation dates as reference periods when aligning macro data to decisions. [FRED observations](https://fred.stlouisfed.org/docs/api/fred/series_observations.html)

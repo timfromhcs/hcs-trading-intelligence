@@ -18,6 +18,7 @@
 - Added expanding-window evaluation, a final holdout and a cost-matched buy-and-hold benchmark.
 - Added persistent, content-addressed backtest reports with an integrity check on retrieval.
 - Added a CLI workflow that freezes a research candidate before opening a committed holdout file.
+- Added persistent paper balances and fills with weighted-average cost basis, fees and realized PnL.
 
 ## 0.1.0 — development foundation
 

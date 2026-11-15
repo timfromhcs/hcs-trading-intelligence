@@ -9,12 +9,22 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import TypeAdapter
+
 from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.paper import (
+    PaperBalance,
+    PaperConflict,
+    PaperFill,
+    PaperOrder,
+    book_fill,
+)
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
+_PAPER_FILL = TypeAdapter(PaperFill)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +170,61 @@ class AuditStore:
                     ) STRICT, WITHOUT ROWID
                     """
                 )
-                connection.execute("PRAGMA user_version = 8")
+            if version < 9:
+                connection.execute(
+                    """
+                    CREATE TABLE paper_fills (
+                        id INTEGER PRIMARY KEY,
+                        order_key TEXT NOT NULL UNIQUE,
+                        payload TEXT NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute("PRAGMA user_version = 9")
+
+    def record_paper_fill(
+        self, order: PaperOrder, price: Decimal, fee: Decimal
+    ) -> PaperFill:
+        with self._connect() as connection, connection:
+            # Serialize both replay detection and accounting with competing fills.
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM paper_fills WHERE order_key = ?",
+                (order.idempotency_key,),
+            ).fetchone()
+            if row is not None:
+                existing = _PAPER_FILL.validate_json(row[0])
+                if existing.order != order:
+                    raise PaperConflict("Paper order ID was already used")
+                return existing
+
+            balance = self._paper_balance(connection)
+            fill = book_fill(balance, order, price, fee, datetime.now(UTC))
+            connection.execute(
+                "INSERT INTO paper_fills (order_key, payload) VALUES (?, ?)",
+                (order.idempotency_key, _PAPER_FILL.dump_json(fill).decode("utf-8")),
+            )
+            return fill
+
+    @staticmethod
+    def _paper_balance(connection: sqlite3.Connection) -> PaperBalance:
+        row = connection.execute(
+            "SELECT payload FROM paper_fills ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return _PAPER_FILL.validate_json(row[0]).balance if row else PaperBalance()
+
+    def paper_balance(self) -> PaperBalance:
+        with self._connect() as connection:
+            return self._paper_balance(connection)
+
+    def paper_fills(self, *, limit: int) -> list[PaperFill]:
+        if not 1 <= limit <= 100:
+            raise ValueError("Paper fill history limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM paper_fills ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [_PAPER_FILL.validate_json(payload) for (payload,) in rows]
 
     def freeze_holdout(self, commitment: str, candidate: str) -> None:
         with self._connect() as connection, connection:

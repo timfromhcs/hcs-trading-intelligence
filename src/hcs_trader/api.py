@@ -27,6 +27,7 @@ from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
 from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.paper import PaperBalance, PaperFill
 from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
@@ -62,7 +63,7 @@ class PublicConfig(BaseModel):
 class Capabilities(BaseModel):
     api: bool = True
     market_data: bool = False
-    portfolio: bool = False
+    portfolio: bool = True
     paper_orders: bool = False
     live_orders: bool = False
     mcp: bool = False
@@ -116,6 +117,13 @@ class ReportPayload(BaseModel):
 class StoredReport(ReportPayload):
     id: str
     recorded_at: datetime
+
+
+class PaperPortfolio(BaseModel):
+    mode: Literal["PAPER"] = "PAPER"
+    cash_currency: Literal["USD"] = "USD"
+    position_currency: Literal["BTC"] = "BTC"
+    balance: PaperBalance
 
 
 def create_app(
@@ -349,6 +357,22 @@ def create_app(
             return store.macro_history(provider.SOURCE, provider.SERIES, limit=limit)
         except sqlite3.Error as error:
             raise HTTPException(503, "Macro storage unavailable") from error
+
+    @app.get("/api/v1/portfolio/summary")
+    def portfolio_summary() -> PaperPortfolio:
+        try:
+            return PaperPortfolio(balance=store.paper_balance())
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Paper ledger unavailable") from error
+
+    @app.get("/api/v1/paper/fills")
+    def paper_fills(
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    ) -> list[PaperFill]:
+        try:
+            return store.paper_fills(limit=limit)
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Paper ledger unavailable") from error
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

@@ -10,7 +10,13 @@ from zipfile import ZipFile
 
 
 def main() -> None:
-    (wheel,) = Path("dist").glob("hcs_trader-*.whl")
+    wheels = sorted(
+        Path("dist").glob("hcs_trader-*.whl"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not wheels:
+        raise RuntimeError("No wheel found in dist/")
+    wheel = wheels[-1]
     with ZipFile(wheel) as archive:
         if "hcs_trader/ui_assets/index.html" not in archive.namelist():
             raise RuntimeError("Built wheel is missing its local web interface")

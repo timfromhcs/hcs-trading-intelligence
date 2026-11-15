@@ -11,13 +11,31 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "HCS.media" }]
-dependencies = []
+dependencies = [
+    "cryptography>=50.0.2",
+    "defusedxml>=0.7.1",
+    "fastapi>=0.163.1",
+    "httpx2>=2.16.0",
+    "mcp>=2.3,<3",
+    "platformdirs>=4.14.5",
+    "uvicorn>=0.54.0",
+]
 
 [project.scripts]
 hcs-trader = "hcs_trader.__main__:main"
 
 [dependency-groups]
-dev = ["mypy", "pytest", "pytest-cov", "ruff", "uv_build==0.13.5"]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "types-defusedxml>=0.7.0.20260504",
+    "uv_build==0.13.5",
+]
+packaging = [
+    "pyinstaller==6.22.3",
+]
 
 [tool.uv]
 required-version = "==0.13.5"
@@ -33,7 +51,7 @@ extend-exclude = ["AGENTS.md"]
 select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105", "S106"]
 
 [tool.mypy]
 strict = true

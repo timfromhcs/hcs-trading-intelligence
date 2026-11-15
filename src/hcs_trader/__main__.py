@@ -1,19 +1,470 @@
 """Expose the capabilities of the repository foundation."""
 
 import argparse
-import json
+import asyncio
+import logging
+import sqlite3
+import warnings
+import webbrowser
+from dataclasses import replace
+from datetime import date
+from getpass import GetPassWarning, getpass
 from importlib.metadata import version
+from pathlib import Path
+
+import httpx2
+import uvicorn
+from platformdirs import user_data_path
+from pydantic import TypeAdapter
+
+from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
+from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
+from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
+from hcs_trader.data.fred import fetch_fred_cpi
+from hcs_trader.data.kraken import (
+    BTC_USD,
+    CANDLE_INTERVALS,
+    SOURCE,
+    KrakenQuoteProvider,
+)
+from hcs_trader.data.provider import QuoteUnavailable
+from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.wallet import (
+    SolanaBalance,
+    TransactionObservation,
+    WalletBalance,
+    WalletSnapshot,
+)
+from hcs_trader.holdout import (
+    CANDIDATE_JSON,
+    MAX_HOLDOUT_BYTES,
+    RESULT_JSON,
+    freeze_candidate,
+    score_holdout,
+)
+from hcs_trader.indicators import calculate_indicators
+from hcs_trader.local_research import (
+    LlamaCppProvider,
+    NoneModelProvider,
+    ResearchReport,
+    research_report,
+)
+from hcs_trader.mcp_server import create_mcp_server
+from hcs_trader.model_manifest import verify_model_manifest
+from hcs_trader.storage import WALLET_SNAPSHOT, AuditStore
+from hcs_trader.walk_forward import WalkForwardConfig
+from hcs_trader.wallets import (
+    UTXO_NETWORKS,
+    LocalWalletRpc,
+    UtxoNetwork,
+    WalletUnavailable,
+)
+
+
+def local_store() -> AuditStore:
+    return AuditStore(
+        user_data_path("HCS Trading Intelligence", "HCS.media") / "audit.sqlite"
+    )
+
+
+async def import_candles(interval: int) -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        candles = await KrakenQuoteProvider(client).get_candles(BTC_USD, interval)
+    store = local_store()
+    store.initialize()
+    return store.record_candles(candles)
+
+
+async def import_news() -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        items = await fetch_fed_news(client)
+    store = local_store()
+    store.initialize()
+    return store.record_news(items)
+
+
+async def import_macro() -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        observations = await fetch_ecb_rates(client)
+    store = local_store()
+    store.initialize()
+    return store.record_macro(observations)
+
+
+async def import_fred(api_key: str, as_of: date | None) -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        observations = await fetch_fred_cpi(client, api_key, as_of=as_of)
+    store = local_store()
+    store.initialize()
+    return store.record_macro(observations)
+
+
+def _read_fred_key() -> str:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", GetPassWarning)
+        try:
+            return getpass("FRED API key: ")
+        except (GetPassWarning, EOFError, KeyboardInterrupt):
+            raise MacroUnavailable(
+                "FRED import requires a private terminal prompt"
+            ) from None
+
+
+def freeze_research(commitment: str, interval: int, config_path: Path | None) -> None:
+    config = WalkForwardConfig()
+    if config_path is not None:
+        with config_path.open("rb") as handle:
+            model = handle.read(16_385)
+        if len(model) > 16_384:
+            raise ValueError("Research configuration exceeds the supported size")
+        config = TypeAdapter(WalkForwardConfig).validate_json(model)
+    store = local_store()
+    store.initialize()
+    development = store.candle_history(BTC_USD, SOURCE, interval, limit=1000)
+    candidate = freeze_candidate(development, config, commitment)
+    payload = CANDIDATE_JSON.dump_json(candidate).decode("utf-8")
+    store.freeze_holdout(commitment, payload)
+    print(f"Frozen candidate for {commitment}")
+
+
+def score_research(commitment: str, path: Path) -> None:
+    store = local_store()
+    store.initialize()
+    payload = store.frozen_candidate(commitment)
+    if payload is None:
+        raise ValueError("No candidate is frozen for this holdout")
+    candidate = CANDIDATE_JSON.validate_json(payload)
+    if candidate.holdout_sha256 != commitment:
+        raise ValueError("Stored candidate commitment is inconsistent")
+    with path.open("rb") as handle:
+        content = handle.read(MAX_HOLDOUT_BYTES + 1)
+    outcome = score_holdout(candidate, content)
+    result = RESULT_JSON.dump_json(outcome).decode("utf-8")
+    print(store.finalize_holdout(commitment, result))
+
+
+async def market_research(
+    interval: int,
+    port: int,
+    alias: str | None,
+    token_file: Path | None,
+    manifest_path: Path | None,
+) -> ResearchReport:
+    store = local_store()
+    store.initialize()
+    evidence = calculate_indicators(
+        store.candle_history(BTC_USD, SOURCE, interval, limit=720)
+    )
+    if alias is None and token_file is None and manifest_path is None:
+        return await research_report(evidence, NoneModelProvider())
+    if token_file is None or manifest_path is None:
+        raise ValueError("A local model manifest and token file are required together")
+    metadata = verify_model_manifest(manifest_path)
+    if alias is not None and alias != metadata.alias:
+        raise ValueError("Requested model alias does not match the manifest")
+    with token_file.open(encoding="utf-8") as handle:
+        token = handle.read(1025).strip()
+    if not token or len(token) > 1024 or any(char.isspace() for char in token):
+        raise ValueError("Local model token file must contain one token")
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        report = await research_report(
+            evidence, LlamaCppProvider(client, port, metadata.alias, token)
+        )
+    return replace(report, verified_artifact=metadata)
+
+
+async def ethereum_balance(address: str, port: int) -> WalletBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).ethereum_balance(address)
+
+
+async def solana_balance(address: str, port: int) -> SolanaBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).solana_balance(address)
+
+
+async def transaction_status(
+    chain: str, identifier: str, port: int | None
+) -> TransactionObservation:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        if chain == "eth":
+            return await LocalWalletRpc(
+                client, 8545 if port is None else port
+            ).ethereum_transaction(identifier)
+        return await LocalWalletRpc(
+            client, 8899 if port is None else port
+        ).solana_transaction(identifier)
+
+
+async def utxo_balance(
+    address: str, port: int, cookie_file: Path, network: UtxoNetwork
+) -> WalletBalance:
+    with cookie_file.open(encoding="utf-8") as handle:
+        cookie = handle.read(1025).strip()
+    username, separator, credential = cookie.partition(":")
+    if (
+        len(cookie) > 1024
+        or username != "__cookie__"
+        or not separator
+        or not credential
+        or any(char.isspace() for char in credential)
+    ):
+        raise ValueError(f"Expected a {network.name} Core authentication cookie")
+    async with httpx2.AsyncClient(
+        auth=httpx2.BasicAuth(username, credential), trust_env=False
+    ) as client:
+        return await LocalWalletRpc(client, port).utxo_balance(address, network)
+
+
+async def serve(
+    market_data: bool,
+    paper_mode: bool = False,
+    *,
+    data_dir: Path | None = None,
+    open_browser: bool = False,
+) -> None:
+    store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        quotes = (
+            QuoteService(
+                KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+            )
+            if market_data or paper_mode
+            else None
+        )
+        app = create_app(
+            store,
+            Path(__file__).with_name("ui_assets"),
+            quote_service=quotes,
+            paper_mode=paper_mode,
+        )
+        config = uvicorn.Config(
+            app,
+            host=LOOPBACK_HOST,
+            port=LOCAL_PORT,
+            proxy_headers=False,
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+        if open_browser:
+            async with asyncio.TaskGroup() as group:
+                run = group.create_task(server.serve())
+                while not server.started and not run.done():
+                    await asyncio.sleep(0.05)
+                if server.started:
+                    await asyncio.to_thread(
+                        webbrowser.open, f"http://{LOOPBACK_HOST}:{LOCAL_PORT}/"
+                    )
+        else:
+            await server.serve()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="HCS Trading Intelligence")
     parser.add_argument("--version", action="version", version=version("hcs-trader"))
-    parser.parse_args()
-    print(
-        json.dumps(
-            {"mode": "PAPER", "execution_available": False, "network_enabled": False}
-        )
+    commands = parser.add_subparsers(dest="command")
+    serve_parser = commands.add_parser(
+        "serve", help="Run the read-only local status service"
     )
+    network_mode = serve_parser.add_mutually_exclusive_group()
+    network_mode.add_argument(
+        "--public-market-data",
+        action="store_true",
+        help="Enable public Kraken quote requests",
+    )
+    serve_parser.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    serve_parser.add_argument(
+        "--open-browser", action="store_true", help="Open the dashboard"
+    )
+    network_mode.add_argument(
+        "--paper-market-data",
+        action="store_true",
+        help="Enable paper BTC/USD orders using public Kraken quotes",
+    )
+    import_parser = commands.add_parser(
+        "import-candles", help="Import closed Kraken BTC/USD candles into local history"
+    )
+    import_parser.add_argument(
+        "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
+    )
+    commands.add_parser("import-news", help="Import official Federal Reserve releases")
+    commands.add_parser(
+        "import-macro", help="Import daily ECB USD-per-EUR reference rates"
+    )
+    fred_parser = commands.add_parser("import-fred", help="Import a FRED CPI snapshot")
+    fred_parser.add_argument("--as-of", type=date.fromisoformat)
+    freeze_parser = commands.add_parser(
+        "freeze-research", help="Freeze a research candidate against a holdout hash"
+    )
+    freeze_parser.add_argument("commitment")
+    freeze_parser.add_argument(
+        "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
+    )
+    freeze_parser.add_argument("--config", type=Path)
+    score_parser = commands.add_parser(
+        "score-holdout", help="Score a frozen candidate using the committed dataset"
+    )
+    score_parser.add_argument("commitment")
+    score_parser.add_argument("file", type=Path)
+    commands.add_parser("pause-execution", help="Persist the local execution pause")
+    commands.add_parser("resume-execution", help="Clear the local execution pause")
+    commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
+    research_parser = commands.add_parser(
+        "research-brief", help="Read an offline research brief"
+    )
+    research_parser.add_argument(
+        "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
+    )
+    research_parser.add_argument("--llama-port", type=int, default=9931)
+    research_parser.add_argument("--model-alias")
+    research_parser.add_argument("--model-manifest", type=Path)
+    research_parser.add_argument("--token-file", type=Path)
+    wallet_parser = commands.add_parser(
+        "eth-balance", help="Read ETH balance from a local node"
+    )
+    wallet_parser.add_argument("address")
+    wallet_parser.add_argument("--port", type=int, default=8545)
+    wallet_parser.add_argument(
+        "--save", action="store_true", help="Save the observed balance locally"
+    )
+    sol_parser = commands.add_parser(
+        "sol-balance", help="Read SOL balance from a local node"
+    )
+    sol_parser.add_argument("address")
+    sol_parser.add_argument("--port", type=int, default=8899)
+    sol_parser.add_argument(
+        "--save", action="store_true", help="Save the observed balance locally"
+    )
+    for command, network in UTXO_NETWORKS.items():
+        node_parser = commands.add_parser(
+            command, help=f"Scan {network.name} UTXOs at a local node"
+        )
+        node_parser.add_argument("address")
+        node_parser.add_argument("--port", type=int, default=network.port)
+        node_parser.add_argument("--cookie-file", type=Path, required=True)
+        node_parser.add_argument(
+            "--save", action="store_true", help="Save the observed balance locally"
+        )
+    tx_parser = commands.add_parser(
+        "tx-status", help="Read a transaction status from a local node"
+    )
+    tx_parser.add_argument("chain", choices=["eth", "sol"])
+    tx_parser.add_argument("identifier")
+    tx_parser.add_argument("--port", type=int)
+    arguments = parser.parse_args()
+    if arguments.command == "serve":
+        asyncio.run(
+            serve(
+                arguments.public_market_data,
+                arguments.paper_market_data,
+                data_dir=arguments.data_dir,
+                open_browser=arguments.open_browser,
+            )
+        )
+    elif arguments.command == "import-candles":
+        try:
+            count = asyncio.run(import_candles(arguments.interval))
+        except QuoteUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new BTC/USD candles.")
+    elif arguments.command == "import-news":
+        try:
+            count = asyncio.run(import_news())
+        except NewsUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new Federal Reserve releases.")
+    elif arguments.command == "import-macro":
+        try:
+            count = asyncio.run(import_macro())
+        except MacroUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new or revised ECB observations.")
+    elif arguments.command == "import-fred":
+        # This CLI process makes one credential-bearing request. Suppress URL traces.
+        logging.getLogger("httpx2").setLevel(logging.WARNING)
+        logging.getLogger("httpcore2").setLevel(logging.WARNING)
+        try:
+            count = asyncio.run(import_fred(_read_fred_key(), arguments.as_of))
+        except MacroUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new or revised FRED observations.")
+    elif arguments.command in {"freeze-research", "score-holdout"}:
+        try:
+            if arguments.command == "freeze-research":
+                freeze_research(
+                    arguments.commitment, arguments.interval, arguments.config
+                )
+            else:
+                score_research(arguments.commitment, arguments.file)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+    elif arguments.command in {"pause-execution", "resume-execution"}:
+        paused = arguments.command == "pause-execution"
+        store = local_store()
+        store.initialize()
+        store.set_execution_pause(paused)
+        print("Execution paused." if paused else "Execution pause cleared.")
+    elif arguments.command == "mcp":
+        create_mcp_server(local_store().path).run(transport="stdio")
+    elif arguments.command == "research-brief":
+        try:
+            report = asyncio.run(
+                market_research(
+                    arguments.interval,
+                    arguments.llama_port,
+                    arguments.model_alias,
+                    arguments.token_file,
+                    arguments.model_manifest,
+                )
+            )
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
+    elif arguments.command in {"eth-balance", "sol-balance", *UTXO_NETWORKS}:
+        try:
+            snapshot: WalletSnapshot
+            if arguments.command == "eth-balance":
+                snapshot = asyncio.run(
+                    ethereum_balance(arguments.address, arguments.port)
+                )
+            elif arguments.command == "sol-balance":
+                snapshot = asyncio.run(
+                    solana_balance(arguments.address, arguments.port)
+                )
+            else:
+                snapshot = asyncio.run(
+                    utxo_balance(
+                        arguments.address,
+                        arguments.port,
+                        arguments.cookie_file,
+                        UTXO_NETWORKS[arguments.command],
+                    )
+                )
+            if arguments.save:
+                store = local_store()
+                store.initialize()
+                store.save_wallet_snapshot(snapshot)
+        except sqlite3.Error:
+            parser.exit(1, "Wallet snapshot storage unavailable\n")
+        except (OSError, WalletUnavailable, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(WALLET_SNAPSHOT.dump_json(snapshot).decode("utf-8"))
+    elif arguments.command == "tx-status":
+        try:
+            observation = asyncio.run(
+                transaction_status(
+                    arguments.chain, arguments.identifier, arguments.port
+                )
+            )
+        except (WalletUnavailable, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            TypeAdapter(TransactionObservation).dump_json(observation).decode("utf-8")
+        )
+    else:
+        print(Status().model_dump_json())
 
 
 if __name__ == "__main__":

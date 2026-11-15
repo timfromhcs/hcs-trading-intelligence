@@ -28,7 +28,12 @@ from hcs_trader.data.kraken import (
 )
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
-from hcs_trader.domain.wallet import SolanaBalance, WalletBalance, WalletSnapshot
+from hcs_trader.domain.wallet import (
+    SolanaBalance,
+    TransactionObservation,
+    WalletBalance,
+    WalletSnapshot,
+)
 from hcs_trader.holdout import (
     CANDIDATE_JSON,
     MAX_HOLDOUT_BYTES,
@@ -177,6 +182,19 @@ async def solana_balance(address: str, port: int) -> SolanaBalance:
         return await LocalWalletRpc(client, port).solana_balance(address)
 
 
+async def transaction_status(
+    chain: str, identifier: str, port: int | None
+) -> TransactionObservation:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        if chain == "eth":
+            return await LocalWalletRpc(
+                client, 8545 if port is None else port
+            ).ethereum_transaction(identifier)
+        return await LocalWalletRpc(
+            client, 8899 if port is None else port
+        ).solana_transaction(identifier)
+
+
 async def utxo_balance(
     address: str, port: int, cookie_file: Path, network: UtxoNetwork
 ) -> WalletBalance:
@@ -305,6 +323,12 @@ def main() -> None:
         node_parser.add_argument(
             "--save", action="store_true", help="Save the observed balance locally"
         )
+    tx_parser = commands.add_parser(
+        "tx-status", help="Read a transaction status from a local node"
+    )
+    tx_parser.add_argument("chain", choices=["eth", "sol"])
+    tx_parser.add_argument("identifier")
+    tx_parser.add_argument("--port", type=int)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -396,6 +420,18 @@ def main() -> None:
         except (OSError, WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(WALLET_SNAPSHOT.dump_json(snapshot).decode("utf-8"))
+    elif arguments.command == "tx-status":
+        try:
+            observation = asyncio.run(
+                transaction_status(
+                    arguments.chain, arguments.identifier, arguments.port
+                )
+            )
+        except (WalletUnavailable, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            TypeAdapter(TransactionObservation).dump_json(observation).decode("utf-8")
+        )
     else:
         print(Status().model_dump_json())
 

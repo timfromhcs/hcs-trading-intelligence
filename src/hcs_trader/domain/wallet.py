@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,3 +28,15 @@ class SolanaBalance:
 
 
 type WalletSnapshot = WalletBalance | SolanaBalance
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionObservation:
+    network: str
+    identifier: str
+    observed_at: datetime
+    finality: Literal["unknown", "processed", "confirmed", "finalized"]
+    successful: bool | None = None
+    block_number: int | None = None
+    block_hash: str | None = None
+    slot: int | None = None

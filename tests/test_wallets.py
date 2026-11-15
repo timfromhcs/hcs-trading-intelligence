@@ -270,3 +270,72 @@ def test_snapshot_save_is_opt_in_and_offline_api_keeps_latest(
         assert prior["asset"] == str(ETH) and prior["base_units"] == "123"
         assert api.get("/api/v1/wallets?limit=1").json() == [recent]
         assert api.get("/api/v1/wallets?limit=101").status_code == 422
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("canonical", [True, False])
+async def test_ethereum_receipt_requires_canonical_block(canonical: bool) -> None:
+    txid = "0x" + "b1" * 32
+
+    def node(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        match body["method"]:
+            case "eth_chainId":
+                result: object = "0x1"
+            case "eth_getTransactionReceipt":
+                assert body["params"] == [txid]
+                result = {
+                    "transactionHash": txid,
+                    "blockNumber": "0x1",
+                    "blockHash": _BLOCK_HASH,
+                    "status": "0x0",
+                }
+            case "eth_getBlockByNumber":
+                if body["params"][0] == "finalized":
+                    result = {"number": "0x2", "hash": "0x" + "ab" * 32}
+                else:
+                    assert body["params"] == ["0x1", False]
+                    result = {
+                        "number": "0x1",
+                        "hash": _BLOCK_HASH if canonical else "0x" + "aa" * 32,
+                    }
+            case _:
+                raise AssertionError("Unexpected RPC")
+        return httpx2.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(node)) as client:
+        rpc = LocalWalletRpc(client, 8545)
+        if not canonical:
+            with pytest.raises(WalletUnavailable, match="canonical"):
+                await rpc.ethereum_transaction(txid)
+        else:
+            observed = await rpc.ethereum_transaction(txid)
+            assert observed.finality == "finalized" and observed.successful is False
+            assert observed.block_number == 1 and observed.block_hash == _BLOCK_HASH
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("present", [True, False])
+async def test_solana_status_preserves_confirmation_or_unknown(present: bool) -> None:
+    signature = "1" * 63 + "2"
+
+    def node(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        if body["method"] == "getGenesisHash":
+            result: object = SOL_GENESIS
+        else:
+            assert body["method"] == "getSignatureStatuses"
+            assert body["params"] == [[signature], {"searchTransactionHistory": True}]
+            state = {"slot": 12, "confirmationStatus": "confirmed", "err": None}
+            result = {"context": {"slot": 15}, "value": [state if present else None]}
+        return httpx2.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(node)) as client:
+        observed = await LocalWalletRpc(client, 8899).solana_transaction(signature)
+    assert observed.finality == ("confirmed" if present else "unknown")
+    assert observed.successful is (True if present else None)
+    assert observed.slot == (12 if present else None)

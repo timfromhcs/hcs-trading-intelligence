@@ -13,7 +13,11 @@ import httpx2
 from pydantic import BaseModel, Field
 
 from hcs_trader.domain.assets import AssetId
-from hcs_trader.domain.wallet import SolanaBalance, WalletBalance
+from hcs_trader.domain.wallet import (
+    SolanaBalance,
+    TransactionObservation,
+    WalletBalance,
+)
 
 ETH = AssetId.parse("eip155:1/native:ETH")
 BTC = AssetId.parse("bitcoin:mainnet/native:BTC")
@@ -45,6 +49,13 @@ class _FinalizedBlock(BaseModel):
     hash: str
 
 
+class _EthReceipt(BaseModel):
+    transaction_hash: str = Field(alias="transactionHash")
+    block_number: str = Field(alias="blockNumber")
+    block_hash: str = Field(alias="blockHash")
+    status: Literal["0x0", "0x1"] | None = None
+
+
 class _SlotContext(BaseModel):
     slot: int = Field(ge=0, le=2**64 - 1)
 
@@ -52,6 +63,19 @@ class _SlotContext(BaseModel):
 class _LamportBalance(BaseModel):
     context: _SlotContext
     value: int = Field(ge=0, le=2**64 - 1)
+
+
+class _SignatureStatus(BaseModel):
+    slot: int = Field(ge=0, le=2**64 - 1)
+    finality: Literal["processed", "confirmed", "finalized"] = Field(
+        alias="confirmationStatus"
+    )
+    err: object
+
+
+class _SignatureStatuses(BaseModel):
+    context: _SlotContext
+    value: list[_SignatureStatus | None] = Field(min_length=1, max_length=1)
 
 
 class _UtxoChain(BaseModel):
@@ -220,6 +244,87 @@ class LocalWalletRpc:
     async def bitcoin_balance(self, address: str) -> WalletBalance:
         return await self.utxo_balance(address, UTXO_NETWORKS["btc-balance"])
 
+    async def ethereum_transaction(self, txid: str) -> TransactionObservation:
+        if not _HASH.fullmatch(txid):
+            raise ValueError("Expected a 32-byte Ethereum transaction hash")
+        txid = txid.lower()
+        if _quantity(await self._request("eth_chainId", [])) != 1:
+            raise WalletUnavailable("Local node is not Ethereum mainnet")
+        payload = await self._request("eth_getTransactionReceipt", [txid])
+        if payload is None:
+            return TransactionObservation(
+                ETH.network.value, txid, datetime.now(UTC), "unknown"
+            )
+        try:
+            receipt = _EthReceipt.model_validate(payload, strict=True)
+            height = _quantity(receipt.block_number)
+            if receipt.transaction_hash.lower() != txid or not _HASH.fullmatch(
+                receipt.block_hash
+            ):
+                raise WalletUnavailable(
+                    "Ethereum receipt does not match the requested transaction"
+                )
+            canonical = _FinalizedBlock.model_validate(
+                await self._request(
+                    "eth_getBlockByNumber", [receipt.block_number, False]
+                ),
+                strict=True,
+            )
+            finalized = _FinalizedBlock.model_validate(
+                await self._request("eth_getBlockByNumber", ["finalized", False]),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable("Invalid Ethereum receipt or block") from None
+        if (
+            _quantity(canonical.number) != height
+            or canonical.hash.lower() != receipt.block_hash.lower()
+            or not _HASH.fullmatch(finalized.hash)
+        ):
+            raise WalletUnavailable(
+                "Receipt does not match the canonical Ethereum block"
+            )
+        return TransactionObservation(
+            ETH.network.value,
+            txid,
+            datetime.now(UTC),
+            "finalized" if height <= _quantity(finalized.number) else "confirmed",
+            receipt.status == "0x1" if receipt.status is not None else None,
+            block_number=height,
+            block_hash=canonical.hash,
+        )
+
+    async def solana_transaction(self, signature: str) -> TransactionObservation:
+        if not _is_base58_size(signature, 64):
+            raise ValueError("Expected a 64-byte Solana transaction signature")
+        if await self._request("getGenesisHash", []) != SOL_GENESIS:
+            raise WalletUnavailable("Local node is not Solana mainnet-beta")
+        try:
+            statuses = _SignatureStatuses.model_validate(
+                await self._request(
+                    "getSignatureStatuses",
+                    [[signature], {"searchTransactionHistory": True}],
+                ),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable("Invalid Solana signature status") from None
+        status = statuses.value[0]
+        if status is None:
+            return TransactionObservation(
+                SOL.network.value, signature, datetime.now(UTC), "unknown"
+            )
+        if status.slot > statuses.context.slot:
+            raise WalletUnavailable("Solana transaction slot exceeds the node context")
+        return TransactionObservation(
+            SOL.network.value,
+            signature,
+            datetime.now(UTC),
+            status.finality,
+            status.err is None,
+            slot=status.slot,
+        )
+
     async def utxo_balance(self, address: str, network: UtxoNetwork) -> WalletBalance:
         if not _UTXO_ADDRESS.fullmatch(address):
             raise ValueError(f"Expected a {network.name} address")
@@ -292,10 +397,16 @@ def _quantity(value: object) -> int:
 
 
 def _is_solana_address(address: str) -> bool:
-    if not 32 <= len(address) <= 44 or any(char not in _BASE58 for char in address):
+    return _is_base58_size(address, 32)
+
+
+def _is_base58_size(address: str, size: int) -> bool:
+    if not size <= len(address) <= (size * 138 + 99) // 100 or any(
+        char not in _BASE58 for char in address
+    ):
         return False
     decoded = 0
     for char in address:
         decoded = decoded * 58 + _BASE58.index(char)
     leading_zero_bytes = len(address) - len(address.lstrip("1"))
-    return leading_zero_bytes + (decoded.bit_length() + 7) // 8 == 32
+    return leading_zero_bytes + (decoded.bit_length() + 7) // 8 == size

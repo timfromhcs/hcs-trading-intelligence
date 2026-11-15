@@ -30,6 +30,7 @@
 - Added Bitcoin Core confirmed UTXO balance reads with exact satoshi conversion.
 - Added Litecoin and DigiByte confirmed UTXO balance reads and pinned the genesis block for all UTXO adapters.
 - Added opt-in persistence and offline REST access for public-address wallet snapshots.
+- Added read-only Ethereum and Solana transaction status queries.
 
 ## 0.1.0 — development foundation
 

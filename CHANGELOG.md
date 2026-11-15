@@ -39,6 +39,7 @@
 - Added signing invariant test suite covering policy enforcement, tampering detection, and secret isolation.
 - Added deterministic pre-trade risk engine with notional, spread, slippage, quote freshness and open-order bounds.
 - Added spot-only Kraken execution adapter with HMAC-SHA512 signing, withdrawals disabled, and fail-closed reconciliation.
+- Added Solana Jupiter swap adapter with strict mint, slippage, price-impact, and instruction allowlists.
 - Added SQLite schema version 12 with persistent spot-order storage and lifecycle tracking.
 
 ## 0.1.0 — development foundation

@@ -5,14 +5,19 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.market_data import DataQuality
 from hcs_trader.storage import AuditStore
 
 _logger = logging.getLogger(__name__)
@@ -52,7 +57,25 @@ class Capabilities(BaseModel):
     mcp: bool = False
 
 
-def create_app(store: AuditStore, ui_assets: Path | None = None) -> FastAPI:
+class QuoteResponse(BaseModel):
+    source: str
+    base_asset: str
+    quote_asset: str
+    quality: DataQuality
+    provider_issue: str | None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    bid_updated_at: datetime | None = None
+    ask_updated_at: datetime | None = None
+    received_at: datetime | None = None
+
+
+def create_app(
+    store: AuditStore,
+    ui_assets: Path | None = None,
+    *,
+    quote_service: QuoteService | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store.initialize()
@@ -84,6 +107,8 @@ def create_app(store: AuditStore, ui_assets: Path | None = None) -> FastAPI:
 
     @app.get("/api/v1/system/status")
     def status() -> Status:
+        if quote_service is not None:
+            return Status(mode=Mode.DATA_ONLY, network_enabled=True)
         return Status()
 
     @app.get("/api/v1/system/config")
@@ -92,7 +117,27 @@ def create_app(store: AuditStore, ui_assets: Path | None = None) -> FastAPI:
 
     @app.get("/api/v1/system/capabilities")
     def capabilities() -> Capabilities:
-        return Capabilities()
+        return Capabilities(market_data=quote_service is not None)
+
+    @app.get("/api/v1/market/quotes")
+    async def market_quote(response: Response) -> QuoteResponse:
+        if quote_service is None:
+            raise HTTPException(503, "Public market data is disabled")
+        response.headers["Cache-Control"] = "no-store"
+        snapshot = await quote_service.snapshot()
+        quote = snapshot.quote
+        return QuoteResponse(
+            source=SOURCE,
+            base_asset=str(BTC_USD.base),
+            quote_asset=str(BTC_USD.quote),
+            quality=snapshot.quality,
+            provider_issue=snapshot.provider_issue,
+            bid=quote.bid if quote else None,
+            ask=quote.ask if quote else None,
+            bid_updated_at=quote.bid_updated_at if quote else None,
+            ask_updated_at=quote.ask_updated_at if quote else None,
+            received_at=quote.received_at if quote else None,
+        )
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

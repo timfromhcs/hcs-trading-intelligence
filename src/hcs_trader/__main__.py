@@ -5,6 +5,7 @@ import asyncio
 import logging
 import sqlite3
 import warnings
+import webbrowser
 from dataclasses import replace
 from datetime import date
 from getpass import GetPassWarning, getpass
@@ -215,8 +216,14 @@ async def utxo_balance(
         return await LocalWalletRpc(client, port).utxo_balance(address, network)
 
 
-async def serve(market_data: bool, paper_mode: bool = False) -> None:
-    store = local_store()
+async def serve(
+    market_data: bool,
+    paper_mode: bool = False,
+    *,
+    data_dir: Path | None = None,
+    open_browser: bool = False,
+) -> None:
+    store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
         quotes = (
             QuoteService(
@@ -238,7 +245,18 @@ async def serve(market_data: bool, paper_mode: bool = False) -> None:
             proxy_headers=False,
             access_log=False,
         )
-        await uvicorn.Server(config).serve()
+        server = uvicorn.Server(config)
+        if open_browser:
+            async with asyncio.TaskGroup() as group:
+                run = group.create_task(server.serve())
+                while not server.started and not run.done():
+                    await asyncio.sleep(0.05)
+                if server.started:
+                    await asyncio.to_thread(
+                        webbrowser.open, f"http://{LOOPBACK_HOST}:{LOCAL_PORT}/"
+                    )
+        else:
+            await server.serve()
 
 
 def main() -> None:
@@ -253,6 +271,12 @@ def main() -> None:
         "--public-market-data",
         action="store_true",
         help="Enable public Kraken quote requests",
+    )
+    serve_parser.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    serve_parser.add_argument(
+        "--open-browser", action="store_true", help="Open the dashboard"
     )
     network_mode.add_argument(
         "--paper-market-data",
@@ -331,7 +355,14 @@ def main() -> None:
     tx_parser.add_argument("--port", type=int)
     arguments = parser.parse_args()
     if arguments.command == "serve":
-        asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
+        asyncio.run(
+            serve(
+                arguments.public_market_data,
+                arguments.paper_market_data,
+                data_dir=arguments.data_dir,
+                open_browser=arguments.open_browser,
+            )
+        )
     elif arguments.command == "import-candles":
         try:
             count = asyncio.run(import_candles(arguments.interval))

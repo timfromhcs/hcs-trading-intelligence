@@ -32,6 +32,9 @@ dev = [
     "types-defusedxml>=0.7.0.20260504",
     "uv_build==0.13.5",
 ]
+packaging = [
+    "pyinstaller==6.22.3",
+]
 
 [tool.uv]
 required-version = "==0.13.5"

@@ -1,15 +1,30 @@
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
+import pytest
+from starlette.testclient import TestClient
+
+from hcs_trader import __main__ as launcher
+from hcs_trader.api import create_app
 from hcs_trader.backtest import BacktestConfig, BacktestResult, SimulatedFill
+from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.domain.market_data import Candle
 from hcs_trader.promotion import (
     PROMOTION_LADDER,
     PromotionStage,
     StrategyCandidate,
     compare_champion_challenger,
     evaluate_promotion_gate,
+    execute_shadow_run,
+    get_latest_shadow_run,
+    list_shadow_runs_for_candidate,
     next_promotion_stage,
+    promote_strategy_candidate,
+    run_forward_shadow_observation,
 )
+from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import (
     Evaluation,
     PeriodPair,
@@ -276,3 +291,117 @@ def test_champion_challenger_comparison() -> None:
     )
     verdict2 = compare_champion_challenger("c1", champ, "c3", worse_return)
     assert verdict2.challenger_wins is False
+
+
+def test_execute_shadow_run_and_cli_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = AuditStore(tmp_path / "audit.sqlite")
+    store.initialize()
+    now = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    dev_candles = [
+        Candle(
+            BTC_USD,
+            SOURCE,
+            60,
+            now + timedelta(hours=i),
+            now + timedelta(hours=i + 1),
+            Decimal(100 + (i % 3) * 10),
+            Decimal(135),
+            Decimal(85),
+            Decimal(100 + (i % 3) * 10),
+            Decimal(10),
+            5,
+        )
+        for i in range(10)
+    ]
+    store.record_candles(dev_candles)
+
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        rep = api.post(
+            "/api/v1/backtests",
+            json={"fast_period": 2, "slow_period": 3, "volume_fraction": "0.1"},
+        )
+        assert rep.is_success
+        report_id = rep.headers["location"].rsplit("/", 1)[1]
+
+    boundary = dev_candles[-1].closed_at
+    forward_candles = [
+        Candle(
+            BTC_USD,
+            SOURCE,
+            60,
+            boundary + timedelta(hours=i),
+            boundary + timedelta(hours=i + 1),
+            Decimal(100 + (i % 3) * 10),
+            Decimal(135),
+            Decimal(85),
+            Decimal(100 + (i % 3) * 10),
+            Decimal(10),
+            5,
+        )
+        for i in range(30)
+    ]
+    store.record_candles(forward_candles)
+
+    cand = StrategyCandidate(
+        candidate_id="cand-shadow-test",
+        name="SMA-Shadow",
+        version="v1.0.0",
+        stage=PromotionStage.PAPER_SHADOW,
+        dataset_hash=rep.json()["dataset_sha256"],
+        parameters={"fast": 2, "slow": 3, "backtest_report_id": report_id},
+        created_at=boundary - timedelta(hours=1),
+        updated_at=boundary,
+    )
+    store.save_strategy_candidate(cand)
+
+    # 1. Execute shadow run directly
+    run_id, result = execute_shadow_run(store, cand.candidate_id)
+    assert run_id is not None
+    assert isinstance(result, BacktestResult)
+
+    # 2. Check latest and list shadow runs
+    latest_id, latest_report = get_latest_shadow_run(store, cand.candidate_id)
+    assert latest_id == run_id
+    assert latest_report == result
+
+    history = list_shadow_runs_for_candidate(store, cand.candidate_id)
+    assert len(history) == 1
+    assert history[0][0] == run_id
+
+    # 3. Forward shadow observation
+    obs = run_forward_shadow_observation(store, cand.candidate_id)
+    assert len(obs) == 1
+    assert obs[0][0] == cand.candidate_id
+
+    # 4. CLI strategy-shadow-run
+    monkeypatch.setattr(launcher, "local_store", lambda data_dir=None: store)
+    monkeypatch.setattr(
+        "sys.argv", ["hcs-trader", "strategy-shadow-run", cand.candidate_id]
+    )
+    launcher.main()
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["candidate_id"] == cand.candidate_id
+    assert data["run_id"] == run_id
+
+    # 5. CLI strategy-shadow-history
+    monkeypatch.setattr(
+        "sys.argv",
+        ["hcs-trader", "strategy-shadow-history", cand.candidate_id, "--limit", "10"],
+    )
+    launcher.main()
+    hist_out = capsys.readouterr().out
+    hist_data = json.loads(hist_out)
+    assert len(hist_data) == 1
+    assert hist_data[0]["run_id"] == run_id
+
+    # 6. Now promote to PAPER_APPROVED using verified shadow replay
+    updated, gate = promote_strategy_candidate(
+        store, cand.candidate_id, PromotionStage.PAPER_APPROVED
+    )
+    assert updated.stage == PromotionStage.PAPER_APPROVED
+    assert gate.passed is True

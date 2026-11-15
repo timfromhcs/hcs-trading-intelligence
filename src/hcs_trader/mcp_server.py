@@ -32,6 +32,7 @@ from hcs_trader.promotion import (
     ComparisonMetrics,
     PromotionStage,
     compare_strategy_metrics,
+    list_shadow_runs_for_candidate,
 )
 from hcs_trader.risk import RiskPolicy
 from hcs_trader.skills import list_skills
@@ -71,6 +72,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "wallets.get_snapshots": CapabilityTier.READ,
     "audit.get_events": CapabilityTier.READ,
     "strategies.get_candidates": CapabilityTier.READ,
+    "strategies.get_shadow_runs": CapabilityTier.READ,
     "quant.compare_strategy_candidates": CapabilityTier.READ,
 }
 
@@ -373,6 +375,35 @@ def create_mcp_server(
 
         return _local_read(_read_candidates)
 
+    @read_tool("strategies.get_shadow_runs")
+    def strategy_shadow_runs_tool(
+        candidate_id: Annotated[
+            str,
+            Field(description="Strategy candidate identifier"),
+        ],
+        limit: Annotated[
+            int,
+            Field(default=25, ge=1, le=100, description="Max shadow runs to return"),
+        ] = 25,
+    ) -> list[dict[str, Any]]:
+        """Read shadow replay history and metrics for a strategy candidate."""
+
+        def _read_runs() -> list[dict[str, Any]]:
+            runs = list_shadow_runs_for_candidate(store, candidate_id, limit=limit)
+            return [
+                {
+                    "run_id": run_id,
+                    "evaluated_until": evaluated_until.isoformat(),
+                    "net_return": str(report.net_return),
+                    "max_drawdown": str(report.max_drawdown),
+                    "fills_count": len(report.fills),
+                    "dataset_closed_at": report.dataset_closed_at.isoformat(),
+                }
+                for run_id, evaluated_until, report in runs
+            ]
+
+        return _local_read(_read_runs)
+
     @server.resource("hcs://system/capabilities", mime_type="application/json")
     def capabilities_resource() -> str:
         """Current system capabilities and feature availability."""
@@ -398,6 +429,31 @@ def create_mcp_server(
         def _read() -> str:
             candidates = store.list_strategy_candidates()
             return json.dumps([cand.model_dump(mode="json") for cand in candidates])
+
+        return _local_read(_read)
+
+    @server.resource(
+        "hcs://strategies/{candidate_id}/shadow-runs",
+        mime_type="application/json",
+    )
+    def candidate_shadow_runs_resource(candidate_id: str) -> str:
+        """Recent paper shadow replay runs for a strategy candidate."""
+
+        def _read() -> str:
+            runs = list_shadow_runs_for_candidate(store, candidate_id, limit=25)
+            return json.dumps(
+                [
+                    {
+                        "run_id": run_id,
+                        "evaluated_until": evaluated_until.isoformat(),
+                        "net_return": str(report.net_return),
+                        "max_drawdown": str(report.max_drawdown),
+                        "fills_count": len(report.fills),
+                        "dataset_closed_at": report.dataset_closed_at.isoformat(),
+                    }
+                    for run_id, evaluated_until, report in runs
+                ]
+            )
 
         return _local_read(_read)
 

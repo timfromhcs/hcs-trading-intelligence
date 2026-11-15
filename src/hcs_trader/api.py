@@ -4,7 +4,6 @@ import asyncio
 import csv
 import json
 import logging
-import re
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -48,6 +47,10 @@ from hcs_trader.promotion import (
     PromotionStage,
     ReportPayload,
     StrategyCandidate,
+    execute_shadow_run,
+    get_candidate_backtest_report,
+    get_latest_shadow_run,
+    list_shadow_runs_for_candidate,
     promote_strategy_candidate,
 )
 from hcs_trader.skills import list_skills
@@ -673,36 +676,19 @@ def create_app(
             raise HTTPException(503, "Failed to save strategy candidate") from error
 
     def candidate_backtest(candidate: StrategyCandidate) -> BacktestResult:
-        report_id = candidate.parameters.get("backtest_report_id")
-        if not isinstance(report_id, str) or not re.fullmatch(
-            r"[a-f0-9]{64}", report_id
-        ):
-            raise HTTPException(409, "Candidate needs a saved backtest report ID")
-        report = get_report(report_id).report
-        if (
-            not isinstance(report, BacktestResult)
-            or report.dataset_sha256 != candidate.dataset_hash
-            or report.config.fast_period != candidate.parameters.get("fast")
-            or report.config.slow_period != candidate.parameters.get("slow")
-        ):
-            raise HTTPException(409, "Backtest report does not match the candidate")
-        return report
+        try:
+            return get_candidate_backtest_report(store, candidate)
+        except PromotionRejected as error:
+            raise HTTPException(409, str(error)) from error
 
     def latest_shadow(candidate_id: str) -> ShadowRunResponse:
         try:
-            saved = store.latest_shadow_run(candidate_id)
-            if saved is None:
-                raise HTTPException(404, "No paper shadow run recorded")
-            run_id, payload = saved
-            report = ReportPayload.model_validate_json(payload).report
-            if (
-                not isinstance(report, BacktestResult)
-                or sha256(payload.encode("utf-8")).hexdigest() != run_id
-            ):
-                raise ValueError("Invalid shadow run payload")
+            run_id, report = get_latest_shadow_run(store, candidate_id)
+            return ShadowRunResponse(run_id=run_id, report=report)
+        except PromotionRejected as error:
+            raise HTTPException(404, str(error)) from error
         except (sqlite3.Error, ValueError) as error:
             raise HTTPException(503, "Paper shadow run unavailable") from error
-        return ShadowRunResponse(run_id=run_id, report=report)
 
     @app.get("/api/v1/strategies/candidates/{candidate_id}/shadow-run")
     def get_shadow_run(candidate_id: str) -> ShadowRunResponse:
@@ -711,54 +697,15 @@ def create_app(
     @app.post("/api/v1/strategies/candidates/{candidate_id}/shadow-run")
     def run_shadow(candidate_id: str, request: Request) -> ShadowRunResponse:
         _verify_local_origin(request, "Run paper shadow simulation")
-        candidate = store.get_strategy_candidate(candidate_id)
-        if candidate is None:
-            raise HTTPException(404, "Strategy candidate not found")
-        if candidate.stage != PromotionStage.PAPER_SHADOW:
-            raise HTTPException(409, "Candidate must be in PAPER_SHADOW")
-        source = candidate_backtest(candidate)
-        now = datetime.now(UTC)
-        boundary = max(candidate.updated_at, source.dataset_closed_at)
-        candles = [
-            candle for candle in read_candles(60, 1000) if candle.closed_at <= now
-        ]
-        start = next(
-            (
-                index
-                for index, candle in enumerate(candles)
-                if candle.opened_at >= boundary
-            ),
-            len(candles),
-        )
-        warmup = source.config.slow_period
-        if (
-            not warmup <= start < len(candles)
-            or candles[start].opened_at - candles[start - 1].opened_at
-            != candles[start].closed_at - candles[start].opened_at
-            or candles[start - 1].opened_at >= boundary
-        ):
-            raise HTTPException(
-                409, "Need contiguous hourly candles across the shadow boundary"
-            )
         try:
-            result = run_backtest(
-                candles[start - warmup :], source.config, trade_start=warmup
-            )
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from error
-        payload = ReportPayload(report=result).model_dump_json()
-        run_id = sha256(payload.encode("utf-8")).hexdigest()
-        try:
-            saved = store.record_shadow_run(
-                candidate, run_id, result.dataset_closed_at, payload
-            )
-        except PaperRejected as error:
+            run_id, result = execute_shadow_run(store, candidate_id)
+            return ShadowRunResponse(run_id=run_id, report=result)
+        except CandidateNotFound as error:
+            raise HTTPException(404, str(error)) from error
+        except (PaperRejected, PromotionRejected, ValueError) as error:
             raise HTTPException(409, str(error)) from error
         except sqlite3.Error as error:
             raise HTTPException(503, "Paper shadow storage unavailable") from error
-        if not saved:
-            raise HTTPException(409, "Candidate changed during shadow simulation")
-        return ShadowRunResponse(run_id=run_id, report=result)
 
     @app.get("/api/v1/strategies/candidates/{candidate_id}/shadow-runs")
     def list_shadow_runs_endpoint(
@@ -766,13 +713,11 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=100)] = 25,
     ) -> list[ShadowRunResponse]:
         try:
-            records = store.list_shadow_runs(candidate_id, limit=limit)
-            results = []
-            for run_id, _, payload in records:
-                report = ReportPayload.model_validate_json(payload).report
-                if isinstance(report, BacktestResult):
-                    results.append(ShadowRunResponse(run_id=run_id, report=report))
-            return results
+            records = list_shadow_runs_for_candidate(store, candidate_id, limit=limit)
+            return [
+                ShadowRunResponse(run_id=run_id, report=report)
+                for run_id, _, report in records
+            ]
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Paper shadow history unavailable") from error
 

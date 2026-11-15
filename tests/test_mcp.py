@@ -123,6 +123,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "wallets.get_snapshots",
             "audit.get_events",
             "strategies.get_candidates",
+            "strategies.get_shadow_runs",
             "quant.compare_strategy_candidates",
         }
         assert all(
@@ -179,6 +180,12 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "strategies.get_candidates", {"stage": "LIVE_BOUNDED"}
         )
         assert cand_empty.content == []
+
+        shadow_resp = await client.call_tool(
+            "strategies.get_shadow_runs", {"candidate_id": "cand-mcp-01"}
+        )
+        assert not shadow_resp.is_error
+        assert shadow_resp.content == []
 
         metrics = {
             "champion_net_return": "0.10",

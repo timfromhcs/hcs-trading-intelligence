@@ -39,6 +39,7 @@ from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
+from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.domain.wallet import (
     SolanaBalance,
     TransactionObservation,
@@ -72,7 +73,10 @@ from hcs_trader.promotion import (
     CandidateNotFound,
     PromotionRejected,
     PromotionStage,
+    execute_shadow_run,
+    list_shadow_runs_for_candidate,
     promote_strategy_candidate,
+    watch_shadow,
 )
 from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
 from hcs_trader.spot_execution import KrakenSpotExecution
@@ -549,6 +553,41 @@ def main() -> None:
     strategy_promote.add_argument(
         "--data-dir", type=Path, help="Use a separate local data directory"
     )
+    strategy_shadow = commands.add_parser(
+        "strategy-shadow-run",
+        help="Execute and persist a paper shadow replay for a candidate",
+    )
+    strategy_shadow.add_argument("candidate_id", help="Candidate identifier")
+    strategy_shadow.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_shadow_history = commands.add_parser(
+        "strategy-shadow-history",
+        help="Read shadow replay history and metrics for a candidate",
+    )
+    strategy_shadow_history.add_argument("candidate_id", help="Candidate identifier")
+    strategy_shadow_history.add_argument(
+        "--limit", type=int, default=25, help="Max runs to return"
+    )
+    strategy_shadow_history.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_shadow_watch = commands.add_parser(
+        "strategy-shadow-watch",
+        help="Foreground scheduled observer for forward shadow execution",
+    )
+    strategy_shadow_watch.add_argument(
+        "--candidate-id", help="Optional candidate identifier filter"
+    )
+    strategy_shadow_watch.add_argument(
+        "--every-seconds",
+        type=int,
+        default=3600,
+        help="Observation interval in seconds",
+    )
+    strategy_shadow_watch.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
     research_parser = argparse.ArgumentParser(add_help=False)
     research_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
@@ -797,6 +836,85 @@ def main() -> None:
                 indent=2,
             )
         )
+    elif arguments.command == "strategy-shadow-run":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            run_id, shadow_result = execute_shadow_run(store, arguments.candidate_id)
+        except CandidateNotFound as error:
+            parser.exit(1, f"{error}\n")
+        except (PaperRejected, PromotionRejected) as error:
+            parser.exit(1, f"{error}\n")
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            json.dumps(
+                {
+                    "candidate_id": arguments.candidate_id,
+                    "run_id": run_id,
+                    "dataset_closed_at": shadow_result.dataset_closed_at.isoformat(),
+                    "net_return": str(shadow_result.net_return),
+                    "max_drawdown": str(shadow_result.max_drawdown),
+                    "fills_count": len(shadow_result.fills),
+                },
+                indent=2,
+            )
+        )
+    elif arguments.command == "strategy-shadow-history":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            runs = list_shadow_runs_for_candidate(
+                store, arguments.candidate_id, limit=arguments.limit
+            )
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            json.dumps(
+                [
+                    {
+                        "run_id": run_id,
+                        "evaluated_until": evaluated_until.isoformat(),
+                        "net_return": str(report.net_return),
+                        "max_drawdown": str(report.max_drawdown),
+                        "fills_count": len(report.fills),
+                        "dataset_closed_at": report.dataset_closed_at.isoformat(),
+                    }
+                    for run_id, evaluated_until, report in runs
+                ],
+                indent=2,
+            )
+        )
+    elif arguments.command == "strategy-shadow-watch":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        if not 60 <= arguments.every_seconds <= 86400:
+            parser.exit(
+                1, "Observation interval must be between 60 and 86400 seconds\n"
+            )
+        try:
+            asyncio.run(
+                watch_shadow(
+                    store,
+                    arguments.candidate_id,
+                    every_seconds=arguments.every_seconds,
+                )
+            )
+        except KeyboardInterrupt:
+            return
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
     elif arguments.command == "kraken-validate":
         try:
             validation = asyncio.run(

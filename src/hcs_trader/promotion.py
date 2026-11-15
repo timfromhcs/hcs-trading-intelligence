@@ -1,6 +1,8 @@
 """Formal strategy promotion pipeline and champion/challenger evaluation."""
 
+import asyncio
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -10,7 +12,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from hcs_trader.backtest import BacktestResult
+from hcs_trader.backtest import BacktestResult, run_backtest
+from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.domain.market_data import Candle
+from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.holdout import CANDIDATE_JSON, RESULT_JSON, HoldoutResult
 from hcs_trader.walk_forward import PeriodPair, WalkForwardResult
 
@@ -274,6 +279,186 @@ def compare_strategy_metrics(
     )
 
 
+def get_report_payload(store: Any, report_id: str) -> ReportPayload:
+    """Retrieve and validate the integrity of a stored backtest/walk-forward report."""
+    if not isinstance(report_id, str) or not re.fullmatch(r"[a-f0-9]{64}", report_id):
+        raise PromotionRejected("Invalid report ID format")
+    record = store.backtest_report(report_id)
+    if record is None:
+        raise PromotionRejected("Backtest report not found")
+    if sha256(record.payload.encode("utf-8")).hexdigest() != report_id:
+        raise PromotionRejected("Backtest report integrity check failed")
+    try:
+        return ReportPayload.model_validate_json(record.payload)
+    except ValidationError as error:
+        raise PromotionRejected("Backtest report format is unsupported") from error
+
+
+def get_candidate_backtest_report(
+    store: Any, candidate: StrategyCandidate
+) -> BacktestResult:
+    """Retrieve and verify the base backtest report for a strategy candidate."""
+    report_id = candidate.parameters.get("backtest_report_id")
+    if not isinstance(report_id, str) or not re.fullmatch(r"[a-f0-9]{64}", report_id):
+        raise PromotionRejected("Candidate needs a saved backtest report ID")
+    report = get_report_payload(store, report_id).report
+    if (
+        not isinstance(report, BacktestResult)
+        or report.dataset_sha256 != candidate.dataset_hash
+        or report.config.fast_period != candidate.parameters.get("fast")
+        or report.config.slow_period != candidate.parameters.get("slow")
+    ):
+        raise PromotionRejected("Backtest report does not match the candidate")
+    return report
+
+
+def get_latest_shadow_run(store: Any, candidate_id: str) -> tuple[str, BacktestResult]:
+    """Retrieve the latest verified paper shadow run for a candidate."""
+    saved = store.latest_shadow_run(candidate_id)
+    if saved is None:
+        raise PromotionRejected("A persisted paper shadow run is required")
+    run_id, payload = saved
+    if sha256(payload.encode("utf-8")).hexdigest() != run_id:
+        raise PromotionRejected("Invalid shadow run payload")
+    try:
+        parsed = ReportPayload.model_validate_json(payload).report
+    except ValidationError as error:
+        raise PromotionRejected("Invalid shadow run report format") from error
+    if not isinstance(parsed, BacktestResult):
+        raise PromotionRejected("Shadow run report must be a BacktestResult")
+    return run_id, parsed
+
+
+def list_shadow_runs_for_candidate(
+    store: Any, candidate_id: str, limit: int = 25
+) -> list[tuple[str, datetime, BacktestResult]]:
+    """Retrieve recent verified shadow runs for a candidate ordered newest first."""
+    records = store.list_shadow_runs(candidate_id, limit=limit)
+    results: list[tuple[str, datetime, BacktestResult]] = []
+    for run_id, evaluated_until, payload in records:
+        if sha256(payload.encode("utf-8")).hexdigest() != run_id:
+            continue
+        try:
+            parsed = ReportPayload.model_validate_json(payload).report
+            if isinstance(parsed, BacktestResult):
+                evaluated_dt = (
+                    evaluated_until
+                    if isinstance(evaluated_until, datetime)
+                    else datetime.fromisoformat(evaluated_until)
+                )
+                results.append((run_id, evaluated_dt, parsed))
+        except (ValidationError, ValueError):
+            continue
+    return results
+
+
+def execute_shadow_run(
+    store: Any,
+    candidate_id: str,
+    candles: Sequence[Candle] | None = None,
+    at: datetime | None = None,
+) -> tuple[str, BacktestResult]:
+    """Execute and persist a paper shadow replay for a candidate in PAPER_SHADOW."""
+    candidate = store.get_strategy_candidate(candidate_id)
+    if candidate is None:
+        raise CandidateNotFound(f"Strategy candidate '{candidate_id}' not found")
+    if candidate.stage != PromotionStage.PAPER_SHADOW:
+        raise PromotionRejected("Candidate must be in PAPER_SHADOW")
+    source = get_candidate_backtest_report(store, candidate)
+    now = at or datetime.now(UTC)
+    boundary = max(candidate.updated_at, source.dataset_closed_at)
+    available_candles = (
+        candles
+        if candles is not None
+        else store.candle_history(BTC_USD, SOURCE, 60, limit=1000)
+    )
+    filtered = [c for c in available_candles if c.closed_at <= now]
+    start = next(
+        (
+            index
+            for index, candle in enumerate(filtered)
+            if candle.opened_at >= boundary
+        ),
+        len(filtered),
+    )
+    warmup = source.config.slow_period
+    if (
+        not warmup <= start < len(filtered)
+        or filtered[start].opened_at - filtered[start - 1].opened_at
+        != filtered[start].closed_at - filtered[start].opened_at
+        or filtered[start - 1].opened_at >= boundary
+    ):
+        raise PromotionRejected(
+            "Need contiguous hourly candles across the shadow boundary"
+        )
+    try:
+        result = run_backtest(
+            filtered[start - warmup :], source.config, trade_start=warmup
+        )
+    except ValueError as error:
+        raise PromotionRejected(str(error)) from error
+    payload = ReportPayload(report=result).model_dump_json()
+    run_id = sha256(payload.encode("utf-8")).hexdigest()
+    saved = store.record_shadow_run(
+        candidate, run_id, result.dataset_closed_at, payload
+    )
+    if not saved:
+        raise PromotionRejected("Candidate changed during shadow simulation")
+    return run_id, result
+
+
+def run_forward_shadow_observation(
+    store: Any,
+    candidate_id: str | None = None,
+    at: datetime | None = None,
+) -> list[tuple[str, str, BacktestResult]]:
+    """Evaluates forward shadow simulation for candidates in PAPER_SHADOW.
+
+    Returns list of (candidate_id, run_id, BacktestResult) for newly recorded runs.
+    """
+    if candidate_id is not None:
+        cand = store.get_strategy_candidate(candidate_id)
+        if cand is None:
+            raise CandidateNotFound(f"Strategy candidate '{candidate_id}' not found")
+        candidates = [cand]
+    else:
+        candidates = store.list_strategy_candidates(stage=PromotionStage.PAPER_SHADOW)
+
+    now = at or datetime.now(UTC)
+    candles = store.candle_history(BTC_USD, SOURCE, 60, limit=1000)
+    results: list[tuple[str, str, BacktestResult]] = []
+    for cand in candidates:
+        if cand.stage != PromotionStage.PAPER_SHADOW:
+            continue
+        try:
+            run_id, result = execute_shadow_run(
+                store, cand.candidate_id, candles=candles, at=now
+            )
+            results.append((cand.candidate_id, run_id, result))
+        except (PromotionRejected, PaperRejected):
+            continue
+    return results
+
+
+async def watch_shadow(
+    store: Any,
+    candidate_id: str | None = None,
+    every_seconds: int = 3600,
+) -> None:
+    """Foreground scheduled observer for forward shadow execution."""
+    store.initialize()
+    while True:
+        results = run_forward_shadow_observation(store, candidate_id)
+        for cid, run_id, result in results:
+            print(
+                f"[{datetime.now(UTC).isoformat()}] Shadow run for '{cid}': "
+                f"run_id={run_id[:12]} fills={len(result.fills)} "
+                f"net_return={result.net_return:.2%} dd={result.max_drawdown:.2%}",
+                flush=True,
+            )
+        await asyncio.sleep(every_seconds)
+
+
 def promote_strategy_candidate(
     store: Any,
     candidate_id: str,
@@ -292,52 +477,6 @@ def promote_strategy_candidate(
             )
         target_stage = expected
 
-    def _get_report(report_id: str) -> ReportPayload:
-        if not isinstance(report_id, str) or not re.fullmatch(
-            r"[a-f0-9]{64}", report_id
-        ):
-            raise PromotionRejected("Invalid report ID format")
-        record = store.backtest_report(report_id)
-        if record is None:
-            raise PromotionRejected("Backtest report not found")
-        if sha256(record.payload.encode("utf-8")).hexdigest() != report_id:
-            raise PromotionRejected("Backtest report integrity check failed")
-        try:
-            return ReportPayload.model_validate_json(record.payload)
-        except ValidationError as error:
-            raise PromotionRejected("Backtest report format is unsupported") from error
-
-    def _candidate_backtest() -> BacktestResult:
-        report_id = candidate.parameters.get("backtest_report_id")
-        if not isinstance(report_id, str) or not re.fullmatch(
-            r"[a-f0-9]{64}", report_id
-        ):
-            raise PromotionRejected("Candidate needs a saved backtest report ID")
-        report = _get_report(report_id).report
-        if (
-            not isinstance(report, BacktestResult)
-            or report.dataset_sha256 != candidate.dataset_hash
-            or report.config.fast_period != candidate.parameters.get("fast")
-            or report.config.slow_period != candidate.parameters.get("slow")
-        ):
-            raise PromotionRejected("Backtest report does not match the candidate")
-        return report
-
-    def _latest_shadow() -> tuple[str, BacktestResult]:
-        saved = store.latest_shadow_run(candidate.candidate_id)
-        if saved is None:
-            raise PromotionRejected("A persisted paper shadow run is required")
-        run_id, payload = saved
-        if sha256(payload.encode("utf-8")).hexdigest() != run_id:
-            raise PromotionRejected("Invalid shadow run payload")
-        try:
-            parsed = ReportPayload.model_validate_json(payload).report
-        except ValidationError as error:
-            raise PromotionRejected("Invalid shadow run report format") from error
-        if not isinstance(parsed, BacktestResult):
-            raise PromotionRejected("Shadow run report must be a BacktestResult")
-        return run_id, parsed
-
     backtest_evidence: BacktestResult | None = None
     walk_forward_evidence: WalkForwardResult | None = None
     holdout_evidence: HoldoutResult | None = None
@@ -350,7 +489,7 @@ def promote_strategy_candidate(
         (PromotionStage.WALK_FORWARD_PASSED, PromotionStage.PAPER_SHADOW),
     )
     if needs_backtest:
-        report = _candidate_backtest()
+        report = get_candidate_backtest_report(store, candidate)
         backtest_evidence = report
 
         if target_stage == PromotionStage.WALK_FORWARD_PASSED:
@@ -361,7 +500,7 @@ def promote_strategy_candidate(
                 raise PromotionRejected(
                     "Candidate needs a saved walk-forward report ID"
                 )
-            walk = _get_report(walk_id).report
+            walk = get_report_payload(store, walk_id).report
             pair = PeriodPair(report.config.fast_period, report.config.slow_period)
             if (
                 not isinstance(walk, WalkForwardResult)
@@ -411,7 +550,7 @@ def promote_strategy_candidate(
         candidate.stage == PromotionStage.PAPER_SHADOW
         and target_stage == PromotionStage.PAPER_APPROVED
     ):
-        shadow_id, shadow_report = _latest_shadow()
+        shadow_id, shadow_report = get_latest_shadow_run(store, candidate.candidate_id)
         if shadow_report.max_drawdown > Decimal("0.25"):
             raise PromotionRejected("Paper shadow drawdown exceeds the 25% risk limit")
         shadow_fills = len(shadow_report.fills)

@@ -12,7 +12,7 @@ from enum import StrEnum
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
@@ -436,6 +436,82 @@ def create_app(
             return store.wallet_snapshots(limit=limit)
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Wallet snapshot storage unavailable") from error
+
+    @app.get("/api/v1/orders/spot")
+    def list_spot_orders(
+        response: Response,
+        venue: Annotated[str, Query(min_length=1, max_length=32)] = "kraken",
+    ) -> list[dict[str, Any]]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            orders = store.list_open_spot_orders(venue)
+            return [
+                {
+                    "client_order_id": o.client_order_id,
+                    "order_id": o.order_id,
+                    "venue": o.venue,
+                    "market": o.market,
+                    "side": o.side.value,
+                    "order_type": o.order_type.value,
+                    "quantity": str(o.quantity),
+                    "limit_price": (
+                        str(o.limit_price) if o.limit_price is not None else None
+                    ),
+                    "state": o.state.value,
+                    "risk_decision_id": o.risk_decision_id,
+                    "created_at": o.created_at.isoformat(),
+                    "updated_at": o.updated_at.isoformat(),
+                    "venue_order_id": o.venue_order_id,
+                    "filled_quantity": (
+                        str(o.filled_quantity)
+                        if o.filled_quantity is not None
+                        else None
+                    ),
+                    "average_price": (
+                        str(o.average_price) if o.average_price is not None else None
+                    ),
+                    "fee": str(o.fee) if o.fee is not None else None,
+                }
+                for o in orders
+            ]
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Spot order storage unavailable") from error
+
+    @app.get("/api/v1/orders/spot/{client_order_id}")
+    def get_spot_order(client_order_id: str, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            o = store.get_spot_order(client_order_id)
+            if o is None:
+                raise HTTPException(404, f"Spot order '{client_order_id}' not found")
+            return {
+                "client_order_id": o.client_order_id,
+                "order_id": o.order_id,
+                "venue": o.venue,
+                "market": o.market,
+                "side": o.side.value,
+                "order_type": o.order_type.value,
+                "quantity": str(o.quantity),
+                "limit_price": (
+                    str(o.limit_price) if o.limit_price is not None else None
+                ),
+                "state": o.state.value,
+                "risk_decision_id": o.risk_decision_id,
+                "created_at": o.created_at.isoformat(),
+                "updated_at": o.updated_at.isoformat(),
+                "venue_order_id": o.venue_order_id,
+                "filled_quantity": (
+                    str(o.filled_quantity) if o.filled_quantity is not None else None
+                ),
+                "average_price": (
+                    str(o.average_price) if o.average_price is not None else None
+                ),
+                "fee": str(o.fee) if o.fee is not None else None,
+            }
+        except HTTPException:
+            raise
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Spot order storage unavailable") from error
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

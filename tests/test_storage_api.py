@@ -13,6 +13,8 @@ from hcs_trader.data.kraken import BTC_USD
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.assets import MarketId
+from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
 from hcs_trader.storage import AuditStore
 
@@ -187,3 +189,43 @@ def test_restart_uses_last_persisted_quote_during_outage(tmp_path: Path) -> None
         assert quote["quality"] == "STALE"
         assert quote["provider_issue"] == "unavailable"
         assert quote["bid"] == "12.34"
+
+
+def test_spot_orders_api_endpoints(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    now = datetime.now(UTC)
+    order = SpotOrder(
+        client_order_id="cl-ord-api-1",
+        order_id="ord-api-1",
+        venue="kraken",
+        market="BTC/USD",
+        side=SpotSide.BUY,
+        order_type=SpotOrderType.LIMIT,
+        quantity=Decimal("0.02"),
+        limit_price=Decimal("49500.00"),
+        state=OrderState.ACKNOWLEDGED,
+        risk_decision_id="risk-api-01",
+        created_at=now,
+        updated_at=now,
+        venue_order_id="O-API-TEST",
+    )
+    store.save_spot_order(order)
+
+    app = create_app(store)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        # List open orders
+        resp = client.get("/api/v1/orders/spot?venue=kraken")
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["client_order_id"] == "cl-ord-api-1"
+        assert items[0]["state"] == "ACKNOWLEDGED"
+
+        # Get single order
+        single = client.get("/api/v1/orders/spot/cl-ord-api-1")
+        assert single.status_code == 200
+        assert single.json()["venue_order_id"] == "O-API-TEST"
+
+        # Not found
+        assert client.get("/api/v1/orders/spot/non-existent").status_code == 404

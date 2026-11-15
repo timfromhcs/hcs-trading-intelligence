@@ -117,6 +117,7 @@ export function StrategyLab() {
   const [candidateActionError, setCandidateActionError] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
   const [promotingId, setPromotingId] = useState<string | null>(null);
+  const [runningShadowId, setRunningShadowId] = useState<string | null>(null);
 
   async function loadCandidates() {
     setLoadingCandidates(true);
@@ -254,6 +255,30 @@ export function StrategyLab() {
       setCandidateActionError(err instanceof Error ? err.message : "Error registering candidate");
     } finally {
       setRegistering(false);
+    }
+  }
+
+  async function handleRunShadow(candidate: StrategyCandidate) {
+    setRunningShadowId(candidate.candidate_id);
+    setCandidateActionError(null);
+    setCandidateActionMessage(null);
+    try {
+      const res = await fetch(`/api/v1/strategies/candidates/${candidate.candidate_id}/shadow-run`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Shadow replay failed" }));
+        throw new Error(err.detail || "Failed to execute shadow replay");
+      }
+      const data = (await res.json()) as { run_id: string; report: BacktestResult };
+      setCandidateActionMessage(
+        `Paper shadow replay completed (${data.report.fills.length} fills observed, run ID: ${data.run_id.slice(0, 10)}…)!`
+      );
+      await loadCandidates();
+    } catch (err: unknown) {
+      setCandidateActionError(err instanceof Error ? err.message : "Error executing shadow replay");
+    } finally {
+      setRunningShadowId(null);
     }
   }
 
@@ -595,20 +620,34 @@ export function StrategyLab() {
                     <div className="candidate-params muted">
                       Params: <code>{JSON.stringify(cand.parameters)}</code>
                     </div>
-                    {nextStage ? (
-                      <button
-                        type="button"
-                        className="btn-promote"
-                        onClick={() => handlePromoteCandidate(cand)}
-                        disabled={promotingId === cand.candidate_id}
-                      >
-                        {promotingId === cand.candidate_id
-                          ? "Evaluating Gate…"
-                          : `Promote to ${nextStage}`}
-                      </button>
-                    ) : (
-                      <span className="max-promoted">Fully Promoted (LIVE_BOUNDED)</span>
-                    )}
+                    <div className="candidate-actions">
+                      {cand.stage === "PAPER_SHADOW" && (
+                        <button
+                          type="button"
+                          className="btn-shadow-run"
+                          onClick={() => handleRunShadow(cand)}
+                          disabled={runningShadowId === cand.candidate_id}
+                        >
+                          {runningShadowId === cand.candidate_id
+                            ? "Replaying Shadow…"
+                            : "Run Paper Shadow Replay"}
+                        </button>
+                      )}
+                      {nextStage ? (
+                        <button
+                          type="button"
+                          className="btn-promote"
+                          onClick={() => handlePromoteCandidate(cand)}
+                          disabled={promotingId === cand.candidate_id}
+                        >
+                          {promotingId === cand.candidate_id
+                            ? "Evaluating Gate…"
+                            : `Promote to ${nextStage}`}
+                        </button>
+                      ) : (
+                        <span className="max-promoted">Fully Promoted (LIVE_BOUNDED)</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               );

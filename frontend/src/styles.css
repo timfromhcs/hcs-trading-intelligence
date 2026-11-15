@@ -399,6 +399,7 @@ dd { margin: 0; }
 
 .btn-register:hover:not(:disabled),
 .btn-promote:hover:not(:disabled),
+.btn-shadow-run:hover:not(:disabled),
 .btn-refresh:hover:not(:disabled) {
   border-color: var(--cyan);
   background: #202b3d;
@@ -412,6 +413,30 @@ dd { margin: 0; }
 
 .btn-promote:hover:not(:disabled) {
   background: rgba(38, 166, 154, 0.35);
+}
+
+.btn-shadow-run {
+  font-size: 0.85rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 0.35rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid #d99b26;
+  background: rgba(255, 191, 90, 0.15);
+  color: #ffbf5a;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-shadow-run:hover:not(:disabled) {
+  background: rgba(255, 191, 90, 0.3);
+  border-color: #ffbf5a;
+}
+
+.candidate-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .btn-register {

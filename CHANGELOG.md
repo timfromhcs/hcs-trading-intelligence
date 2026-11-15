@@ -13,6 +13,7 @@
 - Displayed stored monetary-policy releases in the dashboard, with official links and publication and receipt times.
 - Added ECB daily reference-rate import with local revision history and a read-only API.
 - Added FRED CPI imports with explicit snapshot dates and private terminal key entry.
+- Added offline deterministic indicators over closed BTC/USD candles.
 
 ## 0.1.0 — development foundation
 

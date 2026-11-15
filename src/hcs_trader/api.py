@@ -22,8 +22,9 @@ from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.macro import MacroObservation
-from hcs_trader.domain.market_data import DataQuality
+from hcs_trader.domain.market_data import Candle, DataQuality
 from hcs_trader.domain.news import NewsItem
+from hcs_trader.indicators import Indicators, calculate_indicators
 from hcs_trader.storage import AuditStore
 
 _logger = logging.getLogger(__name__)
@@ -200,16 +201,18 @@ def create_app(
             for quote in quotes
         ]
 
+    def read_candles(interval: int, limit: int) -> list[Candle]:
+        if interval not in CANDLE_INTERVALS:
+            raise HTTPException(422, "Unsupported candle interval")
+        try:
+            return store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Candle storage unavailable") from error
+
     @app.get("/api/v1/market/candles")
     def candle_history(
         interval: int = 60, limit: Annotated[int, Query(ge=1, le=1000)] = 720
     ) -> list[CandleRecord]:
-        if interval not in CANDLE_INTERVALS:
-            raise HTTPException(422, "Unsupported candle interval")
-        try:
-            candles = store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
-        except sqlite3.Error as error:
-            raise HTTPException(503, "Candle storage unavailable") from error
         return [
             CandleRecord(
                 source=candle.source,
@@ -226,8 +229,12 @@ def create_app(
                 volume=candle.volume,
                 trade_count=candle.trade_count,
             )
-            for candle in candles
+            for candle in read_candles(interval, limit)
         ]
+
+    @app.get("/api/v1/market/indicators")
+    def indicators(interval: int = 60) -> Indicators:
+        return calculate_indicators(read_candles(interval, 720))
 
     @app.get(
         "/api/v1/market/candles.csv",

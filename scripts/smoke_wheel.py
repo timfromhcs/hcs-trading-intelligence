@@ -4,10 +4,14 @@ import json
 import shutil
 import subprocess  # noqa: S404
 from pathlib import Path
+from zipfile import ZipFile
 
 
 def main() -> None:
     (wheel,) = Path("dist").glob("hcs_trader-*.whl")
+    with ZipFile(wheel) as archive:
+        if "hcs_trader/ui_assets/index.html" not in archive.namelist():
+            raise RuntimeError("Built wheel is missing its local web interface")
     uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required to install the wheel")

@@ -2,18 +2,22 @@
 
 Made with ❤️ by HCS.media.
 
-This repository contains the Phase 0 foundation for a local-first crypto research and spot-trading application. The CLI reports its capabilities. `PAPER` is the default policy mode. Market feeds, paper orders, wallet access, the API, MCP, and live execution are planned.
+HCS Trading Intelligence is a local-first crypto research project. This development build includes a read-only status dashboard and API. `PAPER` is the default policy mode. Market feeds, paper orders, wallet access, MCP and live execution are planned.
 
 ## Developer setup
 
-Use Python 3.12, uv 0.13.5, and Node.js 22.
+Use Python 3.12, uv 0.13.5, and Node.js 22.13 or later in the 22 series.
 
 ```sh
 uv sync --locked
-uv run --locked hcs-trader
-uv run --locked pytest
 npm ci --prefix frontend
+npm run build --prefix frontend
+uv run --locked hcs-trader serve
 ```
+
+Open the dashboard on the loopback address `http://127.0.0.1:8765`. The service exposes its schema at `/openapi.json` and provides health, mode and capability information under `/api/v1`. It stores startup audit events in SQLite in the operating system's application data directory.
+
+Run `uv run --locked pytest` for the Python suite. Build the frontend before running `uv build` to package the dashboard with the wheel.
 
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 

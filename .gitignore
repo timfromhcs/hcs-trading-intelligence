@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 dist/
 node_modules/
+src/hcs_trader/ui_assets/
 .env
 .env.*
 *.sqlite*

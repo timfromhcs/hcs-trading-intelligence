@@ -1,0 +1,40 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #07080c;
+  color: #eaf1fa;
+  --panel: #10141d;
+  --border: #283244;
+  --muted: #92a1b5;
+  --cyan: #00f0ff;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--cyan); text-underline-offset: 0.2em; }
+:focus-visible { outline: 2px solid var(--cyan); outline-offset: 4px; }
+
+.site-header { border-bottom: 1px solid var(--border); background: var(--panel); }
+.header-inner, main { width: min(100% - 2rem, 64rem); margin-inline: auto; }
+.header-inner { min-height: 4rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.brand { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.06em; }
+.brand span { color: var(--muted); font-weight: 500; letter-spacing: normal; }
+main { padding-block: clamp(2rem, 7vw, 5rem); }
+h1 { margin: 0 0 1.5rem; font-size: clamp(2rem, 6vw, 3.5rem); line-height: 1.1; letter-spacing: -0.04em; }
+h2 { margin: 0; font-size: 1.15rem; }
+.panel { padding: clamp(1rem, 3vw, 1.5rem); margin-bottom: 1rem; border: 1px solid var(--border); border-radius: 0.75rem; background: var(--panel); }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+button { border: 1px solid #62728a; border-radius: 0.4rem; background: #171e2b; color: inherit; min-height: 2.75rem; padding: 0.5rem 1rem; font: inherit; cursor: pointer; }
+button:disabled { color: var(--muted); cursor: default; }
+dl { margin: 1rem 0 0; }
+dd { margin: 0; }
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: 0.75rem; }
+.status-grid div { padding: 1rem; border: 1px solid var(--border); border-radius: 0.5rem; }
+.status-grid dt { color: var(--muted); font-size: 0.875rem; }
+.status-grid dd { margin-top: 0.4rem; font-weight: 650; }
+[data-mode="PAPER"] { color: #ffbf5a; }
+[data-mode="LIVE"] { color: #ff8294; }
+.capabilities div { display: flex; justify-content: space-between; gap: 1rem; border-top: 1px solid var(--border); padding-block: 0.75rem; }
+.capabilities div:last-child { padding-bottom: 0; }
+.available { color: #37d39a; }
+.muted { color: var(--muted); }

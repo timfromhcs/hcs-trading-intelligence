@@ -4,7 +4,7 @@ from decimal import Decimal
 import httpx2
 import pytest
 
-from hcs_trader.data.kraken import BTC_USD, DEPTH_URL, KrakenQuoteProvider
+from hcs_trader.data.kraken import BTC_USD, DEPTH_URL, OHLC_URL, KrakenQuoteProvider
 from hcs_trader.data.provider import InvalidQuote, QuoteRateLimited, QuoteUnavailable
 from hcs_trader.domain.assets import MarketId
 
@@ -86,3 +86,90 @@ async def test_unknown_market_does_not_make_a_request() -> None:
             await KrakenQuoteProvider(client).get_quote(
                 MarketId("unverified", BTC_USD.base, BTC_USD.quote)
             )
+
+
+@pytest.mark.anyio
+async def test_ohlc_returns_exact_closed_candles_and_preserves_gaps() -> None:
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.copy_with(query=None) == httpx2.URL(OHLC_URL)
+        assert dict(request.url.params) == {"pair": "XBTUSD", "interval": "1"}
+        return httpx2.Response(
+            200,
+            json={
+                "error": [],
+                "result": {
+                    "XXBTZUSD": [
+                        [1688671200, "10", "11", "9", "10.0010", "10", "0.12345678", 1],
+                        [1688671320, "10", "12", "9", "11", "10", "0", 0],
+                        [1688671380, "11", "12", "8", "8", "10", "10", 1],
+                    ],
+                    "last": 1688671320,
+                },
+            },
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
+        candles = await KrakenQuoteProvider(client).get_candles(BTC_USD, 1)
+    assert len(candles) == 2
+    assert candles[0].market == BTC_USD
+    assert candles[0].source == "kraken-spot"
+    assert str(candles[0].close) == "10.0010"
+    assert candles[0].volume == Decimal("0.12345678")
+    assert candles[0].closed_at == datetime.fromtimestamp(1688671260, UTC)
+    assert candles[1].opened_at == datetime.fromtimestamp(1688671320, UTC)
+    assert candles[1].trade_count == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("first_timestamp", "second_timestamp", "high", "volume", "trades"),
+    [
+        (1688671200, 1688671200, "12", "1", 1),
+        (1688671260, 1688671200, "12", "1", 1),
+        (1688671201, 1688671260, "12", "1", 1),
+        (1688671200, 1688671260, "9", "1", 1),
+        (1688671200, 1688671260, "12", "-1", 1),
+        (1688671200, 1688671260, "12", "1", -1),
+        (1688671200, 1688671260, "Infinity", "1", 1),
+        (4102444800, 4102444860, "12", "1", 1),
+    ],
+)
+async def test_ohlc_rejects_invalid_closed_candle_batches(
+    first_timestamp: int, second_timestamp: int, high: str, volume: str, trades: int
+) -> None:
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "error": [],
+                "result": {
+                    "XXBTZUSD": [
+                        [first_timestamp, "10", high, "8", "10", "10", volume, trades],
+                        [second_timestamp, "10", "12", "8", "10", "10", "1", 1],
+                    ],
+                    "last": first_timestamp,
+                },
+            },
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
+        with pytest.raises(InvalidQuote):
+            await KrakenQuoteProvider(client).get_candles(BTC_USD, 1)
+
+
+@pytest.mark.anyio
+async def test_ohlc_accepts_full_window_plus_provisional_candle() -> None:
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        start = 1688671200
+        rows = [
+            [start + index * 60, "10", "12", "8", "10", "10", "1", 1]
+            for index in range(721)
+        ]
+        return httpx2.Response(
+            200,
+            json={"error": [], "result": {"XXBTZUSD": rows, "last": start + 719 * 60}},
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
+        candles = await KrakenQuoteProvider(client).get_candles(BTC_USD, 1)
+    assert len(candles) == 720

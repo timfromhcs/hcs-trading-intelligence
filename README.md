@@ -23,6 +23,8 @@ Start with `uv run --locked hcs-trader serve --public-market-data` to opt into `
 
 `GET /api/v1/market/quotes/history?limit=100` reads previously stored quotes from SQLite and works with provider access disabled.
 
+Run `uv run --locked hcs-trader import-candles --interval 60` to fetch and store closed Kraken BTC/USD hourly candles. `GET /api/v1/market/candles?interval=60` reads the stored candles offline in chronological order.
+
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 Licensed under Apache-2.0. Made with love by timfromhcs and hcsmedia.

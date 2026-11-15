@@ -10,9 +10,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from hcs_trader.domain.assets import MarketId
-from hcs_trader.domain.market_data import Quote
+from hcs_trader.domain.market_data import Candle, Quote
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +73,112 @@ class AuditStore:
                     "CREATE INDEX market_quotes_history "
                     "ON market_quotes (venue, base_asset, quote_asset, id DESC)"
                 )
-                connection.execute("PRAGMA user_version = 2")
+            if version < 3:
+                connection.execute(
+                    """
+                    CREATE TABLE market_candles (
+                        venue TEXT NOT NULL,
+                        base_asset TEXT NOT NULL,
+                        quote_asset TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0),
+                        opened_at TEXT NOT NULL,
+                        received_at TEXT NOT NULL,
+                        opening TEXT NOT NULL,
+                        high TEXT NOT NULL,
+                        low TEXT NOT NULL,
+                        closing TEXT NOT NULL,
+                        volume TEXT NOT NULL,
+                        trade_count INTEGER NOT NULL CHECK (trade_count >= 0),
+                        PRIMARY KEY (venue, base_asset, quote_asset, source,
+                                     interval_minutes, opened_at)
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 3")
+
+    def record_candles(self, candles: list[Candle]) -> int:
+        with self._connect() as connection, connection:
+            connection.executemany(
+                """
+                INSERT INTO market_candles (
+                    venue, base_asset, quote_asset, source, interval_minutes,
+                    opened_at, received_at, opening, high, low, closing,
+                    volume, trade_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (venue, base_asset, quote_asset, source,
+                             interval_minutes, opened_at) DO NOTHING
+                """,
+                (
+                    (
+                        candle.market.venue,
+                        str(candle.market.base),
+                        str(candle.market.quote),
+                        candle.source,
+                        candle.interval_minutes,
+                        candle.opened_at.isoformat(timespec="microseconds"),
+                        candle.received_at.isoformat(),
+                        str(candle.open),
+                        str(candle.high),
+                        str(candle.low),
+                        str(candle.close),
+                        str(candle.volume),
+                        candle.trade_count,
+                    )
+                    for candle in candles
+                ),
+            )
+            return connection.total_changes
+
+    def candle_history(
+        self, market: MarketId, source: str, interval_minutes: int, *, limit: int
+    ) -> list[Candle]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("Candle history limit must be between 1 and 1000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT opened_at, received_at, opening, high, low, closing,
+                       volume, trade_count
+                FROM market_candles
+                WHERE venue = ? AND base_asset = ? AND quote_asset = ?
+                    AND source = ? AND interval_minutes = ?
+                ORDER BY opened_at DESC LIMIT ?
+                """,
+                (
+                    market.venue,
+                    str(market.base),
+                    str(market.quote),
+                    source,
+                    interval_minutes,
+                    limit,
+                ),
+            ).fetchall()
+        return [
+            Candle(
+                market,
+                source,
+                interval_minutes,
+                datetime.fromisoformat(opened_at),
+                datetime.fromisoformat(received_at),
+                Decimal(opening),
+                Decimal(high),
+                Decimal(low),
+                Decimal(closing),
+                Decimal(volume),
+                trade_count,
+            )
+            for (
+                opened_at,
+                received_at,
+                opening,
+                high,
+                low,
+                closing,
+                volume,
+                trade_count,
+            ) in reversed(rows)
+        ]
 
     def record_quote(self, quote: Quote) -> None:
         with self._connect() as connection, connection:

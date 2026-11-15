@@ -7,6 +7,7 @@
 - Added opt-in Kraken BTC/USD quotes with bounded refresh, provider provenance and explicit data quality.
 - Added deduplicated SQLite quote history and restart-safe fallback to the last stored quote.
 - Added the opt-in BTC/USD dashboard panel with exact prices, source, timestamps and quote quality.
+- Added explicit import of closed BTC/USD candles and offline candle history through the local API.
 
 ## 0.1.0 — development foundation
 

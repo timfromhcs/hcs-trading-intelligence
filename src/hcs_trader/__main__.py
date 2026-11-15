@@ -10,15 +10,28 @@ import uvicorn
 from platformdirs import user_data_path
 
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
-from hcs_trader.data.kraken import BTC_USD, KrakenQuoteProvider
+from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, KrakenQuoteProvider
+from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.storage import AuditStore
 
 
-async def serve(market_data: bool) -> None:
-    store = AuditStore(
+def local_store() -> AuditStore:
+    return AuditStore(
         user_data_path("HCS Trading Intelligence", "HCS.media") / "audit.sqlite"
     )
+
+
+async def import_candles(interval: int) -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        candles = await KrakenQuoteProvider(client).get_candles(BTC_USD, interval)
+    store = local_store()
+    store.initialize()
+    return store.record_candles(candles)
+
+
+async def serve(market_data: bool) -> None:
+    store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
         quotes = (
             QuoteService(
@@ -52,9 +65,21 @@ def main() -> None:
         action="store_true",
         help="Enable public Kraken quote requests",
     )
+    import_parser = commands.add_parser(
+        "import-candles", help="Import closed Kraken BTC/USD candles into local history"
+    )
+    import_parser.add_argument(
+        "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
+    )
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data))
+    elif arguments.command == "import-candles":
+        try:
+            count = asyncio.run(import_candles(arguments.interval))
+        except QuoteUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new BTC/USD candles.")
     else:
         print(Status().model_dump_json())
 

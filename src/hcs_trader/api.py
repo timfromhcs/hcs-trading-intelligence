@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.market_data import DataQuality
 from hcs_trader.storage import AuditStore
@@ -80,6 +80,22 @@ class QuoteRecord(BaseModel):
     bid_updated_at: datetime
     ask_updated_at: datetime
     received_at: datetime
+
+
+class CandleRecord(BaseModel):
+    source: str
+    base_asset: str
+    quote_asset: str
+    interval_minutes: int
+    opened_at: datetime
+    closed_at: datetime
+    received_at: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    trade_count: int
 
 
 def create_app(
@@ -177,6 +193,35 @@ def create_app(
                 received_at=quote.received_at,
             )
             for quote in quotes
+        ]
+
+    @app.get("/api/v1/market/candles")
+    def candle_history(
+        interval: int = 60, limit: Annotated[int, Query(ge=1, le=1000)] = 720
+    ) -> list[CandleRecord]:
+        if interval not in CANDLE_INTERVALS:
+            raise HTTPException(422, "Unsupported candle interval")
+        try:
+            candles = store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Candle storage unavailable") from error
+        return [
+            CandleRecord(
+                source=candle.source,
+                base_asset=str(candle.market.base),
+                quote_asset=str(candle.market.quote),
+                interval_minutes=candle.interval_minutes,
+                opened_at=candle.opened_at,
+                closed_at=candle.closed_at,
+                received_at=candle.received_at,
+                open=candle.open,
+                high=candle.high,
+                low=candle.low,
+                close=candle.close,
+                volume=candle.volume,
+                trade_count=candle.trade_count,
+            )
+            for candle in candles
         ]
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():

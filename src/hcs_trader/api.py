@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
 from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.data.quotes import QuoteService
@@ -235,6 +236,17 @@ def create_app(
     @app.get("/api/v1/market/indicators")
     def indicators(interval: int = 60) -> Indicators:
         return calculate_indicators(read_candles(interval, 720))
+
+    @app.post("/api/v1/backtests")
+    def backtest(
+        config: BacktestConfig,
+        interval: int = 60,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 720,
+    ) -> BacktestResult:
+        try:
+            return run_backtest(read_candles(interval, limit), config)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
 
     @app.get(
         "/api/v1/market/candles.csv",

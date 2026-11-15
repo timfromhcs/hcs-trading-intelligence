@@ -14,6 +14,7 @@
 - Added ECB daily reference-rate import with local revision history and a read-only API.
 - Added FRED CPI imports with explicit snapshot dates and private terminal key entry.
 - Added offline deterministic indicators over closed BTC/USD candles.
+- Added a deterministic SMA trend research backtest with simulated fees, spread, slippage and partial fills.
 
 ## 0.1.0 — development foundation
 

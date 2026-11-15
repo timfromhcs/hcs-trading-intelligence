@@ -601,17 +601,31 @@ export function StrategyLab() {
                         Version: {cand.version} · Dataset: <code>{cand.dataset_hash.slice(0, 12)}…</code>
                       </span>
                     </div>
-                    <span className={`stage-badge stage-${cand.stage.toLowerCase()}`}>
-                      {cand.stage}
-                    </span>
+                    <div className="candidate-badges">
+                      {cand.stage === "LIVE_CANARY" && (
+                        <span className="badge-canary-active">Canary Active</span>
+                      )}
+                      <span className={`stage-badge stage-${cand.stage.toLowerCase()}`}>
+                        {cand.stage}
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="stage-steps-bar" aria-label="Promotion Progress">
+                  <div
+                    className="stage-steps-bar"
+                    role="progressbar"
+                    aria-label={`Promotion progress: Stage ${stageIndex + 1} of ${PROMOTION_LADDER.length} (${cand.stage})`}
+                    aria-valuenow={stageIndex + 1}
+                    aria-valuemin={1}
+                    aria-valuemax={PROMOTION_LADDER.length}
+                    aria-valuetext={`Stage ${stageIndex + 1} of ${PROMOTION_LADDER.length}: ${cand.stage}`}
+                  >
                     {PROMOTION_LADDER.map((stg, i) => (
                       <div
                         key={stg}
                         className={`step-dot ${i <= stageIndex ? "step-active" : ""}`}
                         title={`Stage ${i + 1}: ${stg}`}
+                        aria-hidden="true"
                       />
                     ))}
                   </div>

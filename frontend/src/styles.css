@@ -237,3 +237,119 @@ dd { margin: 0; }
   margin-top: 0.3rem;
 }
 
+/* Strategy Lab */
+.lab-subtitle {
+  margin: 0.5rem 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.btn-link {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  text-decoration: none;
+  color: var(--cyan);
+  background: #171e2b;
+}
+.btn-link:hover {
+  border-color: var(--cyan);
+}
+.indicator-val {
+  display: block;
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--cyan);
+}
+.indicator-sub {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+.badge-alert {
+  display: inline-block;
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.2rem;
+  vertical-align: middle;
+}
+.backtest-section {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+.backtest-section h3 {
+  margin: 0 0 1rem;
+  font-size: 1.05rem;
+}
+.backtest-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.form-group label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.form-group input {
+  background: #0b0f17;
+  border: 1px solid var(--border);
+  color: #fff;
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  width: 9rem;
+}
+.form-group input:focus {
+  outline: 2px solid var(--cyan);
+  border-color: transparent;
+}
+.form-actions button {
+  min-height: auto;
+  padding: 0.55rem 1.25rem;
+}
+.backtest-results {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: rgba(16, 20, 29, 0.8);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+.backtest-results h4 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+}
+.result-grid dt {
+  font-size: 0.8rem;
+}
+.result-grid dd {
+  font-size: 1.1rem;
+}
+.report-meta {
+  margin-top: 0.75rem;
+  font-size: 0.75rem;
+}
+.report-meta code {
+  color: var(--cyan);
+  font-family: monospace;
+}
+.backtest-fills {
+  margin-top: 1rem;
+}
+.backtest-fills h5 {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+

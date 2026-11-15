@@ -21,7 +21,11 @@ async def serve(market_data: bool) -> None:
     )
     async with httpx2.AsyncClient(trust_env=False) as client:
         quotes = (
-            QuoteService(KrakenQuoteProvider(client), BTC_USD) if market_data else None
+            QuoteService(
+                KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+            )
+            if market_data
+            else None
         )
         app = create_app(
             store, Path(__file__).with_name("ui_assets"), quote_service=quotes

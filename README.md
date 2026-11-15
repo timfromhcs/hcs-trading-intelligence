@@ -21,6 +21,8 @@ Run `uv run --locked pytest` for the Python suite. Build the frontend before run
 
 Start with `uv run --locked hcs-trader serve --public-market-data` to opt into `DATA_ONLY` mode. Request `GET /api/v1/market/quotes` for the BTC/USD best bid and ask, timestamps and quality status. See the [data source notes](docs/DATA_SOURCES.md).
 
+`GET /api/v1/market/quotes/history?limit=100` reads previously stored quotes from SQLite and works with provider access disabled.
+
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 Licensed under Apache-2.0. Made with love by timfromhcs and hcsmedia.

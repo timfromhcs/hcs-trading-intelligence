@@ -9,8 +9,9 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -70,6 +71,17 @@ class QuoteResponse(BaseModel):
     received_at: datetime | None = None
 
 
+class QuoteRecord(BaseModel):
+    source: str
+    base_asset: str
+    quote_asset: str
+    bid: Decimal
+    ask: Decimal
+    bid_updated_at: datetime
+    ask_updated_at: datetime
+    received_at: datetime
+
+
 def create_app(
     store: AuditStore,
     ui_assets: Path | None = None,
@@ -79,6 +91,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store.initialize()
+        if quote_service is not None:
+            for quote in store.quote_history(BTC_USD, limit=1):
+                quote_service.restore(quote)
         event = store.record_startup()
         # Only allowlisted fields from the local event enter operational logs.
         _logger.info(
@@ -124,7 +139,10 @@ def create_app(
         if quote_service is None:
             raise HTTPException(503, "Public market data is disabled")
         response.headers["Cache-Control"] = "no-store"
-        snapshot = await quote_service.snapshot()
+        try:
+            snapshot = await quote_service.snapshot()
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Quote storage unavailable") from error
         quote = snapshot.quote
         return QuoteResponse(
             source=SOURCE,
@@ -138,6 +156,28 @@ def create_app(
             ask_updated_at=quote.ask_updated_at if quote else None,
             received_at=quote.received_at if quote else None,
         )
+
+    @app.get("/api/v1/market/quotes/history")
+    def quote_history(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[QuoteRecord]:
+        try:
+            quotes = store.quote_history(BTC_USD, limit=limit)
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Quote storage unavailable") from error
+        return [
+            QuoteRecord(
+                source=quote.source,
+                base_asset=str(quote.market.base),
+                quote_asset=str(quote.market.quote),
+                bid=quote.bid,
+                ask=quote.ask,
+                bid_updated_at=quote.bid_updated_at,
+                ask_updated_at=quote.ask_updated_at,
+                received_at=quote.received_at,
+            )
+            for quote in quotes
+        ]
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

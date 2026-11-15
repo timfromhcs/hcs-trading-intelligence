@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from hcs_trader.api import create_app
 from hcs_trader.data.kraken import BTC_USD
+from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.market_data import Quote
@@ -36,7 +38,37 @@ def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+
+
+def test_v1_upgrade_retains_audit_and_deduplicates_quotes(tmp_path: Path) -> None:
+    path = tmp_path / "v1.sqlite"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "CREATE TABLE audit_events (event_id TEXT PRIMARY KEY NOT NULL, "
+            "recorded_at TEXT NOT NULL, kind TEXT NOT NULL) STRICT"
+        )
+        connection.execute(
+            "INSERT INTO audit_events VALUES ('fixture', '2026-01-01Z', 'app.started')"
+        )
+        connection.execute("PRAGMA user_version = 1")
+
+    store = AuditStore(path)
+    store.initialize()
+    event = store.latest_event()
+    assert event is not None and event.event_id == "fixture"
+    now = datetime.now(UTC)
+    first = Quote(
+        BTC_USD, "kraken-spot", Decimal("12.3400"), Decimal("12.3501"), now, now, now
+    )
+    store.record_quote(first)
+    store.record_quote(replace(first, received_at=now + timedelta(seconds=2)))
+    second = replace(first, bid=Decimal("12.3401"))
+    store.record_quote(second)
+    reopened = AuditStore(path)
+    reopened.initialize()
+    assert reopened.quote_history(BTC_USD, limit=2) == [second, first]
+    assert reopened.quote_history(BTC_USD, limit=1) == [second]
 
 
 def test_migration_rejects_unknown_future_schema(tmp_path: Path) -> None:
@@ -108,7 +140,8 @@ def test_opt_in_quote_api_serializes_exact_prices_and_quality(tmp_path: Path) ->
             )
 
     store = AuditStore(tmp_path / "app.sqlite")
-    app = create_app(store, quote_service=QuoteService(Provider(), BTC_USD))
+    service = QuoteService(Provider(), BTC_USD, record_quote=store.record_quote)
+    app = create_app(store, quote_service=service)
     with TestClient(app, base_url="http://127.0.0.1") as client:
         assert client.get("/api/v1/system/status").json() == {
             "mode": "DATA_ONLY",
@@ -121,3 +154,36 @@ def test_opt_in_quote_api_serializes_exact_prices_and_quality(tmp_path: Path) ->
         assert response.json()["quality"] == "FRESH"
         assert response.json()["bid"] == "12.3400"
         assert response.json()["ask"] == "12.3501"
+        history = client.get("/api/v1/market/quotes/history?limit=1").json()
+        assert history[0]["bid"] == "12.3400"
+        assert client.get("/api/v1/market/quotes/history?limit=501").status_code == 422
+
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as client:
+        assert client.get("/api/v1/market/quotes/history").json() == history
+
+
+def test_restart_uses_last_persisted_quote_during_outage(tmp_path: Path) -> None:
+    class Outage:
+        async def get_quote(self, market: MarketId) -> Quote:
+            raise QuoteUnavailable("fixture outage")
+
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    stale = datetime.now(UTC) - timedelta(hours=1)
+    store.record_quote(
+        Quote(
+            BTC_USD,
+            "kraken-spot",
+            Decimal("12.34"),
+            Decimal("12.35"),
+            stale,
+            stale,
+            stale,
+        )
+    )
+    app = create_app(store, quote_service=QuoteService(Outage(), BTC_USD))
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        quote = client.get("/api/v1/market/quotes").json()
+        assert quote["quality"] == "STALE"
+        assert quote["provider_issue"] == "unavailable"
+        assert quote["bid"] == "12.34"

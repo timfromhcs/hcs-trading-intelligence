@@ -44,17 +44,26 @@ class QuoteService:
         *,
         elapsed: Callable[[], float] = monotonic,
         utc_now: Callable[[], datetime] = _utc_now,
+        record_quote: Callable[[Quote], None] | None = None,
     ) -> None:
         self._provider = provider
         self._market = market
         self._policy = policy
         self._elapsed = elapsed
         self._utc_now = utc_now
+        self._record_quote = record_quote
         self._lock = asyncio.Lock()
         self._quote: Quote | None = None
         self._issue: str | None = None
         self._next_refresh = float("-inf")
         self._failure_count = 0
+
+    def restore(self, quote: Quote) -> None:
+        if (
+            quote.market == self._market
+            and self._quality(quote) is not DataQuality.INVALID
+        ):
+            self._quote = quote
 
     async def snapshot(self) -> QuoteSnapshot:
         async with self._lock:
@@ -97,6 +106,10 @@ class QuoteService:
             else:
                 self._issue = "unavailable"
         else:
+            if self._record_quote is not None:
+                self._next_refresh = self._elapsed() + delay
+                self._issue = "storage_unavailable"
+                await asyncio.to_thread(self._record_quote, candidate)
             self._issue = None
             self._failure_count = 0
             self._quote = candidate

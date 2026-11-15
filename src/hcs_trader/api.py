@@ -9,13 +9,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import Path as PathParameter
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
@@ -104,6 +106,16 @@ class CandleRecord(BaseModel):
     close: Decimal
     volume: Decimal
     trade_count: int
+
+
+class ReportPayload(BaseModel):
+    schema_version: Literal[1] = 1
+    report: BacktestResult | WalkForwardResult
+
+
+class StoredReport(ReportPayload):
+    id: str
+    recorded_at: datetime
 
 
 def create_app(
@@ -238,27 +250,64 @@ def create_app(
     def indicators(interval: int = 60) -> Indicators:
         return calculate_indicators(read_candles(interval, 720))
 
+    def save_report(
+        result: BacktestResult | WalkForwardResult, response: Response
+    ) -> None:
+        payload = ReportPayload(report=result).model_dump_json()
+        report_id = sha256(payload.encode("utf-8")).hexdigest()
+        try:
+            store.record_backtest(report_id, payload)
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Backtest storage unavailable") from error
+        response.headers["Location"] = f"/api/v1/backtests/{report_id}"
+
     @app.post("/api/v1/backtests")
     def backtest(
         config: BacktestConfig,
+        response: Response,
         interval: int = 60,
         limit: Annotated[int, Query(ge=1, le=1000)] = 720,
     ) -> BacktestResult:
         try:
-            return run_backtest(read_candles(interval, limit), config)
+            result = run_backtest(read_candles(interval, limit), config)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
+        save_report(result, response)
+        return result
 
     @app.post("/api/v1/backtests/walk-forward")
     def walk_forward_backtest(
         config: WalkForwardConfig,
+        response: Response,
         interval: int = 60,
         limit: Annotated[int, Query(ge=1, le=1000)] = 720,
     ) -> WalkForwardResult:
         try:
-            return walk_forward(read_candles(interval, limit), config)
+            result = walk_forward(read_candles(interval, limit), config)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
+        save_report(result, response)
+        return result
+
+    @app.get("/api/v1/backtests/{report_id}")
+    def get_report(
+        report_id: Annotated[str, PathParameter(pattern=r"^[a-f0-9]{64}$")],
+    ) -> StoredReport:
+        try:
+            record = store.backtest_report(report_id)
+        except (sqlite3.Error, ValueError) as error:
+            raise HTTPException(503, "Backtest storage unavailable") from error
+        if record is None:
+            raise HTTPException(404, "Backtest report not found")
+        if sha256(record.payload.encode("utf-8")).hexdigest() != report_id:
+            raise HTTPException(503, "Backtest report integrity check failed")
+        try:
+            payload = ReportPayload.model_validate_json(record.payload)
+        except ValidationError as error:
+            raise HTTPException(503, "Backtest report format is unsupported") from error
+        return StoredReport(
+            id=report_id, recorded_at=record.recorded_at, report=payload.report
+        )
 
     @app.get(
         "/api/v1/market/candles.csv",

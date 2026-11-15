@@ -74,6 +74,8 @@ class BacktestResult:
     strategy: str
     dataset_sha256: str
     candle_count: int
+    dataset_opened_at: datetime
+    dataset_closed_at: datetime
     config: BacktestConfig
     ending_cash: Decimal
     ending_quantity: Decimal
@@ -194,6 +196,8 @@ def _replay(
         "buy-and-hold" if buy_and_hold else STRATEGY,
         dataset_hash,
         len(candles),
+        candles[0].opened_at,
+        candles[-1].closed_at,
         config,
         cash,
         quantity,

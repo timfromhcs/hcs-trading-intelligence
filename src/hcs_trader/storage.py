@@ -14,7 +14,7 @@ from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,12 @@ class AuditEvent:
     event_id: str
     recorded_at: str
     kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchRecord:
+    recorded_at: datetime
+    payload: str
 
 
 class AuditStore:
@@ -134,7 +140,37 @@ class AuditStore:
                 connection.execute(
                     "ALTER TABLE macro_observations ADD COLUMN vintage_date TEXT"
                 )
-                connection.execute("PRAGMA user_version = 6")
+            if version < 7:
+                connection.execute(
+                    """
+                    CREATE TABLE backtest_reports (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        recorded_at TEXT NOT NULL,
+                        payload TEXT NOT NULL
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 7")
+
+    def record_backtest(self, report_id: str, payload: str) -> None:
+        with self._connect() as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO backtest_reports (id, recorded_at, payload)
+                VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING
+                """,
+                (report_id, datetime.now(UTC).isoformat(), payload),
+            )
+
+    def backtest_report(self, report_id: str) -> ResearchRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT recorded_at, payload FROM backtest_reports WHERE id = ?",
+                (report_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ResearchRecord(datetime.fromisoformat(row[0]), row[1])
 
     def record_macro(self, observations: list[MacroObservation]) -> int:
         with self._connect() as connection, connection:

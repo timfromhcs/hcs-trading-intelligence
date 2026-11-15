@@ -1,3 +1,5 @@
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -86,6 +88,13 @@ def test_offline_backtest_route_validates_inputs(tmp_path: Path) -> None:
         assert report.status_code == 200
         assert report.json()["strategy"] == "sma-trend-1"
         assert len(report.json()["fills"]) == 2
+        location = report.headers["location"]
+        stored = api.get(location).json()
+        assert stored["report"] == report.json()
+        repeated = api.post("/api/v1/backtests", json=config)
+        assert repeated.headers["location"] == location
+        assert api.get(location).json()["recorded_at"] == stored["recorded_at"]
+        assert api.get("/api/v1/backtests/" + "0" * 64).status_code == 404
         assert api.post("/api/v1/backtests?limit=2", json=config).status_code == 422
         assert (
             api.post("/api/v1/backtests", json={**config, "fee_bps": "-1"}).status_code
@@ -148,9 +157,28 @@ def test_walk_forward_keeps_test_and_holdout_out_of_selection(tmp_path: Path) ->
         )
         assert response.status_code == 200
         assert response.json()["holdout"]["benchmark"]["strategy"] == "buy-and-hold"
+        assert api.get(response.headers["location"]).json()["report"] == response.json()
 
 
 def test_walk_forward_api_rejects_insufficient_history(tmp_path: Path) -> None:
     store = AuditStore(tmp_path / "walk-forward.sqlite")
     with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
         assert api.post("/api/v1/backtests/walk-forward", json={}).status_code == 422
+
+
+def test_backtest_reports_survive_restart_and_detect_corruption(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "report.sqlite")
+    store.initialize()
+    store.record_candles(fixture_candles())
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        response = api.post(
+            "/api/v1/backtests", json={"fast_period": 2, "slow_period": 3}
+        )
+        location = response.headers["location"]
+    with TestClient(
+        create_app(AuditStore(store.path)), base_url="http://127.0.0.1"
+    ) as api:
+        assert api.get(location).json()["report"] == response.json()
+        with closing(sqlite3.connect(store.path)) as connection, connection:
+            connection.execute("UPDATE backtest_reports SET payload = '{}'")
+        assert api.get(location).status_code == 503

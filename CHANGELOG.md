@@ -16,6 +16,7 @@
 - Added offline deterministic indicators over closed BTC/USD candles.
 - Added a deterministic SMA trend research backtest with simulated fees, spread, slippage and partial fills.
 - Added expanding-window evaluation, a final holdout and a cost-matched buy-and-hold benchmark.
+- Added persistent, content-addressed backtest reports with an integrity check on retrieval.
 
 ## 0.1.0 — development foundation
 

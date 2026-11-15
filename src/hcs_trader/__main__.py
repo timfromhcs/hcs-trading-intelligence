@@ -175,6 +175,24 @@ async def solana_balance(address: str, port: int) -> SolanaBalance:
         return await LocalWalletRpc(client, port).solana_balance(address)
 
 
+async def bitcoin_balance(address: str, port: int, cookie_file: Path) -> WalletBalance:
+    with cookie_file.open(encoding="utf-8") as handle:
+        cookie = handle.read(1025).strip()
+    username, separator, credential = cookie.partition(":")
+    if (
+        len(cookie) > 1024
+        or username != "__cookie__"
+        or not separator
+        or not credential
+        or any(char.isspace() for char in credential)
+    ):
+        raise ValueError("Expected a Bitcoin Core authentication cookie")
+    async with httpx2.AsyncClient(
+        auth=httpx2.BasicAuth(username, credential), trust_env=False
+    ) as client:
+        return await LocalWalletRpc(client, port).bitcoin_balance(address)
+
+
 async def serve(market_data: bool, paper_mode: bool = False) -> None:
     store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -267,6 +285,12 @@ def main() -> None:
     )
     sol_parser.add_argument("address")
     sol_parser.add_argument("--port", type=int, default=8899)
+    btc_parser = commands.add_parser(
+        "btc-balance", help="Scan BTC UTXOs at a local node"
+    )
+    btc_parser.add_argument("address")
+    btc_parser.add_argument("--port", type=int, default=8332)
+    btc_parser.add_argument("--cookie-file", type=Path, required=True)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -341,6 +365,16 @@ def main() -> None:
         except (WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(TypeAdapter(SolanaBalance).dump_json(sol).decode("utf-8"))
+    elif arguments.command == "btc-balance":
+        try:
+            bitcoin = asyncio.run(
+                bitcoin_balance(
+                    arguments.address, arguments.port, arguments.cookie_file
+                )
+            )
+        except (OSError, WalletUnavailable, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(WalletBalance).dump_json(bitcoin).decode("utf-8"))
     else:
         print(Status().model_dump_json())
 

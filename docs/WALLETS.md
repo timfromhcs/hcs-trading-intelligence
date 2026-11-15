@@ -6,4 +6,6 @@ The adapter checks that the node reports chain ID 1, obtains a finalized block a
 
 Run `hcs-trader sol-balance ADDRESS` for native SOL using a node on `127.0.0.1:8899`. The command validates a 32-byte base58 public address, compares the node's genesis hash with mainnet-beta and requests finalized commitment. It reports exact lamports as a decimal string and the returned slot. [Solana balance RPC](https://solana.com/docs/rpc/http/getbalance) · [Genesis hash RPC](https://solana.com/docs/rpc/http/getgenesishash)
 
+Run `hcs-trader btc-balance ADDRESS --cookie-file PATH` for the confirmed UTXOs matching a public Bitcoin address. Use a synced Bitcoin Core mainnet node on `127.0.0.1:8332` with JSON-RPC 2.0 support. The command reads the node's local authentication cookie and validates the address with Core before requesting a single `addr(...)` descriptor scan. It reports the scan block and exact satoshis. An explicit scan can take time and uses the node's UTXO scanning facility. The result covers matching confirmed unspent outputs at the scan block, including any immature outputs returned by the node. [Bitcoin Core scan documentation](https://bitcoincore.org/en/doc/30.0.0/rpc/blockchain/scantxoutset/)
+
 Token balances, transaction history, address derivation, signing, broadcast and additional chain adapters are separate milestones.

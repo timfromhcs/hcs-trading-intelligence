@@ -27,6 +27,7 @@
 - Added GGUF manifest validation and research report artifact metadata.
 - Added read-only native Ethereum balance checks against a local RPC node.
 - Added read-only native Solana balance checks with a mainnet-beta genesis pin.
+- Added Bitcoin Core confirmed UTXO balance reads with exact satoshi conversion.
 
 ## 0.1.0 — development foundation
 

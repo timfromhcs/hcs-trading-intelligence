@@ -1,9 +1,11 @@
 """Public-address balance reads from operator-managed loopback nodes."""
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import uuid4
 
@@ -13,12 +15,15 @@ from pydantic import BaseModel, Field
 from hcs_trader.domain.assets import AssetId
 
 ETH = AssetId.parse("eip155:1/native:ETH")
+BTC = AssetId.parse("bitcoin:mainnet/native:BTC")
 SOL_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 SOL = AssetId.parse("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/native:SOL")
 _BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _HEX_QUANTITY = re.compile(r"0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,63})")
 _HASH = re.compile(r"0x[0-9a-fA-F]{64}")
 _ADDRESS = re.compile(r"0x[0-9a-f]{40}")
+_UTXO_ADDRESS = re.compile(r"[A-Za-z0-9]{14,90}")
+_UTXO_HASH = re.compile(r"[0-9a-fA-F]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,22 @@ class _LamportBalance(BaseModel):
     value: int = Field(ge=0, le=2**64 - 1)
 
 
+class _BitcoinChain(BaseModel):
+    chain: str
+    initialblockdownload: bool
+
+
+class _ValidatedAddress(BaseModel):
+    isvalid: bool
+
+
+class _BitcoinScan(BaseModel):
+    success: Literal[True]
+    height: int = Field(ge=0)
+    bestblock: str
+    total_amount: Decimal | int
+
+
 class LocalWalletRpc:
     def __init__(self, client: httpx2.AsyncClient, port: int) -> None:
         if not 1 <= port <= 65535:
@@ -75,11 +96,13 @@ class LocalWalletRpc:
         self._client = client
         self._url = f"http://127.0.0.1:{port}/"
 
-    async def _request(self, method: str, parameters: list[object]) -> object:
+    async def _request(
+        self, method: str, parameters: list[object], *, timeout: int = 5
+    ) -> object:
         request_id = uuid4().hex
         try:
             async with (
-                asyncio.timeout(5),
+                asyncio.timeout(timeout),
                 self._client.stream(
                     "POST",
                     self._url,
@@ -90,6 +113,7 @@ class LocalWalletRpc:
                         "params": parameters,
                     },
                     follow_redirects=False,
+                    timeout=timeout,
                 ) as response,
             ):
                 if response.status_code != 200:
@@ -101,7 +125,10 @@ class LocalWalletRpc:
                             "Wallet node response exceeds the size limit"
                         )
                     payload.extend(chunk)
-            envelope = _RpcResponse.model_validate_json(payload, strict=True)
+            # Some UTXO nodes return coin amounts as JSON numbers.
+            envelope = _RpcResponse.model_validate(
+                json.loads(payload, parse_float=Decimal), strict=True
+            )
         except (httpx2.HTTPError, TimeoutError, ValueError):
             raise WalletUnavailable(
                 "Local wallet node response unavailable or invalid"
@@ -160,6 +187,48 @@ class LocalWalletRpc:
             9,
             result.context.slot,
             SOL_GENESIS,
+            datetime.now(UTC),
+        )
+
+    async def bitcoin_balance(self, address: str) -> WalletBalance:
+        if not _UTXO_ADDRESS.fullmatch(address):
+            raise ValueError("Expected a Bitcoin address")
+        try:
+            chain = _BitcoinChain.model_validate(
+                await self._request("getblockchaininfo", []), strict=True
+            )
+            if chain.chain != "main" or chain.initialblockdownload:
+                raise WalletUnavailable("Bitcoin node must report synced mainnet")
+            validated = _ValidatedAddress.model_validate(
+                await self._request("validateaddress", [address]), strict=True
+            )
+            if not validated.isvalid:
+                raise WalletUnavailable("Address is invalid for Bitcoin mainnet")
+            scan = _BitcoinScan.model_validate(
+                await self._request(
+                    "scantxoutset", ["start", [f"addr({address})"]], timeout=180
+                ),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable("Invalid Bitcoin node balance response") from None
+
+        amount = Decimal(scan.total_amount)
+        if (
+            not _UTXO_HASH.fullmatch(scan.bestblock)
+            or not amount.is_finite()
+            or not 0 <= amount <= 21_000_000
+            or int(amount.as_tuple().exponent) < -8
+        ):
+            raise WalletUnavailable("Invalid Bitcoin scan block or amount")
+        numerator, denominator = amount.as_integer_ratio()
+        return WalletBalance(
+            address,
+            str(BTC),
+            str(numerator * 100_000_000 // denominator),
+            8,
+            scan.height,
+            scan.bestblock,
             datetime.now(UTC),
         )
 

@@ -43,6 +43,13 @@
 - Added EVM spot swap adapter with pinned chain ID, Universal Router allowlist, exact-allowance enforcement, and revoke-approval generation.
 - Added CEX spot mapping for LTC/USD and ETH/USD, confirming on-chain BTC/LTC/DGB spend remains disabled.
 - Added SQLite schema version 12 with persistent spot-order storage and lifecycle tracking.
+- Added read-only spot orders API endpoints with venue filtering and single-order retrieval.
+- Added emergency execution pause and resume API endpoints with local-origin verification.
+- Added frontend Spot Orders panel with lifecycle status badges and reconciliation alerts.
+- Added frontend On-Chain Wallets panel with cold reserve isolation boundary notice.
+- Added frontend Emergency Kill Switch and execution resume controls.
+- Verified Windows single-file executable packaging and automated desktop smoke testing.
+- Verified Python wheel distribution in clean virtual environments and generated full SPDX license inventory.
 
 ## 0.1.0 — development foundation
 

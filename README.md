@@ -19,6 +19,8 @@ Open the dashboard on the loopback address `http://127.0.0.1:8765`. The service 
 
 Run `uv run --locked pytest` for the Python suite. Build the frontend before running `uv build` to package the dashboard with the wheel.
 
+See the [signing architecture](docs/SIGNING.md) and [execution architecture](docs/EXECUTION.md) for key isolation, pre-trade risk policy, and fail-closed spot routing.
+
 See the [desktop build guide](docs/RELEASE.md) for native bundle creation and verification.
 
 Local MCP clients can read archived data using the [stdio server](docs/MCP.md).

@@ -68,7 +68,12 @@ from hcs_trader.local_research import (
 )
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
-from hcs_trader.promotion import PromotionStage
+from hcs_trader.promotion import (
+    CandidateNotFound,
+    PromotionRejected,
+    PromotionStage,
+    promote_strategy_candidate,
+)
 from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
 from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import WALLET_SNAPSHOT, AuditStore
@@ -532,6 +537,18 @@ def main() -> None:
     strategy_show.add_argument(
         "--data-dir", type=Path, help="Use a separate local data directory"
     )
+    strategy_promote = commands.add_parser(
+        "strategy-promote", help="Promote a strategy candidate to the next stage"
+    )
+    strategy_promote.add_argument("candidate_id", help="Candidate identifier")
+    strategy_promote.add_argument(
+        "--stage",
+        choices=[s.value for s in PromotionStage],
+        help="Target promotion stage (defaults to next stage in ladder)",
+    )
+    strategy_promote.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
     research_parser = argparse.ArgumentParser(add_help=False)
     research_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
@@ -743,6 +760,43 @@ def main() -> None:
             candidate.candidate_id, datetime.now(UTC)
         )
         print(json.dumps(data, indent=2))
+    elif arguments.command == "strategy-promote":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            stage = PromotionStage(arguments.stage) if arguments.stage else None
+            updated, verdict = promote_strategy_candidate(
+                store, arguments.candidate_id, stage
+            )
+        except CandidateNotFound as error:
+            parser.exit(1, f"{error}\n")
+        except PromotionRejected as error:
+            parser.exit(1, f"{error}\n")
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            f"Successfully promoted candidate '{updated.candidate_id}' "
+            f"to {updated.stage.value}."
+        )
+        print(
+            json.dumps(
+                {
+                    "candidate": updated.model_dump(mode="json"),
+                    "gate_result": {
+                        "from_stage": verdict.from_stage.value,
+                        "to_stage": verdict.to_stage.value,
+                        "passed": verdict.passed,
+                        "reasons": verdict.reasons,
+                        "evaluated_at": verdict.evaluated_at.isoformat(),
+                    },
+                },
+                indent=2,
+            )
+        )
     elif arguments.command == "kraken-validate":
         try:
             validation = asyncio.run(

@@ -163,6 +163,30 @@ def test_strategy_cli_list_and_show(
     assert exit_info.value.code == 1
     assert "not found" in capsys.readouterr().err
 
+    # 6. promote cand-cli-01 to UNIT_TESTED
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "strategy-promote", "cand-cli-01"])
+    main()
+    promoted_out = capsys.readouterr().out
+    assert (
+        "Successfully promoted candidate 'cand-cli-01' to UNIT_TESTED." in promoted_out
+    )
+    updated = store.get_strategy_candidate("cand-cli-01")
+    assert updated is not None and updated.stage == PromotionStage.UNIT_TESTED
+
+    # 7. promote cand-cli-01 further fails without backtest report
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "strategy-promote", "cand-cli-01"])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 1
+    assert "Candidate needs a saved backtest report ID" in capsys.readouterr().err
+
+    # 8. promote non-existent candidate fails
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "strategy-promote", "non-existent"])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 1
+    assert "not found" in capsys.readouterr().err
+
 
 def test_new_research_watch_runs_immediately_and_persists_next_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -12,6 +12,9 @@
 - Added CodeQL, OpenSSF Scorecard, Dependabot, CODEOWNERS, Contributor Covenant 2.1, and expanded security policies.
 - Added `strategy-list` and `strategy-show` CLI commands for operator inspection of candidates and promotion states.
 - Added `strategies.get_candidates` tool and `hcs://strategies/candidates` resource to local MCP server.
+- Unified strategy candidate promotion logic in `src/hcs_trader/promotion.py` via `promote_strategy_candidate`.
+- Added `strategy-promote` CLI command for terminal-based gate evaluation and promotion transitions.
+- Added `list_shadow_runs` to SQLite storage and `GET /api/v1/strategies/candidates/{candidate_id}/shadow-runs` REST endpoint.
 
 ## 0.2.0 — spot execution, isolated signing, research and dashboard UI (2026-11-15)
 

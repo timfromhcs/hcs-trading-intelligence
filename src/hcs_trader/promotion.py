@@ -1,16 +1,31 @@
 """Formal strategy promotion pipeline and champion/challenger evaluation."""
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from hashlib import sha256
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hcs_trader.backtest import BacktestResult
-from hcs_trader.holdout import HoldoutResult
-from hcs_trader.walk_forward import WalkForwardResult
+from hcs_trader.holdout import CANDIDATE_JSON, RESULT_JSON, HoldoutResult
+from hcs_trader.walk_forward import PeriodPair, WalkForwardResult
+
+
+class CandidateNotFound(ValueError):
+    """Raised when a strategy candidate does not exist in storage."""
+
+
+class PromotionRejected(ValueError):
+    """Raised when a promotion gate or evidence check rejects transition."""
+
+
+class ReportPayload(BaseModel):
+    schema_version: Literal[1] = 1
+    report: BacktestResult | WalkForwardResult
 
 
 class PromotionStage(StrEnum):
@@ -257,3 +272,176 @@ def compare_strategy_metrics(
         reasons=reasons,
         metrics=metrics,
     )
+
+
+def promote_strategy_candidate(
+    store: Any,
+    candidate_id: str,
+    target_stage: PromotionStage | None = None,
+) -> tuple[StrategyCandidate, PromotionGateResult]:
+    candidate = store.get_strategy_candidate(candidate_id)
+    if candidate is None:
+        raise CandidateNotFound(f"Strategy candidate '{candidate_id}' not found")
+
+    if target_stage is None:
+        expected = next_promotion_stage(candidate.stage)
+        if expected is None:
+            raise PromotionRejected(
+                f"Candidate '{candidate_id}' is already at terminal stage "
+                f"{candidate.stage.value}"
+            )
+        target_stage = expected
+
+    def _get_report(report_id: str) -> ReportPayload:
+        if not isinstance(report_id, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", report_id
+        ):
+            raise PromotionRejected("Invalid report ID format")
+        record = store.backtest_report(report_id)
+        if record is None:
+            raise PromotionRejected("Backtest report not found")
+        if sha256(record.payload.encode("utf-8")).hexdigest() != report_id:
+            raise PromotionRejected("Backtest report integrity check failed")
+        try:
+            return ReportPayload.model_validate_json(record.payload)
+        except ValidationError as error:
+            raise PromotionRejected("Backtest report format is unsupported") from error
+
+    def _candidate_backtest() -> BacktestResult:
+        report_id = candidate.parameters.get("backtest_report_id")
+        if not isinstance(report_id, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", report_id
+        ):
+            raise PromotionRejected("Candidate needs a saved backtest report ID")
+        report = _get_report(report_id).report
+        if (
+            not isinstance(report, BacktestResult)
+            or report.dataset_sha256 != candidate.dataset_hash
+            or report.config.fast_period != candidate.parameters.get("fast")
+            or report.config.slow_period != candidate.parameters.get("slow")
+        ):
+            raise PromotionRejected("Backtest report does not match the candidate")
+        return report
+
+    def _latest_shadow() -> tuple[str, BacktestResult]:
+        saved = store.latest_shadow_run(candidate.candidate_id)
+        if saved is None:
+            raise PromotionRejected("A persisted paper shadow run is required")
+        run_id, payload = saved
+        if sha256(payload.encode("utf-8")).hexdigest() != run_id:
+            raise PromotionRejected("Invalid shadow run payload")
+        try:
+            parsed = ReportPayload.model_validate_json(payload).report
+        except ValidationError as error:
+            raise PromotionRejected("Invalid shadow run report format") from error
+        if not isinstance(parsed, BacktestResult):
+            raise PromotionRejected("Shadow run report must be a BacktestResult")
+        return run_id, parsed
+
+    backtest_evidence: BacktestResult | None = None
+    walk_forward_evidence: WalkForwardResult | None = None
+    holdout_evidence: HoldoutResult | None = None
+    shadow_fills = 0
+    shadow_run_id: str | None = None
+
+    needs_backtest = (candidate.stage, target_stage) in (
+        (PromotionStage.UNIT_TESTED, PromotionStage.BACKTESTED),
+        (PromotionStage.BACKTESTED, PromotionStage.WALK_FORWARD_PASSED),
+        (PromotionStage.WALK_FORWARD_PASSED, PromotionStage.PAPER_SHADOW),
+    )
+    if needs_backtest:
+        report = _candidate_backtest()
+        backtest_evidence = report
+
+        if target_stage == PromotionStage.WALK_FORWARD_PASSED:
+            walk_id = candidate.parameters.get("walk_forward_report_id")
+            if not isinstance(walk_id, str) or not re.fullmatch(
+                r"[a-f0-9]{64}", walk_id
+            ):
+                raise PromotionRejected(
+                    "Candidate needs a saved walk-forward report ID"
+                )
+            walk = _get_report(walk_id).report
+            pair = PeriodPair(report.config.fast_period, report.config.slow_period)
+            if (
+                not isinstance(walk, WalkForwardResult)
+                or walk.config.candidates != (pair,)
+                or walk.holdout.selection_dataset_sha256 != report.dataset_sha256
+                or walk.holdout.started_at != report.dataset_closed_at
+                or walk.holdout.strategy.config != report.config
+            ):
+                raise PromotionRejected(
+                    "Walk-forward report does not match the candidate"
+                )
+            walk_forward_evidence = walk
+
+        if target_stage == PromotionStage.PAPER_SHADOW:
+            commitment = candidate.parameters.get("holdout_commitment")
+            if not isinstance(commitment, str) or not re.fullmatch(
+                r"[a-f0-9]{64}", commitment
+            ):
+                raise PromotionRejected("Candidate needs a scored holdout commitment")
+            scored = store.scored_holdout(commitment)
+            if scored is None:
+                raise PromotionRejected("Committed holdout has not been scored")
+            try:
+                frozen = CANDIDATE_JSON.validate_json(scored[0])
+                outcome = RESULT_JSON.validate_json(scored[1])
+            except ValidationError as error:
+                raise PromotionRejected("Stored holdout format is invalid") from error
+            if (
+                frozen.holdout_sha256 != commitment
+                or outcome.holdout_sha256 != commitment
+                or frozen.development_sha256 != report.dataset_sha256
+                or outcome.development_sha256 != report.dataset_sha256
+                or frozen.strategy_version != report.strategy
+                or frozen.selected != report.config
+                or outcome.strategy.config != report.config
+                or outcome.strategy.strategy != report.strategy
+                or outcome.strategy.dataset_closed_at > datetime.now(UTC)
+                or not frozen.warmup
+                or frozen.warmup[-1].closed_at != report.dataset_closed_at
+            ):
+                raise PromotionRejected(
+                    "Committed holdout does not match the candidate"
+                )
+            holdout_evidence = outcome
+
+    if (
+        candidate.stage == PromotionStage.PAPER_SHADOW
+        and target_stage == PromotionStage.PAPER_APPROVED
+    ):
+        shadow_id, shadow_report = _latest_shadow()
+        if shadow_report.max_drawdown > Decimal("0.25"):
+            raise PromotionRejected("Paper shadow drawdown exceeds the 25% risk limit")
+        shadow_fills = len(shadow_report.fills)
+        shadow_run_id = shadow_id
+
+    is_live_enabled = (
+        target_stage == PromotionStage.LIVE_CANARY
+        and store.has_spot_canary_approval(candidate.candidate_id, datetime.now(UTC))
+    )
+
+    verdict = evaluate_promotion_gate(
+        candidate,
+        target_stage,
+        backtest=backtest_evidence,
+        walk_forward=walk_forward_evidence,
+        holdout=holdout_evidence,
+        shadow_fills=shadow_fills,
+        is_live_enabled=is_live_enabled,
+    )
+    if not verdict.passed:
+        raise PromotionRejected(
+            f"Promotion gate rejected: {'; '.join(verdict.reasons)}"
+        )
+
+    updated = store.update_candidate_stage(
+        candidate,
+        target_stage,
+        verdict.evaluated_at,
+        shadow_run_id=shadow_run_id,
+    )
+    if updated is None:
+        raise PromotionRejected("Candidate changed during promotion")
+    return updated, verdict

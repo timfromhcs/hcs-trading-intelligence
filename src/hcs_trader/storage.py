@@ -1344,6 +1344,18 @@ class AuditStore:
             ).fetchone()
         return (str(row[0]), str(row[1])) if row is not None else None
 
+    def list_shadow_runs(
+        self, candidate_id: str, limit: int = 25
+    ) -> list[tuple[str, datetime, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT run_id, evaluated_until, payload FROM strategy_shadow_runs "
+                "WHERE candidate_id = ? "
+                "ORDER BY evaluated_until DESC, run_id DESC LIMIT ?",
+                (candidate_id, max(1, min(limit, 200))),
+            ).fetchall()
+        return [(str(r[0]), datetime.fromisoformat(r[1]), str(r[2])) for r in rows]
+
     def update_candidate_stage(
         self,
         candidate: StrategyCandidate,

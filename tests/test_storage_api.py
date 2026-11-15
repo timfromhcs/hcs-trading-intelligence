@@ -347,6 +347,12 @@ def test_strategy_candidates_storage_and_api(tmp_path: Path) -> None:
         assert "strategy.promoted.unit_tested" in kinds
         assert kinds.count("strategy.promoted.unit_tested") == 1
 
+        shadow_runs_resp = client.get(
+            f"/api/v1/strategies/candidates/{cand_id}/shadow-runs"
+        )
+        assert shadow_runs_resp.status_code == 200
+        assert shadow_runs_resp.json() == []
+
 
 @pytest.mark.parametrize(
     ("stage", "target"),

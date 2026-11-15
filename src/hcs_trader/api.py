@@ -18,8 +18,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from hcs_trader.data import ecb
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import DataQuality
 from hcs_trader.domain.news import NewsItem
 from hcs_trader.storage import AuditStore
@@ -256,6 +258,15 @@ def create_app(
             return store.news(limit=limit)
         except sqlite3.Error as error:
             raise HTTPException(503, "News storage unavailable") from error
+
+    @app.get("/api/v1/macro/series")
+    def macro_series(
+        limit: Annotated[int, Query(ge=1, le=1000)] = 250,
+    ) -> list[MacroObservation]:
+        try:
+            return store.macro_history(ecb.SOURCE, ecb.SERIES, limit=limit)
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Macro storage unavailable") from error
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

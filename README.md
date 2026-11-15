@@ -29,6 +29,8 @@ Download the same candles as CSV from `GET /api/v1/market/candles.csv?interval=6
 
 Run `uv run --locked hcs-trader import-news` to import Federal Reserve monetary-policy release metadata. The dashboard and `GET /api/v1/news/events` read the stored timeline offline.
 
+Run `uv run --locked hcs-trader import-macro` to import daily ECB USD-per-EUR reference rates. `GET /api/v1/macro/series` reads the locally observed values and revisions offline.
+
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 Licensed under Apache-2.0. Made with love by timfromhcs and hcsmedia.

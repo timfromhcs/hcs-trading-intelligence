@@ -10,6 +10,7 @@ import uvicorn
 from platformdirs import user_data_path
 
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
+from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, KrakenQuoteProvider
 from hcs_trader.data.provider import QuoteUnavailable
@@ -37,6 +38,14 @@ async def import_news() -> int:
     store = local_store()
     store.initialize()
     return store.record_news(items)
+
+
+async def import_macro() -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        observations = await fetch_ecb_rates(client)
+    store = local_store()
+    store.initialize()
+    return store.record_macro(observations)
 
 
 async def serve(market_data: bool) -> None:
@@ -81,6 +90,9 @@ def main() -> None:
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
     )
     commands.add_parser("import-news", help="Import official Federal Reserve releases")
+    commands.add_parser(
+        "import-macro", help="Import daily ECB USD-per-EUR reference rates"
+    )
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data))
@@ -96,6 +108,12 @@ def main() -> None:
         except NewsUnavailable as error:
             parser.exit(1, f"{error}\n")
         print(f"Imported {count} new Federal Reserve releases.")
+    elif arguments.command == "import-macro":
+        try:
+            count = asyncio.run(import_macro())
+        except MacroUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new or revised ECB observations.")
     else:
         print(Status().model_dump_json())
 

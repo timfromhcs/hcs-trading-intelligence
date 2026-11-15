@@ -14,3 +14,8 @@
 - Source ID `federal-reserve-monetary-policy`, operated by the Board of Governors of the Federal Reserve System. The public RSS feed requires no API key. [Official RSS directory](https://www.federalreserve.gov/feeds/feeds.htm)
 - `import-news` requests the feed once, without following redirects. Only monetary-policy release URLs on the official host are kept. The application stores plain title text, URL, publication time and first local receipt. Article bodies and feed descriptions are omitted.
 - `GET /api/v1/news/events` reads locally stored source metadata in reverse publication order. Feed text is untrusted input.
+
+## European Central Bank reference rates
+
+- Source ID `ecb-sdmx`, series `EXR.D.USD.EUR.SP00.A`. Values are US dollars per euro. The public SDMX API requires no key. A single manual import fetches up to 250 daily observations. [ECB data API](https://data.ecb.europa.eu/help/api/data)
+- Reference rates are economic observations. Trading venue quotes are supplied separately. The observation date describes the date of the reference rate, while `received_at` records when this installation first saw that value or revision. Initial downloads supply the currently published history. Historical publication times and complete historical vintages are outside this import's coverage. [ECB methodology](https://data.ecb.europa.eu/methodology/exchange-rates)

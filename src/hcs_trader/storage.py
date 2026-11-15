@@ -4,16 +4,17 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
 from hcs_trader.domain.assets import MarketId
+from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +113,77 @@ class AuditStore:
                 connection.execute(
                     "CREATE INDEX news_items_timeline ON news_items (published_at DESC)"
                 )
-                connection.execute("PRAGMA user_version = 4")
+            if version < 5:
+                connection.execute(
+                    """
+                    CREATE TABLE macro_observations (
+                        id INTEGER PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        series TEXT NOT NULL,
+                        observation_date TEXT NOT NULL,
+                        received_at TEXT NOT NULL,
+                        value TEXT NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX macro_series_history ON macro_observations "
+                    "(source, series, observation_date DESC, id DESC)"
+                )
+                connection.execute("PRAGMA user_version = 5")
+
+    def record_macro(self, observations: list[MacroObservation]) -> int:
+        with self._connect() as connection, connection:
+            for observation in observations:
+                key = (
+                    observation.source,
+                    observation.series,
+                    observation.observation_date.isoformat(),
+                )
+                value = str(observation.value)
+                received_at = observation.received_at.isoformat(timespec="microseconds")
+                connection.execute(
+                    """
+                    INSERT INTO macro_observations
+                        (source, series, observation_date, received_at, value)
+                    WITH latest AS (
+                        SELECT value, received_at FROM macro_observations
+                        WHERE source = ? AND series = ? AND observation_date = ?
+                        ORDER BY id DESC LIMIT 1
+                    )
+                    SELECT ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM latest WHERE value = ? OR received_at >= ?
+                    )
+                    """,
+                    (*key, *key, received_at, value, value, received_at),
+                )
+            return connection.total_changes
+
+    def macro_history(
+        self, source: str, series: str, *, limit: int
+    ) -> list[MacroObservation]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("Macro history limit must be between 1 and 1000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT observation_date, received_at, value FROM macro_observations
+                WHERE source = ? AND series = ?
+                ORDER BY observation_date DESC, id DESC LIMIT ?
+                """,
+                (source, series, limit),
+            ).fetchall()
+        return [
+            MacroObservation(
+                source,
+                series,
+                date.fromisoformat(day),
+                datetime.fromisoformat(received),
+                Decimal(value),
+            )
+            for day, received, value in reversed(rows)
+        ]
 
     def record_news(self, items: list[NewsItem]) -> int:
         with self._connect() as connection, connection:

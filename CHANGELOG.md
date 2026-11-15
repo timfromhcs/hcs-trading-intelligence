@@ -11,6 +11,7 @@
 - Added offline CSV downloads for stored BTC/USD candles.
 - Added an explicit monetary-policy release import and local, attributed news timeline.
 - Displayed stored monetary-policy releases in the dashboard, with official links and publication and receipt times.
+- Added ECB daily reference-rate import with local revision history and a read-only API.
 
 ## 0.1.0 — development foundation
 

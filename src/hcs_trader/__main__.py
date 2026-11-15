@@ -33,6 +33,7 @@ from hcs_trader.holdout import (
     freeze_candidate,
     score_holdout,
 )
+from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
 
@@ -190,6 +191,7 @@ def main() -> None:
     score_parser.add_argument("file", type=Path)
     commands.add_parser("pause-execution", help="Persist the local execution pause")
     commands.add_parser("resume-execution", help="Clear the local execution pause")
+    commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -236,6 +238,8 @@ def main() -> None:
         store.initialize()
         store.set_execution_pause(paused)
         print("Execution paused." if paused else "Execution pause cleared.")
+    elif arguments.command == "mcp":
+        create_mcp_server(local_store().path).run(transport="stdio")
     else:
         print(Status().model_dump_json())
 

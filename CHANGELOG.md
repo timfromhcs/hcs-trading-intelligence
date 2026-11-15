@@ -22,6 +22,7 @@
 - Added explicit opt-in paper order simulation using verified Kraken BTC/USD quotes.
 - Added a durable execution pause with local controls and transactional enforcement.
 - Displayed the simulated portfolio, recent fills and execution pause in the dashboard.
+- Added a read-only MCP server over local stdio.
 
 ## 0.1.0 — development foundation
 

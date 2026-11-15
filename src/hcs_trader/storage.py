@@ -48,12 +48,18 @@ class ExecutionPause:
 
 
 class AuditStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
         self.path = path
+        self._read_only = read_only
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        with closing(sqlite3.connect(self.path, timeout=5)) as connection:
+        location = (
+            self.path.resolve().as_uri() + "?mode=ro" if self._read_only else self.path
+        )
+        with closing(
+            sqlite3.connect(location, timeout=5, uri=self._read_only)
+        ) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             yield connection
 

@@ -73,7 +73,7 @@ class Capabilities(BaseModel):
     portfolio: bool = True
     paper_orders: bool = False
     live_orders: bool = False
-    mcp: bool = False
+    mcp: bool = True
 
 
 class QuoteResponse(BaseModel):

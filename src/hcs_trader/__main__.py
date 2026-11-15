@@ -10,6 +10,7 @@ import uvicorn
 from platformdirs import user_data_path
 
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
+from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, KrakenQuoteProvider
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
@@ -28,6 +29,14 @@ async def import_candles(interval: int) -> int:
     store = local_store()
     store.initialize()
     return store.record_candles(candles)
+
+
+async def import_news() -> int:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        items = await fetch_fed_news(client)
+    store = local_store()
+    store.initialize()
+    return store.record_news(items)
 
 
 async def serve(market_data: bool) -> None:
@@ -71,6 +80,7 @@ def main() -> None:
     import_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
     )
+    commands.add_parser("import-news", help="Import official Federal Reserve releases")
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data))
@@ -80,6 +90,12 @@ def main() -> None:
         except QuoteUnavailable as error:
             parser.exit(1, f"{error}\n")
         print(f"Imported {count} new BTC/USD candles.")
+    elif arguments.command == "import-news":
+        try:
+            count = asyncio.run(import_news())
+        except NewsUnavailable as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Imported {count} new Federal Reserve releases.")
     else:
         print(Status().model_dump_json())
 

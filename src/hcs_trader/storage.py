@@ -11,8 +11,9 @@ from uuid import uuid4
 
 from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.market_data import Candle, Quote
+from hcs_trader.domain.news import NewsItem
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +96,65 @@ class AuditStore:
                     ) STRICT, WITHOUT ROWID
                     """
                 )
-                connection.execute("PRAGMA user_version = 3")
+            if version < 4:
+                connection.execute(
+                    """
+                    CREATE TABLE news_items (
+                        source TEXT NOT NULL,
+                        url TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        published_at TEXT NOT NULL,
+                        received_at TEXT NOT NULL,
+                        PRIMARY KEY (source, url)
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX news_items_timeline ON news_items (published_at DESC)"
+                )
+                connection.execute("PRAGMA user_version = 4")
+
+    def record_news(self, items: list[NewsItem]) -> int:
+        with self._connect() as connection, connection:
+            connection.executemany(
+                """
+                INSERT INTO news_items VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (source, url) DO NOTHING
+                """,
+                (
+                    (
+                        item.source,
+                        item.url,
+                        item.title,
+                        item.published_at.isoformat(timespec="microseconds"),
+                        item.received_at.isoformat(timespec="microseconds"),
+                    )
+                    for item in items
+                ),
+            )
+            return connection.total_changes
+
+    def news(self, *, limit: int) -> list[NewsItem]:
+        if not 1 <= limit <= 100:
+            raise ValueError("News limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source, url, title, published_at, received_at
+                FROM news_items ORDER BY published_at DESC, source, url LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            NewsItem(
+                source,
+                url,
+                title,
+                datetime.fromisoformat(published),
+                datetime.fromisoformat(received),
+            )
+            for source, url, title, published, received in rows
+        ]
 
     def record_candles(self, candles: list[Candle]) -> int:
         with self._connect() as connection, connection:

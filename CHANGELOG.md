@@ -9,6 +9,7 @@
 - Added the opt-in BTC/USD dashboard panel with exact prices, source, timestamps and quote quality.
 - Added explicit import of closed BTC/USD candles and offline candle history through the local API.
 - Added offline CSV downloads for stored BTC/USD candles.
+- Added an explicit monetary-policy release import and local, attributed news timeline.
 
 ## 0.1.0 — development foundation
 

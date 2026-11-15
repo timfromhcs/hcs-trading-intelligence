@@ -8,3 +8,9 @@
 - Distinct observed price levels and timestamps are persisted in local SQLite. The history endpoint reads up to 500 rows without network access and returns the most recently stored observations first. Repeated deliveries of the same quote retain the first local receipt.
 - Disabled by default. Local usage is subject to the applicable Kraken terms. Public accessibility does not grant redistribution rights. [Terms by region](https://www.kraken.com/legal)
 - The explicit `import-candles` command fetches up to 720 completed BTC/USD candles per call from Kraken OHLC. The interval is in minutes. The import keeps the first stored observation for each source, interval and opening time. The local candles API serves the latest requested rows in chronological order, with gaps preserved. [OHLC documentation](https://docs.kraken.com/api-reference/market-data/get-ohlc-data)
+
+## Federal Reserve monetary-policy releases
+
+- Source ID `federal-reserve-monetary-policy`, operated by the Board of Governors of the Federal Reserve System. The public RSS feed requires no API key. [Official RSS directory](https://www.federalreserve.gov/feeds/feeds.htm)
+- `import-news` requests the feed once, without following redirects. Only monetary-policy release URLs on the official host are kept. The application stores plain title text, URL, publication time and first local receipt. Article bodies and feed descriptions are omitted.
+- `GET /api/v1/news/events` reads locally stored source metadata in reverse publication order. Feed text is untrusted input.

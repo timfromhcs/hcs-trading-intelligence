@@ -1,0 +1,8 @@
+{
+  "name": "hcs-trading-intelligence-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}

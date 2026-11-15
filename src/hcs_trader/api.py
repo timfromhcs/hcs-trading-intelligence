@@ -25,7 +25,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
 from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
+from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
@@ -39,6 +41,7 @@ from hcs_trader.domain.paper import (
 )
 from hcs_trader.domain.wallet import WalletSnapshot
 from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.kraken_spot import KrakenAmbiguousExecutionError, KrakenOrderRejected
 from hcs_trader.local_research import ResearchHistory
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
@@ -53,7 +56,9 @@ from hcs_trader.promotion import (
     list_shadow_runs_for_candidate,
     promote_strategy_candidate,
 )
+from hcs_trader.risk import RiskRejected
 from hcs_trader.skills import list_skills
+from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.walk_forward import (
     WalkForwardConfig,
@@ -185,6 +190,15 @@ class PaperAccount(PaperPortfolio):
     fills: list[PaperFill]
 
 
+class SpotOrderSubmission(BaseModel):
+    side: SpotSide
+    quantity: Decimal
+    limit_price: Decimal
+    candidate_id: str
+    strategy_version: str
+    client_order_id: str | None = None
+
+
 def create_app(
     store: AuditStore,
     ui_assets: Path | None = None,
@@ -192,6 +206,7 @@ def create_app(
     quote_service: QuoteService | None = None,
     paper_mode: bool = False,
     kraken_reconciliation: Callable[[], Awaitable[object]] | None = None,
+    spot_execution: KrakenSpotExecution | None = None,
 ) -> FastAPI:
     paper = (
         PaperExecution(store, quote_service) if paper_mode and quote_service else None
@@ -245,6 +260,12 @@ def create_app(
 
     @app.get("/api/v1/system/status")
     def status() -> Status:
+        if spot_execution is not None:
+            return Status(
+                mode=Mode.LIVE,
+                network_enabled=True,
+                execution_available=not execution_pause().paused,
+            )
         if quote_service is not None:
             return Status(
                 mode=Mode.PAPER if paper is not None else Mode.DATA_ONLY,
@@ -292,7 +313,9 @@ def create_app(
     @app.get("/api/v1/system/capabilities")
     def capabilities() -> Capabilities:
         return Capabilities(
-            market_data=quote_service is not None, paper_orders=paper is not None
+            market_data=quote_service is not None,
+            paper_orders=paper is not None,
+            live_orders=spot_execution is not None,
         )
 
     @app.get("/api/v1/market/quotes")
@@ -598,6 +621,86 @@ def create_app(
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Spot order storage unavailable") from error
 
+    @app.post("/api/v1/orders/spot")
+    async def submit_spot_order_endpoint(
+        submission: SpotOrderSubmission, request: Request
+    ) -> dict[str, Any]:
+        if spot_execution is None:
+            raise HTTPException(403, "Live spot execution is disabled")
+        _verify_local_origin(request, "Spot orders")
+        latest_quote: Any = None
+        if quote_service is not None:
+            try:
+                snap = await quote_service.snapshot()
+                latest_quote = snap.quote
+            except (QuoteUnavailable, sqlite3.Error):
+                latest_quote = None
+        if latest_quote is None:
+            for q in store.quote_history(BTC_USD, limit=1):
+                latest_quote = q
+        if latest_quote is None:
+            raise HTTPException(503, "Market quote unavailable for spot execution")
+        now = datetime.now(UTC)
+        order = SpotOrder(
+            client_order_id=submission.client_order_id or uuid4().hex,
+            order_id=uuid4().hex,
+            venue="kraken",
+            market="BTC/USD",
+            side=submission.side,
+            order_type=SpotOrderType.LIMIT,
+            quantity=submission.quantity,
+            limit_price=submission.limit_price,
+            state=OrderState.PREVIEWED,
+            risk_decision_id="none",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            observed = await spot_execution.submit(
+                order,
+                latest_quote,
+                candidate_id=submission.candidate_id,
+                strategy_version=submission.strategy_version,
+            )
+            return {
+                "client_order_id": observed.client_order_id,
+                "order_id": observed.order_id,
+                "venue": observed.venue,
+                "market": observed.market,
+                "side": observed.side.value,
+                "order_type": observed.order_type.value,
+                "quantity": str(observed.quantity),
+                "limit_price": (
+                    str(observed.limit_price)
+                    if observed.limit_price is not None
+                    else None
+                ),
+                "state": observed.state.value,
+                "risk_decision_id": observed.risk_decision_id,
+                "created_at": observed.created_at.isoformat(),
+                "updated_at": observed.updated_at.isoformat(),
+                "venue_order_id": observed.venue_order_id,
+                "filled_quantity": (
+                    str(observed.filled_quantity)
+                    if observed.filled_quantity is not None
+                    else None
+                ),
+                "average_price": (
+                    str(observed.average_price)
+                    if observed.average_price is not None
+                    else None
+                ),
+                "fee": str(observed.fee) if observed.fee is not None else None,
+            }
+        except RiskRejected as error:
+            raise HTTPException(409, str(error)) from error
+        except KrakenOrderRejected as error:
+            raise HTTPException(400, str(error)) from error
+        except KrakenAmbiguousExecutionError as error:
+            raise HTTPException(504, str(error)) from error
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Spot order storage unavailable") from error
+
     @app.get("/api/v1/research/runs")
     def research_runs(
         response: Response, limit: Annotated[int, Query(ge=1, le=100)] = 25
@@ -749,6 +852,32 @@ def create_app(
                 "evaluated_at": verdict.evaluated_at.isoformat(),
             },
         }
+
+    @app.get("/api/v1/strategies/candidates/{candidate_id}/canary-approval")
+    def get_candidate_canary_approval(
+        candidate_id: str, response: Response
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            approval = store.get_spot_canary_approval(candidate_id)
+            if approval is None:
+                raise HTTPException(
+                    404, f"No canary approval recorded for '{candidate_id}'"
+                )
+            return {
+                "candidate_id": approval.candidate_id,
+                "candidate_version": approval.candidate_version,
+                "dataset_hash": approval.dataset_hash,
+                "key_fingerprint": approval.key_fingerprint,
+                "max_notional": str(approval.max_notional),
+                "expires_at": approval.expires_at.isoformat(),
+                "stage": approval.stage,
+                "active": approval.active,
+            }
+        except HTTPException:
+            raise
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Audit storage unavailable") from error
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

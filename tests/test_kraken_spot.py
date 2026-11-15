@@ -17,7 +17,9 @@ import uvicorn
 from fastapi.testclient import TestClient
 
 from hcs_trader import __main__ as launcher
-from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.api import create_app
+from hcs_trader.data.kraken import BTC_USD, SOURCE, KrakenQuoteProvider
+from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
@@ -612,3 +614,375 @@ def test_spot_order_storage_persistence(tmp_path: Path) -> None:
     open_orders = store.list_open_spot_orders("kraken")
     assert len(open_orders) == 1
     assert open_orders[0].client_order_id == "cl-ord-persist"
+
+
+@pytest.mark.anyio
+async def test_canary_execution_end_to_end_and_fail_closed(tmp_path: Path) -> None:
+    path = tmp_path / "execution.db"
+    store = AuditStore(path)
+    store.initialize()
+    now = datetime.now(UTC)
+    quote = Quote(BTC_USD, SOURCE, Decimal("49999"), Decimal("50000"), now, now, now)
+    risk = RiskEngine(RiskPolicy(live_mode_enabled=True))
+    candidate = StrategyCandidate(
+        candidate_id="canary-e2e",
+        name="SMA-Canary",
+        version="v1.0.0",
+        dataset_hash="hash-snap-01",
+        stage=PromotionStage.PAPER_APPROVED,
+    )
+    store.save_strategy_candidate(candidate)
+
+    fingerprint = hashlib.sha256(_API_KEY.encode()).hexdigest()
+    expires_at = now + timedelta(hours=24)
+    store.authorize_spot_canary(candidate, fingerprint, Decimal("500"), now, expires_at)
+
+    approval = store.get_spot_canary_approval(candidate.candidate_id, now)
+    assert approval is not None
+    assert approval.candidate_id == "canary-e2e"
+    assert approval.max_notional == Decimal("500")
+    assert approval.key_fingerprint == fingerprint
+    assert approval.active is False
+
+    assert store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
+    active_approval = store.get_spot_canary_approval(candidate.candidate_id, now)
+    assert active_approval is not None and active_approval.active is True
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        endpoint = request.url.path.rsplit("/", 1)[1]
+        if endpoint == "AddOrder":
+            return httpx2.Response(
+                200,
+                json={
+                    "error": [],
+                    "result": {
+                        "descr": {"order": "buy 0.005 XXBTZUSD @ limit 50000.00"},
+                        "txid": ["OTX-CANARY-999"],
+                    },
+                },
+            )
+        if endpoint == "QueryOrders":
+            return httpx2.Response(
+                200,
+                json={
+                    "error": [],
+                    "result": {
+                        "OTX-CANARY-999": {
+                            "status": "closed",
+                            "vol_exec": "0.00500000",
+                            "cost": "250.00",
+                            "fee": "0.50",
+                            "cl_ord_id": "canary-order-001",
+                        }
+                    },
+                },
+            )
+        return httpx2.Response(404, json={"error": ["EGeneral:Invalid endpoint"]})
+
+    transport = httpx2.MockTransport(handler)
+    async with httpx2.AsyncClient(transport=transport) as client:
+        adapter = KrakenSpotAdapter(_API_KEY, _API_SECRET, client)
+        execution = KrakenSpotExecution(store, adapter, risk)
+
+        order = _sample_order(
+            client_id="canary-order-001",
+            quantity="0.005",
+            limit_price="50000.00",
+        )
+        submitted = await execution.submit(
+            order,
+            quote,
+            candidate_id=candidate.candidate_id,
+            strategy_version=candidate.version,
+        )
+        assert submitted.state == OrderState.ACKNOWLEDGED
+        assert submitted.venue_order_id == "OTX-CANARY-999"
+
+        saved = store.get_spot_order("canary-order-001")
+        assert saved is not None
+        assert saved.state == OrderState.ACKNOWLEDGED
+        assert saved.venue_order_id == "OTX-CANARY-999"
+
+        reconciled = await adapter.reconcile_order(saved, at=now)
+        assert reconciled.state == OrderState.FILLED
+        assert reconciled.filled_quantity == Decimal("0.00500000")
+        assert reconciled.average_price == Decimal("50000")
+        assert reconciled.fee == Decimal("0.50")
+        assert store.apply_spot_observation(saved, reconciled)
+        assert store.get_spot_order("canary-order-001") == reconciled
+
+        # Fail-closed: notional exceeds authorized cap ($600 > $500)
+        over_cap_order = _sample_order(
+            client_id="canary-over-cap",
+            quantity="0.012",
+            limit_price="50000.00",
+        )
+        with pytest.raises(RiskRejected, match="authorization"):
+            await execution.submit(
+                over_cap_order,
+                quote,
+                candidate_id=candidate.candidate_id,
+                strategy_version=candidate.version,
+            )
+
+        # Fail-closed: different API key
+        other_adapter = KrakenSpotAdapter("other-key", _API_SECRET, client)
+        other_exec = KrakenSpotExecution(store, other_adapter, risk)
+        with pytest.raises(RiskRejected, match="authorization"):
+            await other_exec.submit(
+                _sample_order(client_id="canary-wrong-key", quantity="0.001"),
+                quote,
+                candidate_id=candidate.candidate_id,
+                strategy_version=candidate.version,
+            )
+
+        # Fail-closed: paused execution
+        store.set_execution_pause(True)
+        with pytest.raises(RiskRejected, match="paused"):
+            await execution.submit(
+                _sample_order(client_id="canary-paused", quantity="0.001"),
+                quote,
+                candidate_id=candidate.candidate_id,
+                strategy_version=candidate.version,
+            )
+        store.set_execution_pause(False)
+
+        # Fail-closed: revoked authorization
+        store.revoke_spot_canary()
+        with pytest.raises(RiskRejected, match="authorization"):
+            await execution.submit(
+                _sample_order(client_id="canary-revoked", quantity="0.001"),
+                quote,
+                candidate_id=candidate.candidate_id,
+                strategy_version=candidate.version,
+            )
+
+
+def test_canary_cli_submit_and_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "audit.sqlite"
+    store = AuditStore(db_path)
+    store.initialize()
+    now = datetime.now(UTC)
+    store.record_quote(
+        Quote(BTC_USD, SOURCE, Decimal("49999"), Decimal("50000"), now, now, now)
+    )
+
+    candidate = StrategyCandidate(
+        candidate_id="canary-cli",
+        name="SMA-CLI",
+        version="v1.0.0",
+        dataset_hash="hash-snap-02",
+        stage=PromotionStage.PAPER_APPROVED,
+    )
+    store.save_strategy_candidate(candidate)
+
+    credentials = tmp_path / "keys.json"
+    credentials.write_text(
+        json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}), encoding="utf-8"
+    )
+
+    fingerprint = hashlib.sha256(_API_KEY.encode()).hexdigest()
+    store.authorize_spot_canary(
+        candidate, fingerprint, Decimal("500"), now, now + timedelta(hours=24)
+    )
+    store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        endpoint = request.url.path.rsplit("/", 1)[1]
+        if endpoint == "AddOrder":
+            return httpx2.Response(
+                200,
+                json={
+                    "error": [],
+                    "result": {
+                        "descr": {"order": "buy 0.005 XXBTZUSD @ limit 50000.00"},
+                        "txid": ["OTX-CLI-12345"],
+                    },
+                },
+            )
+        return httpx2.Response(404, json={"error": ["EGeneral:Invalid endpoint"]})
+
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(
+        httpx2,
+        "AsyncClient",
+        lambda *, trust_env: client_class(
+            trust_env=trust_env, transport=httpx2.MockTransport(handler)
+        ),
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "spot-canary-submit",
+            "canary-cli",
+            "--credentials-file",
+            str(credentials),
+            "--side",
+            "buy",
+            "--quantity",
+            "0.005",
+            "--limit-price",
+            "50000",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    launcher.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["state"] == "ACKNOWLEDGED"
+    assert out["venue_order_id"] == "OTX-CLI-12345"
+    assert out["quantity"] == "0.005"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "spot-canary-submit",
+            "unknown-candidate",
+            "--credentials-file",
+            str(credentials),
+            "--side",
+            "buy",
+            "--quantity",
+            "0.005",
+            "--limit-price",
+            "50000",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        launcher.main()
+    assert exit_info.value.code == 1
+
+
+def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "api_test.db")
+    store.initialize()
+    now = datetime.now(UTC)
+    quote = Quote(BTC_USD, SOURCE, Decimal("49999"), Decimal("50000"), now, now, now)
+    store.record_quote(quote)
+
+    candidate = StrategyCandidate(
+        candidate_id="cand-api",
+        name="SMA-API",
+        version="v1.0.0",
+        dataset_hash="hash-api-01",
+        stage=PromotionStage.PAPER_APPROVED,
+    )
+    store.save_strategy_candidate(candidate)
+
+    app_disabled = create_app(store)
+    with TestClient(app_disabled, base_url="http://127.0.0.1") as client:
+        resp = client.post(
+            "/api/v1/orders/spot",
+            json={
+                "side": "buy",
+                "quantity": "0.005",
+                "limit_price": "50000",
+                "candidate_id": "cand-api",
+                "strategy_version": "v1.0.0",
+            },
+        )
+        assert resp.status_code == 403
+        caps = client.get("/api/v1/system/capabilities").json()
+        assert caps["live_orders"] is False
+        assert (
+            client.get(
+                "/api/v1/strategies/candidates/cand-api/canary-approval"
+            ).status_code
+            == 404
+        )
+
+    fingerprint = hashlib.sha256(_API_KEY.encode()).hexdigest()
+    store.authorize_spot_canary(
+        candidate, fingerprint, Decimal("500"), now, now + timedelta(hours=24)
+    )
+    store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        endpoint = request.url.path.rsplit("/", 1)[1]
+        if endpoint == "AddOrder":
+            return httpx2.Response(
+                200,
+                json={
+                    "error": [],
+                    "result": {
+                        "descr": {"order": "buy 0.005 XXBTZUSD @ limit 50000.00"},
+                        "txid": ["OTX-API-999"],
+                    },
+                },
+            )
+        return httpx2.Response(404, json={"error": ["EGeneral:Invalid endpoint"]})
+
+    mock_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    adapter = KrakenSpotAdapter(_API_KEY, _API_SECRET, mock_client)
+    spot_exec = KrakenSpotExecution(
+        store, adapter, RiskEngine(RiskPolicy(live_mode_enabled=True))
+    )
+    quote_srv = QuoteService(
+        KrakenQuoteProvider(mock_client), BTC_USD, record_quote=store.record_quote
+    )
+    quote_srv.restore(quote)
+
+    app_live = create_app(store, quote_service=quote_srv, spot_execution=spot_exec)
+    with TestClient(app_live, base_url="http://127.0.0.1") as client:
+        caps = client.get("/api/v1/system/capabilities").json()
+        assert caps["live_orders"] is True
+
+        status = client.get("/api/v1/system/status").json()
+        assert status["mode"] == "LIVE"
+        assert status["execution_available"] is True
+
+        approval_resp = client.get(
+            "/api/v1/strategies/candidates/cand-api/canary-approval"
+        )
+        assert approval_resp.status_code == 200
+        appr = approval_resp.json()
+        assert appr["candidate_id"] == "cand-api"
+        assert appr["max_notional"] == "500"
+        assert appr["active"] is True
+
+        cross = client.post(
+            "/api/v1/orders/spot",
+            json={
+                "side": "buy",
+                "quantity": "0.005",
+                "limit_price": "50000",
+                "candidate_id": "cand-api",
+                "strategy_version": "v1.0.0",
+            },
+            headers={"sec-fetch-site": "cross-site", "origin": "http://malicious.org"},
+        )
+        assert cross.status_code == 403
+
+        submit_resp = client.post(
+            "/api/v1/orders/spot",
+            json={
+                "side": "buy",
+                "quantity": "0.005",
+                "limit_price": "50000",
+                "candidate_id": "cand-api",
+                "strategy_version": "v1.0.0",
+            },
+        )
+        assert submit_resp.status_code == 200
+        data = submit_resp.json()
+        assert data["state"] == "ACKNOWLEDGED"
+        assert data["venue_order_id"] == "OTX-API-999"
+
+        over_resp = client.post(
+            "/api/v1/orders/spot",
+            json={
+                "side": "buy",
+                "quantity": "0.012",
+                "limit_price": "50000",
+                "candidate_id": "cand-api",
+                "strategy_version": "v1.0.0",
+            },
+        )
+        assert over_resp.status_code == 409

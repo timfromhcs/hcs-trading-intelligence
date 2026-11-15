@@ -73,6 +73,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "audit.get_events": CapabilityTier.READ,
     "strategies.get_candidates": CapabilityTier.READ,
     "strategies.get_shadow_runs": CapabilityTier.READ,
+    "strategies.get_canary_approval": CapabilityTier.READ,
     "quant.compare_strategy_candidates": CapabilityTier.READ,
 }
 
@@ -404,6 +405,32 @@ def create_mcp_server(
 
         return _local_read(_read_runs)
 
+    @read_tool("strategies.get_canary_approval")
+    def strategy_canary_approval_tool(
+        candidate_id: Annotated[
+            str,
+            Field(description="Strategy candidate identifier"),
+        ],
+    ) -> dict[str, Any] | None:
+        """Read the local spot canary authorization for a strategy candidate."""
+
+        def _read_approval() -> dict[str, Any] | None:
+            approval = store.get_spot_canary_approval(candidate_id)
+            if approval is None:
+                return None
+            return {
+                "candidate_id": approval.candidate_id,
+                "candidate_version": approval.candidate_version,
+                "dataset_hash": approval.dataset_hash,
+                "key_fingerprint": approval.key_fingerprint,
+                "max_notional": str(approval.max_notional),
+                "expires_at": approval.expires_at.isoformat(),
+                "stage": approval.stage,
+                "active": approval.active,
+            }
+
+        return _local_read(_read_approval)
+
     @server.resource("hcs://system/capabilities", mime_type="application/json")
     def capabilities_resource() -> str:
         """Current system capabilities and feature availability."""
@@ -453,6 +480,33 @@ def create_mcp_server(
                     }
                     for run_id, evaluated_until, report in runs
                 ]
+            )
+
+        return _local_read(_read)
+
+    @server.resource(
+        "hcs://strategies/{candidate_id}/canary-approval",
+        mime_type="application/json",
+    )
+    def candidate_canary_approval_resource(candidate_id: str) -> str:
+        """Spot canary authorization record for a strategy candidate."""
+
+        def _read() -> str:
+            approval = store.get_spot_canary_approval(candidate_id)
+            if approval is None:
+                raise ValueError(f"No canary approval recorded for '{candidate_id}'")
+            return json.dumps(
+                {
+                    "candidate_id": approval.candidate_id,
+                    "candidate_version": approval.candidate_version,
+                    "dataset_hash": approval.dataset_hash,
+                    "key_fingerprint": approval.key_fingerprint,
+                    "max_notional": str(approval.max_notional),
+                    "expires_at": approval.expires_at.isoformat(),
+                    "stage": approval.stage,
+                    "active": approval.active,
+                },
+                indent=2,
             )
 
         return _local_read(_read)

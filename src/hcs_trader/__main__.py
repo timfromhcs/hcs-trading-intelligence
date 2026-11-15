@@ -341,6 +341,61 @@ async def validate_kraken_order(
         return await adapter.validate_spot_order(order, at)
 
 
+async def submit_canary_order(
+    store: AuditStore,
+    credentials_file: Path,
+    candidate_id: str,
+    side: SpotSide,
+    quantity: Decimal,
+    limit_price: Decimal,
+) -> SpotOrder:
+    key, secret = read_kraken_credentials(credentials_file)
+    cand = store.get_strategy_candidate(candidate_id)
+    if cand is None:
+        raise CandidateNotFound(f"Candidate '{candidate_id}' does not exist")
+    if cand.stage != PromotionStage.LIVE_CANARY:
+        raise RiskRejected(
+            f"Candidate '{candidate_id}' is in stage "
+            f"'{cand.stage.value}', not 'LIVE_CANARY'"
+        )
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=False)
+        execution = KrakenSpotExecution(
+            store, adapter, RiskEngine(RiskPolicy(live_mode_enabled=True))
+        )
+        quote_provider = KrakenQuoteProvider(client)
+        try:
+            quote = await quote_provider.get_quote(BTC_USD)
+            store.record_quote(quote)
+        except Exception:
+            quotes = store.quote_history(BTC_USD, limit=1)
+            if not quotes:
+                raise
+            quote = quotes[0]
+
+        now = datetime.now(UTC)
+        order = SpotOrder(
+            client_order_id=uuid4().hex,
+            order_id=uuid4().hex,
+            venue="kraken",
+            market="BTC/USD",
+            side=side,
+            order_type=SpotOrderType.LIMIT,
+            quantity=quantity,
+            limit_price=limit_price,
+            state=OrderState.PREVIEWED,
+            risk_decision_id="none",
+            created_at=now,
+            updated_at=now,
+        )
+        return await execution.submit(
+            order,
+            quote,
+            candidate_id=candidate_id,
+            strategy_version=cand.version,
+        )
+
+
 async def ethereum_balance(
     address: str, port: int, network: str = "mainnet"
 ) -> WalletBalance:
@@ -401,6 +456,7 @@ async def serve(
     data_dir: Path | None = None,
     open_browser: bool = False,
     kraken_reconcile_credentials: Path | None = None,
+    kraken_live_credentials: Path | None = None,
 ) -> None:
     store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -408,11 +464,21 @@ async def serve(
             QuoteService(
                 KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
             )
-            if market_data or paper_mode
+            if market_data or paper_mode or kraken_live_credentials is not None
             else None
         )
         recovery = None
-        if kraken_reconcile_credentials is not None:
+        spot_exec = None
+        if kraken_live_credentials is not None:
+            key, secret = read_kraken_credentials(kraken_live_credentials)
+            live_adapter = KrakenSpotAdapter(key, secret, client, validate_only=False)
+            spot_exec = KrakenSpotExecution(
+                store,
+                live_adapter,
+                RiskEngine(RiskPolicy(live_mode_enabled=True)),
+            )
+            recovery = spot_exec.reconcile_startup
+        elif kraken_reconcile_credentials is not None:
             key, secret = read_kraken_credentials(kraken_reconcile_credentials)
             execution = KrakenSpotExecution(
                 store,
@@ -426,6 +492,7 @@ async def serve(
             quote_service=quotes,
             paper_mode=paper_mode,
             kraken_reconciliation=recovery,
+            spot_execution=spot_exec,
         )
         config = uvicorn.Config(
             app,
@@ -471,6 +538,11 @@ def main() -> None:
         "--kraken-reconcile-credentials",
         type=Path,
         help="Opt in to read-only Kraken order recovery on startup",
+    )
+    serve_parser.add_argument(
+        "--kraken-live-credentials",
+        type=Path,
+        help="Opt in to live bounded canary spot execution using Kraken credentials",
     )
     network_mode.add_argument(
         "--paper-market-data",
@@ -522,6 +594,22 @@ def main() -> None:
     allow_canary.add_argument("--max-notional", required=True)
     commands.add_parser(
         "spot-canary-revoke", help="Revoke the local spot canary approval"
+    )
+    canary_submit = commands.add_parser(
+        "spot-canary-submit",
+        help="Submit an authorized spot canary order to Kraken",
+    )
+    canary_submit.add_argument("candidate_id", help="Candidate identifier")
+    canary_submit.add_argument(
+        "--credentials-file", type=Path, required=True, help="Kraken credentials JSON"
+    )
+    canary_submit.add_argument(
+        "--side", choices=list(SpotSide), required=True, help="Order side"
+    )
+    canary_submit.add_argument("--quantity", required=True, help="BTC quantity")
+    canary_submit.add_argument("--limit-price", required=True, help="USD limit price")
+    canary_submit.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
     )
     strategy_list = commands.add_parser(
         "strategy-list", help="List registered strategy candidates"
@@ -665,6 +753,7 @@ def main() -> None:
                     data_dir=arguments.data_dir,
                     open_browser=arguments.open_browser,
                     kraken_reconcile_credentials=arguments.kraken_reconcile_credentials,
+                    kraken_live_credentials=arguments.kraken_live_credentials,
                 )
             )
         except (OSError, ValueError) as error:
@@ -765,6 +854,54 @@ def main() -> None:
             parser.exit(1, "Canary authorization was not confirmed\n")
         except (OSError, sqlite3.Error, RiskRejected, ValueError) as error:
             parser.exit(1, f"{error}\n")
+    elif arguments.command == "spot-canary-submit":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            quantity = Decimal(arguments.quantity)
+            limit_price = Decimal(arguments.limit_price)
+            submitted = asyncio.run(
+                submit_canary_order(
+                    store,
+                    arguments.credentials_file,
+                    arguments.candidate_id,
+                    SpotSide(arguments.side),
+                    quantity,
+                    limit_price,
+                )
+            )
+        except (CandidateNotFound, RiskRejected, KrakenExecutionError) as error:
+            parser.exit(1, f"{error}\n")
+        except (ValueError, InvalidOperation) as error:
+            parser.exit(1, f"Invalid order parameter: {error}\n")
+        except sqlite3.Error as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            json.dumps(
+                {
+                    "client_order_id": submitted.client_order_id,
+                    "order_id": submitted.order_id,
+                    "venue": submitted.venue,
+                    "market": submitted.market,
+                    "side": submitted.side.value,
+                    "order_type": submitted.order_type.value,
+                    "quantity": str(submitted.quantity),
+                    "limit_price": (
+                        str(submitted.limit_price)
+                        if submitted.limit_price is not None
+                        else None
+                    ),
+                    "state": submitted.state.value,
+                    "venue_order_id": submitted.venue_order_id,
+                    "risk_decision_id": submitted.risk_decision_id,
+                },
+                indent=2,
+            )
+        )
     elif arguments.command == "strategy-list":
         store = (
             local_store()

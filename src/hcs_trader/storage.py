@@ -13,7 +13,12 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 
 from hcs_trader.domain.assets import MarketId
-from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.execution import (
+    SpotCanaryApproval,
+    SpotOrder,
+    SpotOrderType,
+    SpotSide,
+)
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
@@ -940,6 +945,36 @@ class AuditStore:
     def has_spot_canary_approval(self, candidate_id: str, at: datetime) -> bool:
         with self._connect() as connection:
             return self._canary_approval(connection, candidate_id, at) is not None
+
+    def get_spot_canary_approval(
+        self, candidate_id: str, at: datetime | None = None
+    ) -> SpotCanaryApproval | None:
+        at_dt = at or datetime.now(UTC)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.candidate_id, a.candidate_version, a.dataset_hash,
+                       a.key_fingerprint, a.max_notional, a.expires_at, c.stage
+                FROM spot_canary_approval AS a
+                JOIN strategy_candidates AS c ON c.candidate_id = a.candidate_id
+                WHERE a.id = 1 AND c.candidate_id = ?
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            expires_at = datetime.fromisoformat(row[5])
+            active = expires_at > at_dt and row[6] == PromotionStage.LIVE_CANARY
+            return SpotCanaryApproval(
+                candidate_id=str(row[0]),
+                candidate_version=str(row[1]),
+                dataset_hash=str(row[2]),
+                key_fingerprint=str(row[3]),
+                max_notional=Decimal(str(row[4])),
+                expires_at=expires_at,
+                stage=str(row[6]),
+                active=active,
+            )
 
     def reserve_spot_submission(
         self,

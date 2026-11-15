@@ -22,6 +22,18 @@ class SpotOrderType(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class SpotCanaryApproval:
+    candidate_id: str
+    candidate_version: str
+    dataset_hash: str
+    key_fingerprint: str
+    max_notional: Decimal
+    expires_at: datetime
+    stage: str
+    active: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SpotOrder:
     client_order_id: str
     order_id: str

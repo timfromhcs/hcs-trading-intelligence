@@ -124,6 +124,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "audit.get_events",
             "strategies.get_candidates",
             "strategies.get_shadow_runs",
+            "strategies.get_canary_approval",
             "quant.compare_strategy_candidates",
         }
         assert all(
@@ -186,6 +187,12 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         )
         assert not shadow_resp.is_error
         assert shadow_resp.content == []
+
+        canary_resp = await client.call_tool(
+            "strategies.get_canary_approval", {"candidate_id": "cand-mcp-01"}
+        )
+        assert not canary_resp.is_error
+        assert canary_resp.content == []
 
         metrics = {
             "champion_net_return": "0.10",

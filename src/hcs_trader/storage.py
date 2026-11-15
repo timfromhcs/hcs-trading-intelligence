@@ -12,6 +12,8 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 
 from hcs_trader.domain.assets import MarketId
+from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
@@ -25,7 +27,7 @@ from hcs_trader.domain.paper import (
 )
 from hcs_trader.domain.wallet import WalletSnapshot
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _PAPER_FILL = TypeAdapter(PaperFill)
 WALLET_SNAPSHOT = TypeAdapter(WalletSnapshot)
 
@@ -219,6 +221,34 @@ class AuditStore:
                     """
                 )
                 connection.execute("PRAGMA user_version = 11")
+            if version < 12:
+                connection.execute(
+                    """
+                    CREATE TABLE spot_orders (
+                        client_order_id TEXT PRIMARY KEY NOT NULL,
+                        order_id TEXT NOT NULL,
+                        venue TEXT NOT NULL,
+                        market TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        order_type TEXT NOT NULL,
+                        quantity TEXT NOT NULL,
+                        limit_price TEXT,
+                        state TEXT NOT NULL,
+                        risk_decision_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        venue_order_id TEXT,
+                        filled_quantity TEXT,
+                        average_price TEXT,
+                        fee TEXT
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX spot_orders_state "
+                    "ON spot_orders (venue, market, state)"
+                )
+                connection.execute("PRAGMA user_version = 12")
 
     def save_wallet_snapshot(self, snapshot: WalletSnapshot) -> None:
         with self._connect() as connection, connection:
@@ -655,6 +685,121 @@ class AuditStore:
             )
             for source, bid, ask, bid_at, ask_at, received_at in rows
         ]
+
+    def save_spot_order(self, order: SpotOrder) -> None:
+        with self._connect() as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO spot_orders (
+                    client_order_id, order_id, venue, market, side, order_type,
+                    quantity, limit_price, state, risk_decision_id, created_at,
+                    updated_at, venue_order_id, filled_quantity, average_price, fee
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (client_order_id) DO UPDATE SET
+                    state = excluded.state,
+                    updated_at = excluded.updated_at,
+                    venue_order_id = excluded.venue_order_id,
+                    filled_quantity = excluded.filled_quantity,
+                    average_price = excluded.average_price,
+                    fee = excluded.fee
+                """,
+                (
+                    order.client_order_id,
+                    order.order_id,
+                    order.venue,
+                    order.market,
+                    order.side.value,
+                    order.order_type.value,
+                    str(order.quantity),
+                    str(order.limit_price) if order.limit_price is not None else None,
+                    order.state.value,
+                    order.risk_decision_id,
+                    order.created_at.isoformat(),
+                    order.updated_at.isoformat(),
+                    order.venue_order_id,
+                    (
+                        str(order.filled_quantity)
+                        if order.filled_quantity is not None
+                        else None
+                    ),
+                    (
+                        str(order.average_price)
+                        if order.average_price is not None
+                        else None
+                    ),
+                    str(order.fee) if order.fee is not None else None,
+                ),
+            )
+
+    def get_spot_order(self, client_order_id: str) -> SpotOrder | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT client_order_id, order_id, venue, market, side, order_type,
+                       quantity, limit_price, state, risk_decision_id, created_at,
+                       updated_at, venue_order_id, filled_quantity, average_price, fee
+                FROM spot_orders WHERE client_order_id = ?
+                """,
+                (client_order_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return SpotOrder(
+                client_order_id=row[0],
+                order_id=row[1],
+                venue=row[2],
+                market=row[3],
+                side=SpotSide(row[4]),
+                order_type=SpotOrderType(row[5]),
+                quantity=Decimal(row[6]),
+                limit_price=Decimal(row[7]) if row[7] is not None else None,
+                state=OrderState(row[8]),
+                risk_decision_id=row[9],
+                created_at=datetime.fromisoformat(row[10]),
+                updated_at=datetime.fromisoformat(row[11]),
+                venue_order_id=row[12],
+                filled_quantity=Decimal(row[13]) if row[13] is not None else None,
+                average_price=Decimal(row[14]) if row[14] is not None else None,
+                fee=Decimal(row[15]) if row[15] is not None else None,
+            )
+
+    def list_open_spot_orders(self, venue: str) -> list[SpotOrder]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT client_order_id, order_id, venue, market, side, order_type,
+                       quantity, limit_price, state, risk_decision_id, created_at,
+                       updated_at, venue_order_id, filled_quantity, average_price, fee
+                FROM spot_orders
+                WHERE venue = ? AND state IN (
+                    'SUBMITTED', 'ACKNOWLEDGED', 'PARTIALLY_FILLED',
+                    'RECONCILIATION_REQUIRED'
+                )
+                ORDER BY created_at ASC
+                """,
+                (venue,),
+            ).fetchall()
+            return [
+                SpotOrder(
+                    client_order_id=r[0],
+                    order_id=r[1],
+                    venue=r[2],
+                    market=r[3],
+                    side=SpotSide(r[4]),
+                    order_type=SpotOrderType(r[5]),
+                    quantity=Decimal(r[6]),
+                    limit_price=Decimal(r[7]) if r[7] is not None else None,
+                    state=OrderState(r[8]),
+                    risk_decision_id=r[9],
+                    created_at=datetime.fromisoformat(r[10]),
+                    updated_at=datetime.fromisoformat(r[11]),
+                    venue_order_id=r[12],
+                    filled_quantity=Decimal(r[13]) if r[13] is not None else None,
+                    average_price=Decimal(r[14]) if r[14] is not None else None,
+                    fee=Decimal(r[15]) if r[15] is not None else None,
+                )
+                for r in rows
+            ]
 
     def record_startup(self) -> AuditEvent:
         event = AuditEvent(uuid4().hex, datetime.now(UTC).isoformat(), "app.started")

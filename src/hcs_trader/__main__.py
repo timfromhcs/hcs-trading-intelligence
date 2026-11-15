@@ -45,6 +45,7 @@ from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
+from hcs_trader.wallets import LocalWalletRpc, WalletBalance, WalletUnavailable
 
 
 def local_store() -> AuditStore:
@@ -159,6 +160,11 @@ async def market_research(
     return replace(report, verified_artifact=metadata)
 
 
+async def ethereum_balance(address: str, port: int) -> WalletBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).ethereum_balance(address)
+
+
 async def serve(market_data: bool, paper_mode: bool = False) -> None:
     store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -241,6 +247,11 @@ def main() -> None:
     research_parser.add_argument("--model-alias")
     research_parser.add_argument("--model-manifest", type=Path)
     research_parser.add_argument("--token-file", type=Path)
+    wallet_parser = commands.add_parser(
+        "eth-balance", help="Read ETH balance from a local node"
+    )
+    wallet_parser.add_argument("address")
+    wallet_parser.add_argument("--port", type=int, default=8545)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -303,6 +314,12 @@ def main() -> None:
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
+    elif arguments.command == "eth-balance":
+        try:
+            balance = asyncio.run(ethereum_balance(arguments.address, arguments.port))
+        except (WalletUnavailable, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(WalletBalance).dump_json(balance).decode("utf-8"))
     else:
         print(Status().model_dump_json())
 

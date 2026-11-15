@@ -45,7 +45,12 @@ from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
-from hcs_trader.wallets import LocalWalletRpc, WalletBalance, WalletUnavailable
+from hcs_trader.wallets import (
+    LocalWalletRpc,
+    SolanaBalance,
+    WalletBalance,
+    WalletUnavailable,
+)
 
 
 def local_store() -> AuditStore:
@@ -165,6 +170,11 @@ async def ethereum_balance(address: str, port: int) -> WalletBalance:
         return await LocalWalletRpc(client, port).ethereum_balance(address)
 
 
+async def solana_balance(address: str, port: int) -> SolanaBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).solana_balance(address)
+
+
 async def serve(market_data: bool, paper_mode: bool = False) -> None:
     store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -252,6 +262,11 @@ def main() -> None:
     )
     wallet_parser.add_argument("address")
     wallet_parser.add_argument("--port", type=int, default=8545)
+    sol_parser = commands.add_parser(
+        "sol-balance", help="Read SOL balance from a local node"
+    )
+    sol_parser.add_argument("address")
+    sol_parser.add_argument("--port", type=int, default=8899)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data, arguments.paper_market_data))
@@ -320,6 +335,12 @@ def main() -> None:
         except (WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(TypeAdapter(WalletBalance).dump_json(balance).decode("utf-8"))
+    elif arguments.command == "sol-balance":
+        try:
+            sol = asyncio.run(solana_balance(arguments.address, arguments.port))
+        except (WalletUnavailable, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(SolanaBalance).dump_json(sol).decode("utf-8"))
     else:
         print(Status().model_dump_json())
 

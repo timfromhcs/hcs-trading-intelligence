@@ -26,6 +26,7 @@
 - Added a local indicator research brief with optional schema-checked llama.cpp commentary.
 - Added GGUF manifest validation and research report artifact metadata.
 - Added read-only native Ethereum balance checks against a local RPC node.
+- Added read-only native Solana balance checks with a mainnet-beta genesis pin.
 
 ## 0.1.0 — development foundation
 

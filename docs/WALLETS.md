@@ -4,4 +4,6 @@ Run `hcs-trader eth-balance ADDRESS` to read a native ETH balance from an operat
 
 The adapter checks that the node reports chain ID 1, obtains a finalized block and requests the balance at that block's canonical hash. The node must support the EIP-1898 block identifier. The result includes the canonical native asset ID, block number and hash, local observation timestamp, and exact wei as a decimal string. This identity check relies on the operator's node and its sync state. [Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/) · [EIP-1898](https://eips.ethereum.org/EIPS/eip-1898)
 
-The current command covers native ETH. Token balances, transaction history, address derivation, signing, broadcast and additional chain adapters are separate milestones.
+Run `hcs-trader sol-balance ADDRESS` for native SOL using a node on `127.0.0.1:8899`. The command validates a 32-byte base58 public address, compares the node's genesis hash with mainnet-beta and requests finalized commitment. It reports exact lamports as a decimal string and the returned slot. [Solana balance RPC](https://solana.com/docs/rpc/http/getbalance) · [Genesis hash RPC](https://solana.com/docs/rpc/http/getgenesishash)
+
+Token balances, transaction history, address derivation, signing, broadcast and additional chain adapters are separate milestones.

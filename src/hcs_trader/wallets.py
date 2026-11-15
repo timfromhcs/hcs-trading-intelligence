@@ -8,11 +8,14 @@ from typing import Literal
 from uuid import uuid4
 
 import httpx2
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from hcs_trader.domain.assets import AssetId
 
 ETH = AssetId.parse("eip155:1/native:ETH")
+SOL_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+SOL = AssetId.parse("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/native:SOL")
+_BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _HEX_QUANTITY = re.compile(r"0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,63})")
 _HASH = re.compile(r"0x[0-9a-fA-F]{64}")
 _ADDRESS = re.compile(r"0x[0-9a-f]{40}")
@@ -26,6 +29,17 @@ class WalletBalance:
     decimals: int
     block_number: int
     block_hash: str
+    observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SolanaBalance:
+    address: str
+    asset: str
+    base_units: str
+    decimals: int
+    slot: int
+    genesis_hash: str
     observed_at: datetime
 
 
@@ -43,6 +57,15 @@ class _RpcResponse(BaseModel):
 class _FinalizedBlock(BaseModel):
     number: str
     hash: str
+
+
+class _SlotContext(BaseModel):
+    slot: int = Field(ge=0, le=2**64 - 1)
+
+
+class _LamportBalance(BaseModel):
+    context: _SlotContext
+    value: int = Field(ge=0, le=2**64 - 1)
 
 
 class LocalWalletRpc:
@@ -116,8 +139,42 @@ class LocalWalletRpc:
             address, str(ETH), str(units), 18, height, block.hash, datetime.now(UTC)
         )
 
+    async def solana_balance(self, address: str) -> SolanaBalance:
+        if not _is_solana_address(address):
+            raise ValueError("Expected a 32-byte Solana base58 address")
+        if await self._request("getGenesisHash", []) != SOL_GENESIS:
+            raise WalletUnavailable("Local node is not Solana mainnet-beta")
+        try:
+            result = _LamportBalance.model_validate(
+                await self._request(
+                    "getBalance", [address, {"commitment": "finalized"}]
+                ),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable("Invalid finalized Solana balance") from None
+        return SolanaBalance(
+            address,
+            str(SOL),
+            str(result.value),
+            9,
+            result.context.slot,
+            SOL_GENESIS,
+            datetime.now(UTC),
+        )
+
 
 def _quantity(value: object) -> int:
     if not isinstance(value, str) or not _HEX_QUANTITY.fullmatch(value):
         raise WalletUnavailable("Invalid Ethereum RPC quantity")
     return int(value, 16)
+
+
+def _is_solana_address(address: str) -> bool:
+    if not 32 <= len(address) <= 44 or any(char not in _BASE58 for char in address):
+        return False
+    decoded = 0
+    for char in address:
+        decoded = decoded * 58 + _BASE58.index(char)
+    leading_zero_bytes = len(address) - len(address.lstrip("1"))
+    return leading_zero_bytes + (decoded.bit_length() + 7) // 8 == 32

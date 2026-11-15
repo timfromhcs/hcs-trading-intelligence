@@ -1,0 +1,163 @@
+"""Isolated signer with deterministic policy checks and independent decoding."""
+
+import hashlib
+import json
+from datetime import UTC, datetime
+from typing import Any
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+
+from hcs_trader.domain.signing import (
+    KeystoreError,
+    SignedTransaction,
+    SignerPolicy,
+    SignerTamperingError,
+    ValidatedTransactionPlan,
+)
+from hcs_trader.keystore import decrypt_keystore_record
+
+
+def decode_and_verify_payload(
+    plan: ValidatedTransactionPlan, payload_bytes: bytes
+) -> None:
+    """Independently decode unsigned payload and verify consistency with plan."""
+    try:
+        data = json.loads(payload_bytes.decode("utf-8"))
+    except Exception as err:
+        raise SignerTamperingError(
+            f"Payload cannot be decoded as valid JSON: {err}"
+        ) from err
+
+    if not isinstance(data, dict):
+        raise SignerTamperingError("Payload must decode to a dictionary")
+
+    # Verify destination/recipient
+    payload_dest = data.get("to") or data.get("destination") or data.get("program_id")
+    if payload_dest != plan.destination_id:
+        raise SignerTamperingError(
+            f"Payload destination '{payload_dest}' does not match "
+            f"plan '{plan.destination_id}'"
+        )
+
+    # Verify chain
+    payload_chain = data.get("chain_id") or data.get("canonical_chain_id")
+    if payload_chain != plan.canonical_chain_id:
+        raise SignerTamperingError(
+            f"Payload chain '{payload_chain}' does not match "
+            f"plan '{plan.canonical_chain_id}'"
+        )
+
+    # Verify input amount
+    payload_amount = data.get("amount") or data.get("amount_in") or data.get("value")
+    if payload_amount != plan.amount_in_base_units:
+        raise SignerTamperingError(
+            f"Payload amount '{payload_amount}' does not match "
+            f"plan '{plan.amount_in_base_units}'"
+        )
+
+    # Verify sender/signer address
+    payload_from = data.get("from") or data.get("signer")
+    if payload_from and payload_from != plan.signer_address:
+        raise SignerTamperingError(
+            f"Payload signer '{payload_from}' does not match "
+            f"plan '{plan.signer_address}'"
+        )
+
+
+class IsolatedSigner:
+    """Isolated signing boundary holding keystore records and immutable policy."""
+
+    def __init__(self, policy: SignerPolicy) -> None:
+        self.policy = policy
+        self._keystore: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def register_keystore_record(self, record: dict[str, Any]) -> None:
+        """Register an encrypted keystore record."""
+        key = (record["chain_namespace"], record["address"])
+        self._keystore[key] = record
+
+    def has_key(self, chain_namespace: str, address: str) -> bool:
+        """Check if an encrypted key exists for the given namespace and address."""
+        return (chain_namespace, address) in self._keystore
+
+    def preview_transaction(
+        self, plan: ValidatedTransactionPlan, at: datetime
+    ) -> dict[str, Any]:
+        """Generate human-readable preview and verify policy without signing."""
+        self.policy.validate_plan(plan, at)
+        return {
+            "plan_hash": plan.plan_hash,
+            "chain": plan.canonical_chain_id,
+            "network": plan.network,
+            "wallet_id": plan.wallet_id,
+            "signer_address": plan.signer_address,
+            "asset_in": plan.asset_in,
+            "asset_out": plan.asset_out,
+            "amount_in": plan.amount_in_base_units,
+            "min_amount_out": plan.min_amount_out_base_units,
+            "destination": plan.destination_id,
+            "max_slippage_bps": plan.max_slippage_bps,
+            "max_network_fee": plan.max_network_fee_base_units,
+            "idempotency_key": plan.idempotency_key,
+            "simulation_success": plan.simulation_success,
+            "simulation_block_reference": plan.simulation_block_reference,
+            "risk_decision_id": plan.risk_decision_id,
+            "risk_policy_version": plan.risk_policy_version,
+            "verified_at": at.astimezone(UTC).isoformat(),
+        }
+
+    def sign_transaction(
+        self,
+        plan: ValidatedTransactionPlan,
+        unsigned_payload: bytes,
+        passphrase: str,
+        at: datetime,
+    ) -> SignedTransaction:
+        """Validate policy, decode payload, and produce a signed transaction."""
+        # 1. Deterministic policy check
+        self.policy.validate_plan(plan, at)
+
+        # 2. Independent payload decoding & consistency check
+        decode_and_verify_payload(plan, unsigned_payload)
+
+        # 3. Key retrieval
+        chain_ns = plan.canonical_chain_id.split(":", 1)[0]
+        record_key = (chain_ns, plan.signer_address)
+        record = self._keystore.get(record_key)
+        if record is None:
+            raise KeystoreError(
+                f"No keystore record registered for address {plan.signer_address} "
+                f"in namespace {chain_ns}"
+            )
+
+        # 4. Narrow decryption and signing
+        raw_secret = decrypt_keystore_record(record, passphrase)
+        try:
+            if chain_ns == "solana":
+                # Ed25519 signing for Solana
+                if len(raw_secret) != 32:
+                    raise KeystoreError("Solana private key must be 32 raw seed bytes")
+                priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(raw_secret)
+                signature = priv_key.sign(unsigned_payload)
+            else:
+                # SECP256K1 ECDSA signing for EVM / Bitcoin / UTXO
+                if len(raw_secret) != 32:
+                    raise KeystoreError("SECP256K1 private key must be 32 bytes")
+                ec_priv = ec.derive_private_key(
+                    int.from_bytes(raw_secret, "big"), ec.SECP256K1()
+                )
+                signature = ec_priv.sign(unsigned_payload, ec.ECDSA(hashes.SHA256()))
+        finally:
+            # Overwrite local reference to assist garbage collection
+            del raw_secret
+
+        raw_tx_hex = unsigned_payload.hex() + signature.hex()
+        tx_hash = hashlib.sha256(bytes.fromhex(raw_tx_hex)).hexdigest()
+
+        return SignedTransaction(
+            plan_hash=plan.plan_hash,
+            raw_transaction_hex=raw_tx_hex,
+            tx_hash=tx_hash,
+            signed_at=at,
+        )

@@ -33,6 +33,10 @@
 - Added read-only Ethereum and Solana transaction status queries.
 - Added native desktop development builds with the embedded dashboard and CI smoke checks.
 - Added the Windows single-file executable build and checksum.
+- Added isolated transaction plan validation and canonical SHA-256 plan hashing.
+- Added encrypted software keystore using Scrypt KDF and AES-256-GCM authenticated encryption.
+- Added independent transaction payload decoding and policy-bounded signer boundary.
+- Added signing invariant test suite covering policy enforcement, tampering detection, and secret isolation.
 
 ## 0.1.0 — development foundation
 

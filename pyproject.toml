@@ -12,6 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "HCS.media" }]
 dependencies = [
+    "cryptography>=50.0.2",
     "defusedxml>=0.7.1",
     "fastapi>=0.163.1",
     "httpx2>=2.16.0",
@@ -50,7 +51,7 @@ extend-exclude = ["AGENTS.md"]
 select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105", "S106"]
 
 [tool.mypy]
 strict = true

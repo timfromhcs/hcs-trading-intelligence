@@ -438,6 +438,7 @@ name = "hcs-trader"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "defusedxml" },
     { name = "fastapi" },
     { name = "httpx2" },
@@ -461,6 +462,7 @@ packaging = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.163.1" },
     { name = "httpx2", specifier = ">=2.16.0" },

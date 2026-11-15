@@ -2,7 +2,9 @@
 
 Made with ❤️ by HCS.media.
 
-HCS Trading Intelligence is a local-first crypto research project. This development build includes a read-only dashboard, API and opt-in Kraken BTC/USD quotes. `PAPER` is the default policy mode. Paper orders, wallet access, MCP and live execution are planned.
+HCS Trading Intelligence is a local-first crypto research project. The dashboard and API expose archived market data, backtests, a simulated portfolio, wallet snapshots, spot order history, audit events and strategy candidates. The default `PAPER` mode starts with external network access disabled. Use `serve --paper-market-data` to enable simulated BTC/USD orders using Kraken quotes. Live order submission through the local service remains an open milestone.
+
+![Dashboard in PAPER mode with a fresh local database](docs/dashboard.png)
 
 ## Developer setup
 
@@ -39,12 +41,14 @@ Download the same candles as CSV from `GET /api/v1/market/candles.csv?interval=6
 
 `POST /api/v1/backtests?interval=60` runs the offline SMA research simulation. Use an empty JSON object for defaults. [Backtest assumptions](docs/BACKTEST.md)
 
+Strategy Lab can generate and link backtest and walk-forward reports from archived hourly candles. [Workflow and screenshot](docs/BACKTEST.md#separately-held-evaluation-data)
+
 Run `uv run --locked hcs-trader import-news` to import Federal Reserve monetary-policy release metadata. The dashboard and `GET /api/v1/news/events` read the stored timeline offline.
 
 Run `uv run --locked hcs-trader import-macro` to import daily ECB USD-per-EUR reference rates. `GET /api/v1/macro/series` reads the locally observed values and revisions offline.
 
 Run `uv run --locked hcs-trader import-fred --as-of YYYY-MM-DD` in a terminal for a US CPI snapshot. Enter your own FRED API key at the hidden prompt. Retrieve saved values with `GET /api/v1/macro/series?source=fred`.
 
-See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+See the [implementation plan](docs/ROADMAP.md) for remaining work, the [release assessment](docs/V1_RELEASE_REPORT.md) for verified evidence and [AGENTS.md](AGENTS.md) for the product requirements. See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 Licensed under Apache-2.0. Made with love by timfromhcs and hcsmedia.

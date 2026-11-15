@@ -20,11 +20,22 @@ from hcs_trader.domain.wallet import (
 )
 
 ETH = AssetId.parse("eip155:1/native:ETH")
+SEPOLIA_ETH = AssetId.parse("eip155:11155111/native:ETH")
+ETHEREUM_NETWORKS = {
+    "mainnet": (1, ETH),
+    "sepolia": (11155111, SEPOLIA_ETH),
+}
 BTC = AssetId.parse("bitcoin:mainnet/native:BTC")
 LTC = AssetId.parse("litecoin:mainnet/native:LTC")
 DGB = AssetId.parse("digibyte:mainnet/native:DGB")
 SOL_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+SOL_DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
 SOL = AssetId.parse("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/native:SOL")
+SOL_DEVNET = AssetId.parse(f"solana:{SOL_DEVNET_GENESIS[:32]}/native:SOL")
+SOLANA_NETWORKS = {
+    "mainnet-beta": (SOL_GENESIS, SOL),
+    "devnet": (SOL_DEVNET_GENESIS, SOL_DEVNET),
+}
 _BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _HEX_QUANTITY = re.compile(r"0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,63})")
 _HASH = re.compile(r"0x[0-9a-fA-F]{64}")
@@ -81,6 +92,7 @@ class _SignatureStatuses(BaseModel):
 class _UtxoChain(BaseModel):
     chain: str
     initialblockdownload: bool
+    signet_challenge: str | None = None
 
 
 class _ValidatedAddress(BaseModel):
@@ -102,6 +114,8 @@ class UtxoNetwork:
     port: int
     rpc_version: Literal["1.0", "2.0"]
     max_coins: int
+    chain: str = "main"
+    signet_challenge: str | None = None
 
 
 UTXO_NETWORKS = {
@@ -129,6 +143,61 @@ UTXO_NETWORKS = {
         "1.0",
         21_000_000_000,
     ),
+}
+
+
+BITCOIN_NETWORKS = {
+    "mainnet": UTXO_NETWORKS["btc-balance"],
+    "regtest": UtxoNetwork(
+        "Bitcoin",
+        AssetId.parse("bitcoin:regtest/native:BTC"),
+        "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+        18443,
+        "2.0",
+        21_000_000,
+        chain="regtest",
+    ),
+    "signet": UtxoNetwork(
+        "Bitcoin",
+        AssetId.parse("bitcoin:signet/native:BTC"),
+        "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
+        38332,
+        "2.0",
+        21_000_000,
+        chain="signet",
+        signet_challenge=(
+            "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be4302103"
+            "59ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae"
+        ),
+    ),
+}
+
+UTXO_NETWORK_PROFILES = {
+    "btc-balance": BITCOIN_NETWORKS,
+    "ltc-balance": {
+        "mainnet": UTXO_NETWORKS["ltc-balance"],
+        "regtest": UtxoNetwork(
+            "Litecoin",
+            AssetId.parse("litecoin:regtest/native:LTC"),
+            "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9",
+            19443,
+            "1.0",
+            84_000_000,
+            chain="regtest",
+        ),
+    },
+    "dgb-balance": {
+        "mainnet": UTXO_NETWORKS["dgb-balance"],
+        "regtest": UtxoNetwork(
+            "DigiByte",
+            AssetId.parse("digibyte:regtest/native:DGB"),
+            "4598a0f2b823aaf9e77ee6d5e46f1edb824191dcd48b08437b7cec17e6ae6e26",
+            18443,
+            "1.0",
+            21_000_000_000,
+            chain="regtest",
+        ),
+    },
 }
 
 
@@ -190,11 +259,21 @@ class LocalWalletRpc:
             )
         return envelope.result
 
-    async def ethereum_balance(self, address: str) -> WalletBalance:
+    async def _ethereum_asset(self, network: str) -> AssetId:
+        profile = ETHEREUM_NETWORKS.get(network)
+        if profile is None:
+            raise ValueError("Unsupported Ethereum network")
+        chain_id, asset = profile
+        if _quantity(await self._request("eth_chainId", [])) != chain_id:
+            raise WalletUnavailable(f"Local node is not Ethereum {network}")
+        return asset
+
+    async def ethereum_balance(
+        self, address: str, *, network: str = "mainnet"
+    ) -> WalletBalance:
         if not _ADDRESS.fullmatch(address):
             raise ValueError("Expected a lowercase 20-byte Ethereum hex address")
-        if _quantity(await self._request("eth_chainId", [])) != 1:
-            raise WalletUnavailable("Local node is not Ethereum mainnet")
+        asset = await self._ethereum_asset(network)
         try:
             block = _FinalizedBlock.model_validate(
                 await self._request("eth_getBlockByNumber", ["finalized", False]),
@@ -214,14 +293,24 @@ class LocalWalletRpc:
             )
         )
         return WalletBalance(
-            address, str(ETH), str(units), 18, height, block.hash, datetime.now(UTC)
+            address, str(asset), str(units), 18, height, block.hash, datetime.now(UTC)
         )
 
-    async def solana_balance(self, address: str) -> SolanaBalance:
+    async def _solana_identity(self, network: str) -> tuple[str, AssetId]:
+        profile = SOLANA_NETWORKS.get(network)
+        if profile is None:
+            raise ValueError("Unsupported Solana network")
+        genesis, asset = profile
+        if await self._request("getGenesisHash", []) != genesis:
+            raise WalletUnavailable(f"Local node is not Solana {network}")
+        return genesis, asset
+
+    async def solana_balance(
+        self, address: str, *, network: str = "mainnet-beta"
+    ) -> SolanaBalance:
         if not _is_solana_address(address):
             raise ValueError("Expected a 32-byte Solana base58 address")
-        if await self._request("getGenesisHash", []) != SOL_GENESIS:
-            raise WalletUnavailable("Local node is not Solana mainnet-beta")
+        genesis, asset = await self._solana_identity(network)
         try:
             result = _LamportBalance.model_validate(
                 await self._request(
@@ -233,27 +322,28 @@ class LocalWalletRpc:
             raise WalletUnavailable("Invalid finalized Solana balance") from None
         return SolanaBalance(
             address,
-            str(SOL),
+            str(asset),
             str(result.value),
             9,
             result.context.slot,
-            SOL_GENESIS,
+            genesis,
             datetime.now(UTC),
         )
 
     async def bitcoin_balance(self, address: str) -> WalletBalance:
         return await self.utxo_balance(address, UTXO_NETWORKS["btc-balance"])
 
-    async def ethereum_transaction(self, txid: str) -> TransactionObservation:
+    async def ethereum_transaction(
+        self, txid: str, *, network: str = "mainnet"
+    ) -> TransactionObservation:
         if not _HASH.fullmatch(txid):
             raise ValueError("Expected a 32-byte Ethereum transaction hash")
         txid = txid.lower()
-        if _quantity(await self._request("eth_chainId", [])) != 1:
-            raise WalletUnavailable("Local node is not Ethereum mainnet")
+        asset = await self._ethereum_asset(network)
         payload = await self._request("eth_getTransactionReceipt", [txid])
         if payload is None:
             return TransactionObservation(
-                ETH.network.value, txid, datetime.now(UTC), "unknown"
+                asset.network.value, txid, datetime.now(UTC), "unknown"
             )
         try:
             receipt = _EthReceipt.model_validate(payload, strict=True)
@@ -285,7 +375,7 @@ class LocalWalletRpc:
                 "Receipt does not match the canonical Ethereum block"
             )
         return TransactionObservation(
-            ETH.network.value,
+            asset.network.value,
             txid,
             datetime.now(UTC),
             "finalized" if height <= _quantity(finalized.number) else "confirmed",
@@ -294,11 +384,12 @@ class LocalWalletRpc:
             block_hash=canonical.hash,
         )
 
-    async def solana_transaction(self, signature: str) -> TransactionObservation:
+    async def solana_transaction(
+        self, signature: str, *, network: str = "mainnet-beta"
+    ) -> TransactionObservation:
         if not _is_base58_size(signature, 64):
             raise ValueError("Expected a 64-byte Solana transaction signature")
-        if await self._request("getGenesisHash", []) != SOL_GENESIS:
-            raise WalletUnavailable("Local node is not Solana mainnet-beta")
+        _, asset = await self._solana_identity(network)
         try:
             statuses = _SignatureStatuses.model_validate(
                 await self._request(
@@ -312,12 +403,12 @@ class LocalWalletRpc:
         status = statuses.value[0]
         if status is None:
             return TransactionObservation(
-                SOL.network.value, signature, datetime.now(UTC), "unknown"
+                asset.network.value, signature, datetime.now(UTC), "unknown"
             )
         if status.slot > statuses.context.slot:
             raise WalletUnavailable("Solana transaction slot exceeds the node context")
         return TransactionObservation(
-            SOL.network.value,
+            asset.network.value,
             signature,
             datetime.now(UTC),
             status.finality,
@@ -335,9 +426,16 @@ class LocalWalletRpc:
                 ),
                 strict=True,
             )
-            if chain.chain != "main" or chain.initialblockdownload:
+            label = "mainnet" if network.chain == "main" else network.chain
+            if chain.chain != network.chain or chain.initialblockdownload:
                 raise WalletUnavailable(
-                    f"{network.name} node must report synced mainnet"
+                    f"{network.name} node must report synced {label}"
+                )
+            if network.signet_challenge is not None and (
+                chain.signet_challenge != network.signet_challenge
+            ):
+                raise WalletUnavailable(
+                    "Local node does not match the default Signet challenge"
                 )
             genesis = await self._request(
                 "getblockhash", [0], version=network.rpc_version
@@ -354,7 +452,7 @@ class LocalWalletRpc:
             )
             if not validated.isvalid:
                 raise WalletUnavailable(
-                    f"Address is invalid for {network.name} mainnet"
+                    f"Address is invalid for {network.name} {label}"
                 )
             scan = _UtxoScan.model_validate(
                 await self._request(

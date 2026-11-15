@@ -1333,6 +1333,8 @@ Avoid marketing claims like “guaranteed profitable”, “never loses”, “A
 
 ## 17. Phased zero-to-V1 implementation roadmap
 
+See [docs/ROADMAP.md](docs/ROADMAP.md) for current status, execution order and open questions.
+
 Do not jump directly to wallet signing or AI live execution. Complete one phase at a time; every phase ends with tests and a reviewable artifact.
 
 ### Phase 0 — Repository foundation and product contract

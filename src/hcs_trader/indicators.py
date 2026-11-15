@@ -26,6 +26,9 @@ class Indicators:
     bollinger_lower: Decimal | None = None
     volatility20: Decimal | None = None
     volume_sma20: Decimal | None = None
+    source: str | None = None
+    interval_minutes: int | None = None
+    opened_at: datetime | None = None
 
 
 def calculate_indicators(candles: Sequence[Candle]) -> Indicators:
@@ -55,6 +58,9 @@ def calculate_indicators(candles: Sequence[Candle]) -> Indicators:
         return Indicators(
             contiguous_candles=len(segment),
             closed_at=segment[-1].closed_at,
+            source=segment[-1].source,
+            interval_minutes=segment[-1].interval_minutes,
+            opened_at=segment[0].opened_at,
             rsi14=_rsi(closes, 14),
             sma20=sma,
             ema20=_ema(closes, 20)[-1] if sma is not None else None,

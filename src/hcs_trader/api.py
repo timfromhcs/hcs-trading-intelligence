@@ -1,10 +1,12 @@
 """Read-only status endpoints for the loopback application."""
 
+import asyncio
 import csv
 import json
 import logging
+import re
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -25,6 +27,7 @@ from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
 from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
 from hcs_trader.domain.news import NewsItem
@@ -36,7 +39,9 @@ from hcs_trader.domain.paper import (
     PaperRejected,
 )
 from hcs_trader.domain.wallet import WalletSnapshot
+from hcs_trader.holdout import CANDIDATE_JSON, RESULT_JSON
 from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.local_research import ResearchHistory
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
     PromotionStage,
@@ -45,7 +50,12 @@ from hcs_trader.promotion import (
 )
 from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
-from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
+from hcs_trader.walk_forward import (
+    PeriodPair,
+    WalkForwardConfig,
+    WalkForwardResult,
+    walk_forward,
+)
 
 _logger = logging.getLogger(__name__)
 LOOPBACK_HOST = "127.0.0.1"
@@ -158,8 +168,11 @@ class CreateCandidateRequest(BaseModel):
 
 class PromoteCandidateRequest(BaseModel):
     target_stage: PromotionStage
-    shadow_fills: int = 0
-    is_live_enabled: bool = False
+
+
+class ShadowRunResponse(BaseModel):
+    run_id: str
+    report: BacktestResult
 
 
 class PaperPortfolio(BaseModel):
@@ -179,6 +192,7 @@ def create_app(
     *,
     quote_service: QuoteService | None = None,
     paper_mode: bool = False,
+    kraken_reconciliation: Callable[[], Awaitable[object]] | None = None,
 ) -> FastAPI:
     paper = (
         PaperExecution(store, quote_service) if paper_mode and quote_service else None
@@ -198,6 +212,20 @@ def create_app(
                 {"event": event.kind, "id": event.event_id, "at": event.recorded_at}
             ),
         )
+        if kraken_reconciliation is not None:
+            try:
+                async with asyncio.timeout(30):
+                    await kraken_reconciliation()
+                incomplete = any(
+                    order.state
+                    in {OrderState.SUBMITTED, OrderState.RECONCILIATION_REQUIRED}
+                    for order in store.list_open_spot_orders("kraken")
+                )
+            except TimeoutError:
+                incomplete = True
+            store.record_audit_event(
+                "spot.recovery.incomplete" if incomplete else "spot.recovery.completed"
+            )
         yield
 
     app = FastAPI(
@@ -224,6 +252,8 @@ def create_app(
                 network_enabled=True,
                 execution_available=paper is not None and not execution_pause().paused,
             )
+        if kraken_reconciliation is not None:
+            return Status(mode=Mode.DATA_ONLY, network_enabled=True)
         return Status()
 
     def _verify_local_origin(request: Request, action_name: str) -> None:
@@ -363,9 +393,12 @@ def create_app(
         response: Response,
         interval: int = 60,
         limit: Annotated[int, Query(ge=1, le=1000)] = 720,
+        holdout_candles: Annotated[int, Query(ge=0, le=999)] = 0,
     ) -> BacktestResult:
         try:
-            result = run_backtest(read_candles(interval, limit), config)
+            candles = read_candles(interval, limit)
+            development = candles[:-holdout_candles] if holdout_candles else candles
+            result = run_backtest(development, config)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
         save_report(result, response)
@@ -566,6 +599,16 @@ def create_app(
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Spot order storage unavailable") from error
 
+    @app.get("/api/v1/research/runs")
+    def research_runs(
+        response: Response, limit: Annotated[int, Query(ge=1, le=100)] = 25
+    ) -> ResearchHistory:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return store.research_history(limit)
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Research history unavailable") from error
+
     @app.get("/api/v1/audit/events")
     def list_audit_events(
         response: Response,
@@ -633,6 +676,94 @@ def create_app(
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Failed to save strategy candidate") from error
 
+    def candidate_backtest(candidate: StrategyCandidate) -> BacktestResult:
+        report_id = candidate.parameters.get("backtest_report_id")
+        if not isinstance(report_id, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", report_id
+        ):
+            raise HTTPException(409, "Candidate needs a saved backtest report ID")
+        report = get_report(report_id).report
+        if (
+            not isinstance(report, BacktestResult)
+            or report.dataset_sha256 != candidate.dataset_hash
+            or report.config.fast_period != candidate.parameters.get("fast")
+            or report.config.slow_period != candidate.parameters.get("slow")
+        ):
+            raise HTTPException(409, "Backtest report does not match the candidate")
+        return report
+
+    def latest_shadow(candidate_id: str) -> ShadowRunResponse:
+        try:
+            saved = store.latest_shadow_run(candidate_id)
+            if saved is None:
+                raise HTTPException(404, "No paper shadow run recorded")
+            run_id, payload = saved
+            report = ReportPayload.model_validate_json(payload).report
+            if (
+                not isinstance(report, BacktestResult)
+                or sha256(payload.encode("utf-8")).hexdigest() != run_id
+            ):
+                raise ValueError("Invalid shadow run payload")
+        except (sqlite3.Error, ValueError) as error:
+            raise HTTPException(503, "Paper shadow run unavailable") from error
+        return ShadowRunResponse(run_id=run_id, report=report)
+
+    @app.get("/api/v1/strategies/candidates/{candidate_id}/shadow-run")
+    def get_shadow_run(candidate_id: str) -> ShadowRunResponse:
+        return latest_shadow(candidate_id)
+
+    @app.post("/api/v1/strategies/candidates/{candidate_id}/shadow-run")
+    def run_shadow(candidate_id: str, request: Request) -> ShadowRunResponse:
+        _verify_local_origin(request, "Run paper shadow simulation")
+        candidate = store.get_strategy_candidate(candidate_id)
+        if candidate is None:
+            raise HTTPException(404, "Strategy candidate not found")
+        if candidate.stage != PromotionStage.PAPER_SHADOW:
+            raise HTTPException(409, "Candidate must be in PAPER_SHADOW")
+        source = candidate_backtest(candidate)
+        now = datetime.now(UTC)
+        boundary = max(candidate.updated_at, source.dataset_closed_at)
+        candles = [
+            candle for candle in read_candles(60, 1000) if candle.closed_at <= now
+        ]
+        start = next(
+            (
+                index
+                for index, candle in enumerate(candles)
+                if candle.opened_at >= boundary
+            ),
+            len(candles),
+        )
+        warmup = source.config.slow_period
+        if (
+            not warmup <= start < len(candles)
+            or candles[start].opened_at - candles[start - 1].opened_at
+            != candles[start].closed_at - candles[start].opened_at
+            or candles[start - 1].opened_at >= boundary
+        ):
+            raise HTTPException(
+                409, "Need contiguous hourly candles across the shadow boundary"
+            )
+        try:
+            result = run_backtest(
+                candles[start - warmup :], source.config, trade_start=warmup
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        payload = ReportPayload(report=result).model_dump_json()
+        run_id = sha256(payload.encode("utf-8")).hexdigest()
+        try:
+            saved = store.record_shadow_run(
+                candidate, run_id, result.dataset_closed_at, payload
+            )
+        except PaperRejected as error:
+            raise HTTPException(409, str(error)) from error
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Paper shadow storage unavailable") from error
+        if not saved:
+            raise HTTPException(409, "Candidate changed during shadow simulation")
+        return ShadowRunResponse(run_id=run_id, report=result)
+
     @app.post("/api/v1/strategies/candidates/{candidate_id}/promote")
     def promote_candidate_endpoint(
         candidate_id: str,
@@ -643,18 +774,123 @@ def create_app(
         candidate = store.get_strategy_candidate(candidate_id)
         if candidate is None:
             raise HTTPException(404, f"Strategy candidate '{candidate_id}' not found")
+        backtest_evidence = None
+        walk_forward_evidence = None
+        holdout_evidence = None
+        shadow_fills = 0
+        shadow_run_id = None
+        needs_backtest = (candidate.stage, req.target_stage) in (
+            (PromotionStage.UNIT_TESTED, PromotionStage.BACKTESTED),
+            (PromotionStage.BACKTESTED, PromotionStage.WALK_FORWARD_PASSED),
+            (PromotionStage.WALK_FORWARD_PASSED, PromotionStage.PAPER_SHADOW),
+        )
+        if needs_backtest:
+            report = candidate_backtest(candidate)
+            backtest_evidence = report
+            if req.target_stage == PromotionStage.WALK_FORWARD_PASSED:
+                walk_id = candidate.parameters.get("walk_forward_report_id")
+                if not isinstance(walk_id, str) or not re.fullmatch(
+                    r"[a-f0-9]{64}", walk_id
+                ):
+                    raise HTTPException(
+                        409, "Candidate needs a saved walk-forward report ID"
+                    )
+                walk = get_report(walk_id).report
+                pair = PeriodPair(report.config.fast_period, report.config.slow_period)
+                if (
+                    not isinstance(walk, WalkForwardResult)
+                    or walk.config.candidates != (pair,)
+                    or walk.holdout.selection_dataset_sha256 != report.dataset_sha256
+                    or walk.holdout.started_at != report.dataset_closed_at
+                    or walk.holdout.strategy.config != report.config
+                ):
+                    raise HTTPException(
+                        409, "Walk-forward report does not match the candidate"
+                    )
+                walk_forward_evidence = walk
+            if req.target_stage == PromotionStage.PAPER_SHADOW:
+                commitment = candidate.parameters.get("holdout_commitment")
+                if not isinstance(commitment, str) or not re.fullmatch(
+                    r"[a-f0-9]{64}", commitment
+                ):
+                    raise HTTPException(
+                        409, "Candidate needs a scored holdout commitment"
+                    )
+                try:
+                    scored = store.scored_holdout(commitment)
+                except sqlite3.Error as error:
+                    raise HTTPException(
+                        503, "Committed holdout storage unavailable"
+                    ) from error
+                if scored is None:
+                    raise HTTPException(409, "Committed holdout has not been scored")
+                try:
+                    frozen = CANDIDATE_JSON.validate_json(scored[0])
+                    outcome = RESULT_JSON.validate_json(scored[1])
+                except ValidationError as error:
+                    raise HTTPException(
+                        503, "Stored holdout format is invalid"
+                    ) from error
+                if (
+                    frozen.holdout_sha256 != commitment
+                    or outcome.holdout_sha256 != commitment
+                    or frozen.development_sha256 != report.dataset_sha256
+                    or outcome.development_sha256 != report.dataset_sha256
+                    or frozen.strategy_version != report.strategy
+                    or frozen.selected != report.config
+                    or outcome.strategy.config != report.config
+                    or outcome.strategy.strategy != report.strategy
+                    or outcome.strategy.dataset_closed_at > datetime.now(UTC)
+                    or not frozen.warmup
+                    or frozen.warmup[-1].closed_at != report.dataset_closed_at
+                ):
+                    raise HTTPException(
+                        409, "Committed holdout does not match the candidate"
+                    )
+                holdout_evidence = outcome
+        if (
+            candidate.stage == PromotionStage.PAPER_SHADOW
+            and req.target_stage == PromotionStage.PAPER_APPROVED
+        ):
+            try:
+                shadow_run = latest_shadow(candidate_id)
+            except HTTPException as error:
+                if error.status_code != 404:
+                    raise
+                raise HTTPException(
+                    409, "A persisted paper shadow run is required"
+                ) from error
+            if shadow_run.report.max_drawdown > Decimal("0.25"):
+                raise HTTPException(
+                    409, "Paper shadow drawdown exceeds the 25% risk limit"
+                )
+            shadow_fills = len(shadow_run.report.fills)
+            shadow_run_id = shadow_run.run_id
         verdict = evaluate_promotion_gate(
             candidate,
             req.target_stage,
-            shadow_fills=req.shadow_fills,
-            is_live_enabled=req.is_live_enabled,
+            backtest=backtest_evidence,
+            walk_forward=walk_forward_evidence,
+            holdout=holdout_evidence,
+            shadow_fills=shadow_fills,
+            is_live_enabled=(
+                req.target_stage == PromotionStage.LIVE_CANARY
+                and store.has_spot_canary_approval(candidate_id, datetime.now(UTC))
+            ),
         )
         if not verdict.passed:
             raise HTTPException(
                 409,
                 f"Promotion gate rejected: {'; '.join(verdict.reasons)}",
             )
-        updated = store.update_candidate_stage(candidate_id, req.target_stage)
+        updated = store.update_candidate_stage(
+            candidate,
+            req.target_stage,
+            verdict.evaluated_at,
+            shadow_run_id=shadow_run_id,
+        )
+        if updated is None:
+            raise HTTPException(409, "Candidate changed during promotion")
         return {
             "candidate": updated.model_dump(mode="json"),
             "gate_result": {

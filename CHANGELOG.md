@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added offline Strategy Lab promotion evidence, persisted paper-shadow replays and guarded Kraken order recovery.
+- Added deterministic local research tools, durable run history, a foreground scheduler and dashboard statistics.
+- Added isolated read-only profiles for Sepolia, Solana Devnet, Bitcoin regtest and Signet, Litecoin regtest, and DigiByte regtest.
+- Added an interactive, expiring authorization for a single Kraken BTC/USD canary candidate and a separate validation-only CLI workflow.
+
 ## 0.2.0 — spot execution, isolated signing, research and dashboard UI (2026-11-15)
 
 - Added canonical asset and market identities, exact monetary values, and explicit order and transaction transitions for later adapters.

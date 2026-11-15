@@ -2,15 +2,23 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import sqlite3
+import sys
 import warnings
 import webbrowser
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from functools import partial
 from getpass import GetPassWarning, getpass
+from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
+from time import monotonic_ns
+from uuid import uuid4
 
 import httpx2
 import uvicorn
@@ -29,6 +37,8 @@ from hcs_trader.data.kraken import (
 )
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.wallet import (
     SolanaBalance,
     TransactionObservation,
@@ -42,18 +52,31 @@ from hcs_trader.holdout import (
     freeze_candidate,
     score_holdout,
 )
-from hcs_trader.indicators import calculate_indicators
+from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.kraken_spot import (
+    KrakenExecutionError,
+    KrakenOrderValidation,
+    KrakenSpotAdapter,
+)
 from hcs_trader.local_research import (
     LlamaCppProvider,
     NoneModelProvider,
+    ResearchHistory,
     ResearchReport,
+    ResearchRun,
     research_report,
 )
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
+from hcs_trader.promotion import PromotionStage
+from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
+from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import WALLET_SNAPSHOT, AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
 from hcs_trader.wallets import (
+    ETHEREUM_NETWORKS,
+    SOLANA_NETWORKS,
+    UTXO_NETWORK_PROFILES,
     UTXO_NETWORKS,
     LocalWalletRpc,
     UtxoNetwork,
@@ -110,7 +133,11 @@ def _read_fred_key() -> str:
             ) from None
 
 
-def freeze_research(commitment: str, interval: int, config_path: Path | None) -> None:
+def freeze_research(
+    commitment: str, interval: int, config_path: Path | None, limit: int = 1000
+) -> None:
+    if not 1 <= limit <= 1000:
+        raise ValueError("Development candle limit must be between 1 and 1000")
     config = WalkForwardConfig()
     if config_path is not None:
         with config_path.open("rb") as handle:
@@ -120,7 +147,7 @@ def freeze_research(commitment: str, interval: int, config_path: Path | None) ->
         config = TypeAdapter(WalkForwardConfig).validate_json(model)
     store = local_store()
     store.initialize()
-    development = store.candle_history(BTC_USD, SOURCE, interval, limit=1000)
+    development = store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
     candidate = freeze_candidate(development, config, commitment)
     payload = CANDIDATE_JSON.dump_json(candidate).decode("utf-8")
     store.freeze_holdout(commitment, payload)
@@ -149,16 +176,82 @@ async def market_research(
     alias: str | None,
     token_file: Path | None,
     manifest_path: Path | None,
+    *,
+    use_tools: bool = False,
+    schedule: tuple[int, int] | None = None,
 ) -> ResearchReport:
+    if use_tools and (manifest_path is None or token_file is None):
+        raise ValueError("Research tools require a local model manifest and token file")
+    started_at = datetime.now(UTC)
+    started = monotonic_ns()
     store = local_store()
     store.initialize()
     evidence = calculate_indicators(
         store.candle_history(BTC_USD, SOURCE, interval, limit=720)
     )
     if alias is None and token_file is None and manifest_path is None:
-        return await research_report(evidence, NoneModelProvider())
-    if token_file is None or manifest_path is None:
-        raise ValueError("A local model manifest and token file are required together")
+        report = await research_report(evidence, NoneModelProvider())
+    else:
+        if token_file is None or manifest_path is None:
+            raise ValueError(
+                "A local model manifest and token file are required together"
+            )
+        report = await _configured_research(
+            evidence, port, alias, token_file, manifest_path, use_tools=use_tools
+        )
+    next_schedule = None
+    if schedule is not None:
+        every_seconds, failures = schedule
+        failures = min(failures + 1, 5) if report.status == "unavailable" else 0
+        delay = min(every_seconds * 2**failures, 86400)
+        next_schedule = (datetime.now(UTC) + timedelta(seconds=delay), failures)
+    store.record_research_run(
+        ResearchRun(
+            run_id=uuid4().hex,
+            started_at=started_at,
+            duration_ms=(monotonic_ns() - started) // 1_000_000,
+            interval_minutes=interval,
+            status=report.status,
+            model=report.model,
+            model_sha256=report.verified_artifact.sha256
+            if report.verified_artifact
+            else None,
+            prompt_version=report.prompt_version,
+            evidence=report.evidence,
+        ),
+        schedule=next_schedule,
+    )
+    return report
+
+
+async def watch_research(
+    store: AuditStore, run: Callable[[int], Awaitable[ResearchReport]]
+) -> None:
+    store.initialize()
+    with store.research_worker_lock():
+        while True:
+            next_run_at, failures = store.research_schedule()
+            if next_run_at is not None:
+                remaining = (next_run_at - datetime.now(UTC)).total_seconds()
+                if remaining > 0:
+                    await asyncio.sleep(min(remaining, 60))
+                    continue
+            report = await run(failures)
+            print(
+                TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"),
+                flush=True,
+            )
+
+
+async def _configured_research(
+    evidence: Indicators,
+    port: int,
+    alias: str | None,
+    token_file: Path,
+    manifest_path: Path,
+    *,
+    use_tools: bool,
+) -> ResearchReport:
     metadata = verify_model_manifest(manifest_path)
     if alias is not None and alias != metadata.alias:
         raise ValueError("Requested model alias does not match the manifest")
@@ -168,32 +261,108 @@ async def market_research(
         raise ValueError("Local model token file must contain one token")
     async with httpx2.AsyncClient(trust_env=False) as client:
         report = await research_report(
-            evidence, LlamaCppProvider(client, port, metadata.alias, token)
+            evidence,
+            LlamaCppProvider(client, port, metadata.alias, token, use_tools=use_tools),
         )
-    return replace(report, verified_artifact=metadata)
+    return replace(
+        report,
+        verified_artifact=metadata,
+        prompt_version="market-research-tools-1"
+        if use_tools
+        else report.prompt_version,
+    )
 
 
-async def ethereum_balance(address: str, port: int) -> WalletBalance:
+def read_kraken_credentials(credentials_file: Path) -> tuple[str, str]:
+    with credentials_file.open("rb") as handle:
+        content = handle.read(4097)
+    if len(content) > 4096:
+        raise ValueError("Credential file exceeds the supported size")
+    try:
+        credentials = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("Expected a JSON credential object") from None
+    if not isinstance(credentials, dict):
+        raise ValueError("Expected a JSON credential object")
+    key, secret = credentials.get("api_key"), credentials.get("api_secret")
+    if (
+        not isinstance(key, str)
+        or not isinstance(secret, str)
+        or not key
+        or not secret
+        or any(char.isspace() for char in key + secret)
+    ):
+        raise ValueError("Expected api_key and api_secret strings in credential file")
+    return key, secret
+
+
+async def validate_kraken_order(
+    credentials_file: Path, side: SpotSide, quantity: Decimal, price: Decimal
+) -> KrakenOrderValidation:
+    if (
+        not quantity.is_finite()
+        or not price.is_finite()
+        or not Decimal("0.00000001") <= quantity <= 100
+        or not Decimal("0.01") <= price <= 10_000_000
+        or quantity != round(quantity, 8)
+        or price != round(price, 2)
+        or not 10 <= quantity * price <= 1000
+    ):
+        raise ValueError(
+            "Use a BTC/USD limit order of 10–1000 USD with exact precision"
+        )
+    key, secret = read_kraken_credentials(credentials_file)
+    at = datetime.now(UTC)
+    order = SpotOrder(
+        client_order_id=uuid4().hex,
+        order_id=uuid4().hex,
+        venue="kraken",
+        market="BTC/USD",
+        side=side,
+        order_type=SpotOrderType.LIMIT,
+        quantity=quantity,
+        limit_price=price,
+        state=OrderState.PREVIEWED,
+        risk_decision_id="validation-only",
+        created_at=at,
+        updated_at=at,
+    )
     async with httpx2.AsyncClient(trust_env=False) as client:
-        return await LocalWalletRpc(client, port).ethereum_balance(address)
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        return await adapter.validate_spot_order(order, at)
 
 
-async def solana_balance(address: str, port: int) -> SolanaBalance:
+async def ethereum_balance(
+    address: str, port: int, network: str = "mainnet"
+) -> WalletBalance:
     async with httpx2.AsyncClient(trust_env=False) as client:
-        return await LocalWalletRpc(client, port).solana_balance(address)
+        return await LocalWalletRpc(client, port).ethereum_balance(
+            address, network=network
+        )
+
+
+async def solana_balance(
+    address: str, port: int, network: str = "mainnet-beta"
+) -> SolanaBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).solana_balance(
+            address, network=network
+        )
 
 
 async def transaction_status(
     chain: str, identifier: str, port: int | None
 ) -> TransactionObservation:
     async with httpx2.AsyncClient(trust_env=False) as client:
-        if chain == "eth":
+        if chain in {"eth", "eth-sepolia"}:
+            network = "sepolia" if chain == "eth-sepolia" else "mainnet"
             return await LocalWalletRpc(
                 client, 8545 if port is None else port
-            ).ethereum_transaction(identifier)
+            ).ethereum_transaction(identifier, network=network)
+        network = "devnet" if chain == "sol-devnet" else "mainnet-beta"
         return await LocalWalletRpc(
             client, 8899 if port is None else port
-        ).solana_transaction(identifier)
+        ).solana_transaction(identifier, network=network)
 
 
 async def utxo_balance(
@@ -222,6 +391,7 @@ async def serve(
     *,
     data_dir: Path | None = None,
     open_browser: bool = False,
+    kraken_reconcile_credentials: Path | None = None,
 ) -> None:
     store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -232,11 +402,21 @@ async def serve(
             if market_data or paper_mode
             else None
         )
+        recovery = None
+        if kraken_reconcile_credentials is not None:
+            key, secret = read_kraken_credentials(kraken_reconcile_credentials)
+            execution = KrakenSpotExecution(
+                store,
+                KrakenSpotAdapter(key, secret, client, validate_only=True),
+                RiskEngine(RiskPolicy()),
+            )
+            recovery = execution.reconcile_startup
         app = create_app(
             store,
             Path(__file__).with_name("ui_assets"),
             quote_service=quotes,
             paper_mode=paper_mode,
+            kraken_reconciliation=recovery,
         )
         config = uvicorn.Config(
             app,
@@ -278,6 +458,11 @@ def main() -> None:
     serve_parser.add_argument(
         "--open-browser", action="store_true", help="Open the dashboard"
     )
+    serve_parser.add_argument(
+        "--kraken-reconcile-credentials",
+        type=Path,
+        help="Opt in to read-only Kraken order recovery on startup",
+    )
     network_mode.add_argument(
         "--paper-market-data",
         action="store_true",
@@ -303,6 +488,7 @@ def main() -> None:
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
     )
     freeze_parser.add_argument("--config", type=Path)
+    freeze_parser.add_argument("--limit", type=int, default=1000)
     score_parser = commands.add_parser(
         "score-holdout", help="Score a frozen candidate using the committed dataset"
     )
@@ -311,9 +497,24 @@ def main() -> None:
     commands.add_parser("pause-execution", help="Persist the local execution pause")
     commands.add_parser("resume-execution", help="Clear the local execution pause")
     commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
-    research_parser = commands.add_parser(
-        "research-brief", help="Read an offline research brief"
+    kraken_parser = commands.add_parser(
+        "kraken-validate", help="Validate a BTC/USD limit order without submitting it"
     )
+    kraken_parser.add_argument("--credentials-file", type=Path, required=True)
+    kraken_parser.add_argument("--side", choices=list(SpotSide), required=True)
+    kraken_parser.add_argument("--quantity", required=True)
+    kraken_parser.add_argument("--limit-price", required=True)
+    allow_canary = commands.add_parser(
+        "spot-canary-allow",
+        help="Locally authorize one Kraken BTC/USD canary candidate",
+    )
+    allow_canary.add_argument("candidate_id")
+    allow_canary.add_argument("--credentials-file", type=Path, required=True)
+    allow_canary.add_argument("--max-notional", required=True)
+    commands.add_parser(
+        "spot-canary-revoke", help="Revoke the local spot canary approval"
+    )
+    research_parser = argparse.ArgumentParser(add_help=False)
     research_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
     )
@@ -321,11 +522,32 @@ def main() -> None:
     research_parser.add_argument("--model-alias")
     research_parser.add_argument("--model-manifest", type=Path)
     research_parser.add_argument("--token-file", type=Path)
+    research_parser.add_argument(
+        "--research-tools",
+        action="store_true",
+        help="Enable one archived indicator tool call",
+    )
+    commands.add_parser(
+        "research-brief", parents=[research_parser], help="Run one local research brief"
+    )
+    watch_parser = commands.add_parser(
+        "research-watch",
+        parents=[research_parser],
+        help="Run local research on a schedule",
+    )
+    watch_parser.add_argument("--every-seconds", type=int, default=3600)
+    history_parser = commands.add_parser(
+        "research-history", help="Read local research run history and statistics"
+    )
+    history_parser.add_argument("--limit", type=int, default=25)
     wallet_parser = commands.add_parser(
         "eth-balance", help="Read ETH balance from a local node"
     )
     wallet_parser.add_argument("address")
     wallet_parser.add_argument("--port", type=int, default=8545)
+    wallet_parser.add_argument(
+        "--network", choices=ETHEREUM_NETWORKS, default="mainnet"
+    )
     wallet_parser.add_argument(
         "--save", action="store_true", help="Save the observed balance locally"
     )
@@ -335,6 +557,9 @@ def main() -> None:
     sol_parser.add_argument("address")
     sol_parser.add_argument("--port", type=int, default=8899)
     sol_parser.add_argument(
+        "--network", choices=SOLANA_NETWORKS, default="mainnet-beta"
+    )
+    sol_parser.add_argument(
         "--save", action="store_true", help="Save the observed balance locally"
     )
     for command, network in UTXO_NETWORKS.items():
@@ -342,7 +567,10 @@ def main() -> None:
             command, help=f"Scan {network.name} UTXOs at a local node"
         )
         node_parser.add_argument("address")
-        node_parser.add_argument("--port", type=int, default=network.port)
+        node_parser.add_argument("--port", type=int)
+        node_parser.add_argument(
+            "--network", choices=UTXO_NETWORK_PROFILES[command], default="mainnet"
+        )
         node_parser.add_argument("--cookie-file", type=Path, required=True)
         node_parser.add_argument(
             "--save", action="store_true", help="Save the observed balance locally"
@@ -350,19 +578,23 @@ def main() -> None:
     tx_parser = commands.add_parser(
         "tx-status", help="Read a transaction status from a local node"
     )
-    tx_parser.add_argument("chain", choices=["eth", "sol"])
+    tx_parser.add_argument("chain", choices=["eth", "eth-sepolia", "sol", "sol-devnet"])
     tx_parser.add_argument("identifier")
     tx_parser.add_argument("--port", type=int)
     arguments = parser.parse_args()
     if arguments.command == "serve":
-        asyncio.run(
-            serve(
-                arguments.public_market_data,
-                arguments.paper_market_data,
-                data_dir=arguments.data_dir,
-                open_browser=arguments.open_browser,
+        try:
+            asyncio.run(
+                serve(
+                    arguments.public_market_data,
+                    arguments.paper_market_data,
+                    data_dir=arguments.data_dir,
+                    open_browser=arguments.open_browser,
+                    kraken_reconcile_credentials=arguments.kraken_reconcile_credentials,
+                )
             )
-        )
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
     elif arguments.command == "import-candles":
         try:
             count = asyncio.run(import_candles(arguments.interval))
@@ -394,7 +626,10 @@ def main() -> None:
         try:
             if arguments.command == "freeze-research":
                 freeze_research(
-                    arguments.commitment, arguments.interval, arguments.config
+                    arguments.commitment,
+                    arguments.interval,
+                    arguments.config,
+                    arguments.limit,
                 )
             else:
                 score_research(arguments.commitment, arguments.file)
@@ -408,42 +643,143 @@ def main() -> None:
         print("Execution paused." if paused else "Execution pause cleared.")
     elif arguments.command == "mcp":
         create_mcp_server(local_store().path).run(transport="stdio")
-    elif arguments.command == "research-brief":
+    elif arguments.command in {"spot-canary-allow", "spot-canary-revoke"}:
+        store = local_store()
         try:
-            report = asyncio.run(
-                market_research(
-                    arguments.interval,
-                    arguments.llama_port,
-                    arguments.model_alias,
-                    arguments.token_file,
-                    arguments.model_manifest,
+            store.initialize()
+            if arguments.command == "spot-canary-revoke":
+                store.revoke_spot_canary()
+                print("Spot canary authorization cleared.")
+                return
+            if not sys.stdin.isatty():
+                raise ValueError(
+                    "Canary authorization requires a local interactive terminal"
+                )
+            cap = Decimal(arguments.max_notional)
+            if not cap.is_finite() or not 10 <= cap <= 1000 or cap != round(cap, 2):
+                raise ValueError(
+                    "Use a USD cap of 10–1000 with at most two decimal places"
+                )
+            candidate = store.get_strategy_candidate(arguments.candidate_id)
+            if candidate is None or candidate.stage not in {
+                PromotionStage.PAPER_APPROVED,
+                PromotionStage.LIVE_CANARY,
+            }:
+                raise ValueError("A paper-approved strategy candidate is required")
+            key, _ = read_kraken_credentials(arguments.credentials_file)
+            identity = sha256(key.encode("utf-8")).hexdigest()
+            print(
+                "Kraken BTC/USD spot limit orders · "
+                f"candidate {candidate.candidate_id} "
+                f"({candidate.version}) · API key fingerprint {identity[:12]} · "
+                f"USD {cap:.2f} per order · 24 hours. Orders can lose money.",
+                file=sys.stderr,
+            )
+            if (
+                input("Type AUTHORIZE to replace the active canary authorization: ")
+                != "AUTHORIZE"
+            ):
+                raise ValueError("Canary authorization was not confirmed")
+            at = datetime.now(UTC)
+            store.authorize_spot_canary(
+                candidate, identity, cap, at, at + timedelta(hours=24)
+            )
+            print("Spot canary authorization saved. Server execution is unchanged.")
+        except InvalidOperation:
+            parser.exit(1, "Notional cap must be a decimal\n")
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, "Canary authorization was not confirmed\n")
+        except (OSError, sqlite3.Error, RiskRejected, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+    elif arguments.command == "kraken-validate":
+        try:
+            validation = asyncio.run(
+                validate_kraken_order(
+                    arguments.credentials_file,
+                    SpotSide(arguments.side),
+                    Decimal(arguments.quantity),
+                    Decimal(arguments.limit_price),
                 )
             )
+        except InvalidOperation:
+            parser.exit(1, "Quantity and limit price must be decimals\n")
+        except KrakenExecutionError:
+            parser.exit(1, "Kraken did not confirm validation-only\n")
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
-        print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
+        print(TypeAdapter(KrakenOrderValidation).dump_json(validation).decode("utf-8"))
+    elif arguments.command in {"research-brief", "research-watch"}:
+        run = partial(
+            market_research,
+            arguments.interval,
+            arguments.llama_port,
+            arguments.model_alias,
+            arguments.token_file,
+            arguments.model_manifest,
+            use_tools=arguments.research_tools,
+        )
+        try:
+            if arguments.command == "research-watch":
+                if not 60 <= arguments.every_seconds <= 86400:
+                    raise ValueError(
+                        "Research period must be between 60 and 86400 seconds"
+                    )
+                asyncio.run(
+                    watch_research(
+                        local_store(),
+                        lambda failures: run(
+                            schedule=(arguments.every_seconds, failures)
+                        ),
+                    )
+                )
+            else:
+                store = local_store()
+                store.initialize()
+                with store.research_worker_lock():
+                    report = asyncio.run(run())
+                print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
+        except KeyboardInterrupt:
+            return
+        except (OSError, sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+    elif arguments.command == "research-history":
+        store = local_store()
+        try:
+            store.initialize()
+            history = store.research_history(arguments.limit)
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(ResearchHistory).dump_json(history).decode("utf-8"))
     elif arguments.command in {"eth-balance", "sol-balance", *UTXO_NETWORKS}:
         try:
             snapshot: WalletSnapshot
             if arguments.command == "eth-balance":
                 snapshot = asyncio.run(
-                    ethereum_balance(arguments.address, arguments.port)
+                    ethereum_balance(
+                        arguments.address, arguments.port, arguments.network
+                    )
                 )
             elif arguments.command == "sol-balance":
                 snapshot = asyncio.run(
-                    solana_balance(arguments.address, arguments.port)
+                    solana_balance(arguments.address, arguments.port, arguments.network)
                 )
             else:
+                network = UTXO_NETWORK_PROFILES[arguments.command][arguments.network]
                 snapshot = asyncio.run(
                     utxo_balance(
                         arguments.address,
-                        arguments.port,
+                        network.port if arguments.port is None else arguments.port,
                         arguments.cookie_file,
-                        UTXO_NETWORKS[arguments.command],
+                        network,
                     )
                 )
             if arguments.save:
                 store = local_store()
+                if arguments.network in {"sepolia", "devnet", "regtest", "signet"}:
+                    profile = arguments.network
+                    if arguments.command in {"ltc-balance", "dgb-balance"}:
+                        profile = f"{network.name.lower()}-{profile}"
+                    store = AuditStore(store.path.with_name(f"wallet-{profile}.sqlite"))
                 store.initialize()
                 store.save_wallet_snapshot(snapshot)
         except sqlite3.Error:

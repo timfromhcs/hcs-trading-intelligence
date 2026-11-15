@@ -7,6 +7,7 @@ import { PaperPortfolio } from "./PaperPortfolio";
 import { RiskControls } from "./RiskControls";
 import { SpotOrders } from "./SpotOrders";
 import { StrategyLab } from "./StrategyLab";
+import { ResearchRuns } from "./ResearchRuns";
 import { WalletSnapshots } from "./WalletSnapshots";
 import "./styles.css";
 
@@ -105,7 +106,8 @@ function App() {
         </section>
         {snapshot.state === "ready" && <RiskControls />}
         {snapshot.state === "ready" && snapshot.capabilities.market_data && <MarketQuote />}
-        {snapshot.state === "ready" && snapshot.capabilities.market_data && <StrategyLab />}
+        {snapshot.state === "ready" && <StrategyLab />}
+        {snapshot.state === "ready" && <ResearchRuns />}
         {snapshot.state === "ready" && snapshot.capabilities.portfolio && <PaperPortfolio />}
         {snapshot.state === "ready" && <SpotOrders />}
         {snapshot.state === "ready" && <WalletSnapshots />}

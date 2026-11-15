@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from hcs_trader.backtest import BacktestResult
+from hcs_trader.holdout import HoldoutResult
 from hcs_trader.walk_forward import WalkForwardResult
 
 
@@ -59,6 +60,25 @@ class PromotionGateResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ComparisonMetrics:
+    net_return: Decimal
+    max_drawdown: Decimal
+    fills: int
+
+    def __post_init__(self) -> None:
+        if not self.net_return.is_finite() or self.net_return < -1:
+            raise ValueError("Net return must be finite and at least -100%")
+        if not self.max_drawdown.is_finite() or not 0 <= self.max_drawdown <= 1:
+            raise ValueError("Max drawdown must be between 0 and 1")
+        if self.fills < 0:
+            raise ValueError("Fill count must be nonnegative")
+
+    @classmethod
+    def from_backtest(cls, result: BacktestResult) -> "ComparisonMetrics":
+        return cls(result.net_return, result.max_drawdown, len(result.fills))
+
+
+@dataclass(frozen=True, slots=True)
 class ChampionChallengerVerdict:
     champion_id: str
     challenger_id: str
@@ -83,6 +103,7 @@ def evaluate_promotion_gate(
     *,
     backtest: BacktestResult | None = None,
     walk_forward: WalkForwardResult | None = None,
+    holdout: HoldoutResult | None = None,
     shadow_fills: int = 0,
     is_live_enabled: bool = False,
 ) -> PromotionGateResult:
@@ -131,10 +152,22 @@ def evaluate_promotion_gate(
             )
         elif not walk_forward.folds:
             reasons.append("Walk-forward evaluation series is empty")
+        else:
+            results = (*walk_forward.folds, walk_forward.holdout)
+            if not any(fold.strategy.fills for fold in walk_forward.folds):
+                reasons.append("Walk-forward folds produced zero fills")
+            if not walk_forward.holdout.strategy.fills:
+                reasons.append("Holdout produced zero fills")
+            if any(item.strategy.max_drawdown > Decimal("0.25") for item in results):
+                reasons.append("Out-of-sample drawdown exceeds the 25.00% risk limit")
 
     elif target_stage == PromotionStage.PAPER_SHADOW:
-        # Ready for shadow paper execution
-        pass
+        if holdout is None:
+            reasons.append("A scored holdout commitment is required for PAPER_SHADOW")
+        elif not holdout.strategy.fills:
+            reasons.append("Committed holdout produced zero fills")
+        elif holdout.strategy.max_drawdown > Decimal("0.25"):
+            reasons.append("Committed holdout drawdown exceeds the 25.00% risk limit")
 
     elif target_stage == PromotionStage.PAPER_APPROVED:
         if shadow_fills < 5:
@@ -166,13 +199,27 @@ def compare_champion_challenger(
     challenger_id: str,
     challenger_result: BacktestResult,
 ) -> ChampionChallengerVerdict:
+    return compare_strategy_metrics(
+        champion_id,
+        ComparisonMetrics.from_backtest(champion_result),
+        challenger_id,
+        ComparisonMetrics.from_backtest(challenger_result),
+    )
+
+
+def compare_strategy_metrics(
+    champion_id: str,
+    champion_result: ComparisonMetrics,
+    challenger_id: str,
+    challenger_result: ComparisonMetrics,
+) -> ChampionChallengerVerdict:
     reasons: list[str] = []
     champ_return = champion_result.net_return
     chall_return = challenger_result.net_return
     champ_dd = champion_result.max_drawdown
     chall_dd = challenger_result.max_drawdown
-    champ_trades = len(champion_result.fills)
-    chall_trades = len(challenger_result.fills)
+    champ_trades = champion_result.fills
+    chall_trades = challenger_result.fills
 
     metrics = {
         "champion_net_return": str(champ_return),

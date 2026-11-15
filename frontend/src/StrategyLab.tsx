@@ -28,6 +28,7 @@ interface SimulatedFill {
 interface BacktestResult {
   strategy: string;
   dataset_sha256: string;
+  config: { fast_period: number; slow_period: number };
   candle_count: number;
   ending_cash: string;
   ending_quantity: string;
@@ -36,6 +37,14 @@ interface BacktestResult {
   max_drawdown: string;
   total_fees: string;
   fills: SimulatedFill[];
+}
+
+interface WalkForwardReport {
+  folds: unknown[];
+  holdout: {
+    selection_dataset_sha256: string;
+    strategy: BacktestResult;
+  };
 }
 
 export interface StrategyCandidate {
@@ -92,6 +101,15 @@ export function StrategyLab() {
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
+  const [includeWalkForward, setIncludeWalkForward] = useState(false);
+  const [walkForward, setWalkForward] = useState<{
+    id: string;
+    result: WalkForwardReport;
+  } | null>(null);
+  const [holdoutCommitment, setHoldoutCommitment] = useState("");
+  const normalizedCommitment = holdoutCommitment.trim().toLowerCase();
+  const invalidCommitment =
+    normalizedCommitment !== "" && !/^[a-f0-9]{64}$/.test(normalizedCommitment);
 
   const [candidates, setCandidates] = useState<StrategyCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -143,17 +161,21 @@ export function StrategyLab() {
     setBacktestError(null);
     setBacktestResult(null);
     setReportId(null);
+    setWalkForward(null);
 
     try {
-      const response = await fetch("/api/v1/backtests?interval=60", {
+      const holdoutCandles = includeWalkForward ? 100 : 0;
+      const simulation = {
+        fast_period: fastPeriod,
+        slow_period: slowPeriod,
+        starting_cash: "10000",
+        allocation: "0.10",
+      };
+      const response = await fetch(
+        `/api/v1/backtests?interval=60&holdout_candles=${holdoutCandles}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fast_period: fastPeriod,
-          slow_period: slowPeriod,
-          starting_cash: "10000",
-          allocation: "0.10",
-        }),
+        body: JSON.stringify(simulation),
       });
 
       if (!response.ok) {
@@ -161,13 +183,34 @@ export function StrategyLab() {
         throw new Error(err.detail || "Backtest execution failed");
       }
 
-      const loc = response.headers.get("Location");
-      if (loc) {
-        const id = loc.split("/").pop();
-        if (id) setReportId(id);
-      }
-
       const result = (await response.json()) as BacktestResult;
+      const id = response.headers.get("Location")?.split("/").pop();
+      if (!id) throw new Error("Backtest report ID is unavailable");
+      if (includeWalkForward) {
+        const walkResponse = await fetch("/api/v1/backtests/walk-forward?interval=60", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            training_candles: Math.max(200, slowPeriod + 1),
+            test_candles: 50,
+            holdout_candles: holdoutCandles,
+            candidates: [{ fast: fastPeriod, slow: slowPeriod }],
+            simulation,
+          }),
+        });
+        if (!walkResponse.ok) {
+          const error = await walkResponse.json().catch(() => ({}));
+          throw new Error(error.detail || "Walk-forward evaluation failed");
+        }
+        const walkId = walkResponse.headers.get("Location")?.split("/").pop();
+        const walkResult = (await walkResponse.json()) as WalkForwardReport;
+        if (!walkId) throw new Error("Walk-forward report ID is unavailable");
+        if (walkResult.holdout.selection_dataset_sha256 !== result.dataset_sha256) {
+          throw new Error("Candle history changed during evaluation. Run both reports again.");
+        }
+        setWalkForward({ id: walkId, result: walkResult });
+      }
+      setReportId(id);
       setBacktestResult(result);
     } catch (err: unknown) {
       setBacktestError(err instanceof Error ? err.message : "Backtest execution error");
@@ -177,7 +220,8 @@ export function StrategyLab() {
   }
 
   async function handleRegisterCandidate() {
-    if (!backtestResult) return;
+    if (!backtestResult || !reportId || (walkForward && invalidCommitment)) return;
+    const { fast_period: fast, slow_period: slow } = backtestResult.config;
     setRegistering(true);
     setCandidateActionError(null);
     setCandidateActionMessage(null);
@@ -186,9 +230,17 @@ export function StrategyLab() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: `SMA Crossover (${fastPeriod}/${slowPeriod})`,
+          name: `SMA Crossover (${fast}/${slow})`,
           version: "1.0.0",
-          parameters: { fast: fastPeriod, slow: slowPeriod },
+          parameters: {
+            fast,
+            slow,
+            backtest_report_id: reportId,
+            ...(walkForward && { walk_forward_report_id: walkForward.id }),
+            ...(walkForward && normalizedCommitment && {
+              holdout_commitment: normalizedCommitment,
+            }),
+          },
           dataset_hash: backtestResult.dataset_sha256,
         }),
       });
@@ -217,7 +269,6 @@ export function StrategyLab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_stage: next,
-          shadow_fills: 5,
         }),
       });
       if (!res.ok) {
@@ -352,8 +403,16 @@ export function StrategyLab() {
           </div>
 
           <div className="form-group form-actions">
+            <label>
+              <input
+                type="checkbox"
+                checked={includeWalkForward}
+                onChange={(e) => setIncludeWalkForward(e.target.checked)}
+              />{" "}
+              Include walk-forward evaluation
+            </label>
             <button type="submit" disabled={backtestRunning}>
-              {backtestRunning ? "Simulating…" : "Run Backtest"}
+              {backtestRunning ? "Simulating…" : includeWalkForward ? "Run Both Reports" : "Run Backtest"}
             </button>
           </div>
         </form>
@@ -400,7 +459,7 @@ export function StrategyLab() {
 
               <div>
                 <dt>Simulated Fills</dt>
-                <dd>{backtestResult.fills.length} trades</dd>
+                <dd>{backtestResult.fills.length}</dd>
               </div>
             </div>
 
@@ -410,12 +469,38 @@ export function StrategyLab() {
               </div>
             )}
 
+            {walkForward && (
+              <>
+                <p>
+                  Walk-forward: {walkForward.result.folds.length} folds and{" "}
+                  simulated fills in the final 100 candles:{" "}
+                  {walkForward.result.holdout.strategy.fills.length}.
+                </p>
+                <div className="form-group">
+                  <label htmlFor="holdout-commitment">Separate holdout SHA-256 (optional)</label>
+                  <input
+                    id="holdout-commitment"
+                    value={holdoutCommitment}
+                    onChange={(e) => setHoldoutCommitment(e.target.value)}
+                    aria-invalid={invalidCommitment}
+                    aria-describedby="holdout-commitment-help"
+                    spellCheck={false}
+                  />
+                  <small id="holdout-commitment-help">
+                    {invalidCommitment
+                      ? "Enter a 64-character hexadecimal hash."
+                      : "Paper Shadow requires this holdout to be frozen and scored through the CLI."}
+                  </small>
+                </div>
+              </>
+            )}
+
             <div className="candidate-register-bar">
               <button
                 type="button"
                 className="btn-register"
                 onClick={handleRegisterCandidate}
-                disabled={registering}
+                disabled={registering || !reportId || (walkForward !== null && invalidCommitment)}
               >
                 {registering ? "Registering…" : "Register Strategy as Promotion Candidate"}
               </button>

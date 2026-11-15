@@ -32,6 +32,12 @@ dd { margin: 0; }
 .status-grid div { padding: 1rem; border: 1px solid var(--border); border-radius: 0.5rem; }
 .status-grid dt { color: var(--muted); font-size: 0.875rem; }
 .status-grid dd { margin-top: 0.4rem; font-weight: 650; }
+.research-runs-scroll { overflow-x: auto; }
+.research-runs-scroll table { width: 100%; min-width: 36rem; border-collapse: collapse; }
+.research-runs-scroll th,
+.research-runs-scroll td { padding: 0.65rem; border-bottom: 1px solid var(--border); text-align: left; }
+.research-runs-scroll th { color: var(--muted); font-weight: 600; }
+.research-runs-scroll td { overflow-wrap: anywhere; }
 [data-mode="PAPER"] { color: #ffbf5a; }
 [data-mode="LIVE"] { color: #ff8294; }
 .capabilities div { display: flex; justify-content: space-between; gap: 1rem; border-top: 1px solid var(--border); padding-block: 0.75rem; }
@@ -300,7 +306,7 @@ dd { margin: 0; }
   font-size: 0.8rem;
   color: var(--muted);
 }
-.form-group input {
+.form-group input:not([type="checkbox"]) {
   background: #0b0f17;
   border: 1px solid var(--border);
   color: #fff;
@@ -313,6 +319,9 @@ dd { margin: 0; }
 .form-group input:focus {
   outline: 2px solid var(--cyan);
   border-color: transparent;
+}
+#holdout-commitment {
+  width: min(100%, 38rem);
 }
 .form-actions button {
   min-height: auto;
@@ -342,6 +351,7 @@ dd { margin: 0; }
 .report-meta code {
   color: var(--cyan);
   font-family: monospace;
+  overflow-wrap: anywhere;
 }
 .backtest-fills {
   margin-top: 1rem;
@@ -540,6 +550,8 @@ dd { margin: 0; }
 
 .candidate-params {
   font-size: 0.8rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .candidate-params code {

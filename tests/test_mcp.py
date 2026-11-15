@@ -12,6 +12,8 @@ from mcp.types import TextContent, TextResourceContents
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.wallet import WalletBalance
+from hcs_trader.indicators import Indicators
+from hcs_trader.local_research import ResearchRun
 from hcs_trader.storage import AuditStore
 
 
@@ -27,6 +29,19 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
     store.initialize()
     store.set_execution_pause(True)
     now = datetime.now(UTC)
+    store.record_research_run(
+        ResearchRun(
+            "fixture-run",
+            now,
+            8,
+            60,
+            "model_disabled",
+            None,
+            None,
+            "market-research-1",
+            Indicators(0),
+        )
+    )
     store.save_spot_order(
         SpotOrder(
             client_order_id="cl-mcp-01",
@@ -71,6 +86,7 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
             "market.get_quotes",
             "market.get_candles",
             "quant.get_indicators",
+            "research.get_runs",
             "news.get_events",
             "portfolio.get_paper_balance",
             "risk.get_status",
@@ -82,6 +98,14 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         assert all(
             tool.annotations and tool.annotations.read_only_hint for tool in tools
         )
+        history = await client.call_tool("research.get_runs")
+        assert not history.is_error
+        assert isinstance(history.content[0], TextContent)
+        history_data = json.loads(history.content[0].text)
+        assert history_data["runs"][0]["run_id"] == "fixture-run"
+        assert history_data["statistics"] == [
+            {"status": "model_disabled", "count": 1, "mean_duration_ms": 8.0}
+        ]
         risk = await client.call_tool("risk.get_status")
         assert isinstance(risk.content[0], TextContent)
         assert json.loads(risk.content[0].text)["paused"] is True
@@ -110,21 +134,26 @@ async def test_mcp_stdio_exposes_only_bounded_read_tools(tmp_path: Path) -> None
         assert "event_id" in audit_data
         assert "kind" in audit_data
 
+        metrics = {
+            "champion_net_return": "0.10",
+            "champion_max_drawdown": "0.15",
+            "champion_trades": 10,
+            "challenger_net_return": "0.18",
+            "challenger_max_drawdown": "0.10",
+            "challenger_trades": 12,
+        }
         compare_resp = await client.call_tool(
-            "quant.compare_strategy_candidates",
-            {
-                "champion_net_return": "0.10",
-                "champion_max_drawdown": "0.15",
-                "champion_trades": 10,
-                "challenger_net_return": "0.18",
-                "challenger_max_drawdown": "0.10",
-                "challenger_trades": 12,
-            },
+            "quant.compare_strategy_candidates", metrics
         )
         assert len(compare_resp.content) == 1
         assert isinstance(compare_resp.content[0], TextContent)
         compare_data = json.loads(compare_resp.content[0].text)
         assert compare_data["challenger_wins"] is True
+        invalid_metrics = await client.call_tool(
+            "quant.compare_strategy_candidates",
+            {**metrics, "challenger_net_return": "NaN"},
+        )
+        assert invalid_metrics.is_error
 
         out_of_range = await client.call_tool("market.get_candles", {"limit": 1001})
         assert out_of_range.is_error

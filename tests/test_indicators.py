@@ -76,6 +76,9 @@ def test_indicator_api_reads_closed_history_offline(tmp_path: Path) -> None:
     with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
         result = api.get("/api/v1/market/indicators").json()
         assert result["rsi14"] == "100"
+        assert result["source"] == SOURCE
+        assert result["interval_minutes"] == 60
+        assert datetime.fromisoformat(result["opened_at"]) == _START
         assert Decimal(result["ema20"]) == Decimal("34.5")
         assert result["contiguous_candles"] == 35
         assert api.get("/api/v1/market/indicators?interval=5").json()["rsi14"] is None

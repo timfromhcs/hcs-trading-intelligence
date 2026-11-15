@@ -15,7 +15,13 @@ from hcs_trader.api import create_app
 from hcs_trader.backtest import BacktestConfig, run_backtest
 from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.market_data import Candle
-from hcs_trader.holdout import RESULT_JSON, freeze_candidate, score_holdout
+from hcs_trader.holdout import (
+    CANDIDATE_JSON,
+    RESULT_JSON,
+    freeze_candidate,
+    score_holdout,
+)
+from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import PeriodPair, WalkForwardConfig, walk_forward
 
@@ -60,6 +66,7 @@ def test_costs_partial_fills_and_next_open_without_lookahead() -> None:
     assert sell.filled_at == candles[5].opened_at
     assert sell.price == Decimal("79.92")
     assert result.ending_quantity == 0
+
     assert result.ending_cash == result.ending_equity == Decimal("9989.852975")
     assert result.max_drawdown > 0
     assert result == run_backtest(candles, config)
@@ -70,6 +77,42 @@ def test_costs_partial_fills_and_next_open_without_lookahead() -> None:
     tampered_future = run_backtest(changed + candles[4:], config)
     assert tampered_future.fills[0] == buy
     assert tampered_future.dataset_sha256 != result.dataset_sha256
+
+
+def test_candidate_promotion_uses_matching_saved_backtest(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    store.record_candles(fixture_candles())
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as client:
+        report = client.post(
+            "/api/v1/backtests",
+            json={"fast_period": 2, "slow_period": 3, "volume_fraction": "0.10"},
+        )
+        assert report.status_code == 200
+        report_id = report.headers["Location"].rsplit("/", 1)[-1]
+        for slow, expected in ((4, 409), (3, 200)):
+            candidate = client.post(
+                "/api/v1/strategies/candidates",
+                json={
+                    "name": "SMA",
+                    "version": "1",
+                    "parameters": {
+                        "fast": 2,
+                        "slow": slow,
+                        "backtest_report_id": report_id,
+                    },
+                    "dataset_hash": report.json()["dataset_sha256"],
+                },
+            )
+            assert candidate.status_code == 200
+            url = (
+                "/api/v1/strategies/candidates/"
+                + candidate.json()["candidate_id"]
+                + "/promote"
+            )
+            assert client.post(url, json={"target_stage": "UNIT_TESTED"}).is_success
+            result = client.post(url, json={"target_stage": "BACKTESTED"})
+            assert result.status_code == expected, result.text
 
 
 def test_backtest_rejects_gaps_and_enforces_minimums() -> None:
@@ -162,6 +205,158 @@ def test_walk_forward_keeps_test_and_holdout_out_of_selection(tmp_path: Path) ->
         assert response.status_code == 200
         assert response.json()["holdout"]["benchmark"]["strategy"] == "buy-and-hold"
         assert api.get(response.headers["location"]).json()["report"] == response.json()
+
+
+def test_walk_forward_promotion_requires_matched_out_of_sample_report(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "history.sqlite")
+    store.initialize()
+    template = fixture_candles()[0]
+    candles = [
+        replace(
+            template,
+            opened_at=template.opened_at + timedelta(hours=index),
+            received_at=template.received_at + timedelta(hours=index),
+            open=template.open + index,
+            high=template.high + index,
+            low=template.low + index,
+            close=template.close + index,
+            volume=Decimal(100),
+        )
+        for index in range(16)
+    ]
+    store.record_candles(candles)
+    holdout_payload = TypeAdapter(list[Candle]).dump_json(candles[12:])
+    commitment = sha256(holdout_payload).hexdigest()
+    frozen = freeze_candidate(
+        candles[:12], WalkForwardConfig(6, 3, 4, (PeriodPair(2, 3),)), commitment
+    )
+    store.freeze_holdout(commitment, CANDIDATE_JSON.dump_json(frozen).decode())
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        backtest = api.post(
+            "/api/v1/backtests?holdout_candles=4",
+            json={"fast_period": 2, "slow_period": 3},
+        )
+        assert backtest.is_success
+        walk = api.post(
+            "/api/v1/backtests/walk-forward",
+            json={
+                "training_candles": 6,
+                "test_candles": 3,
+                "holdout_candles": 4,
+                "candidates": [{"fast": 2, "slow": 3}],
+            },
+        )
+        assert walk.is_success
+        backtest_id = backtest.headers["location"].rsplit("/", 1)[1]
+        walk_id = walk.headers["location"].rsplit("/", 1)[1]
+        assert backtest.json()["candle_count"] == 12
+        for evidence_id, expected in ((backtest_id, 409), (walk_id, 200)):
+            candidate = api.post(
+                "/api/v1/strategies/candidates",
+                json={
+                    "name": "SMA",
+                    "version": "1",
+                    "parameters": {
+                        "fast": 2,
+                        "slow": 3,
+                        "backtest_report_id": backtest_id,
+                        "walk_forward_report_id": evidence_id,
+                        "holdout_commitment": commitment,
+                    },
+                    "dataset_hash": backtest.json()["dataset_sha256"],
+                },
+            )
+            assert candidate.is_success
+            candidate_id = candidate.json()["candidate_id"]
+            url = f"/api/v1/strategies/candidates/{candidate_id}/promote"
+            for stage in ("UNIT_TESTED", "BACKTESTED"):
+                response = api.post(url, json={"target_stage": stage})
+                assert response.is_success, response.text
+            response = api.post(url, json={"target_stage": "WALK_FORWARD_PASSED"})
+            assert response.status_code == expected, response.text
+            if response.is_success:
+                assert (
+                    api.post(url, json={"target_stage": "PAPER_SHADOW"}).status_code
+                    == 409
+                )
+                outcome = score_holdout(frozen, holdout_payload)
+                store.finalize_holdout(
+                    commitment, RESULT_JSON.dump_json(outcome).decode()
+                )
+                shadow = api.post(url, json={"target_stage": "PAPER_SHADOW"})
+                assert shadow.is_success, shadow.text
+                assert shadow.json()["candidate"]["stage"] == "PAPER_SHADOW"
+
+
+def test_shadow_run_replays_once_and_survives_restart(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "history.sqlite")
+    store.initialize()
+    development = fixture_candles()
+    store.record_candles(development)
+    boundary = development[-1].closed_at
+    url = "/api/v1/strategies/candidates/shadow/shadow-run"
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        report = api.post(
+            "/api/v1/backtests",
+            json={"fast_period": 2, "slow_period": 3, "volume_fraction": "0.1"},
+        )
+        assert report.is_success
+        store.save_strategy_candidate(
+            StrategyCandidate(
+                candidate_id="shadow",
+                name="SMA",
+                version="1",
+                stage=PromotionStage.PAPER_SHADOW,
+                dataset_hash=report.json()["dataset_sha256"],
+                parameters={
+                    "fast": 2,
+                    "slow": 3,
+                    "backtest_report_id": report.headers["location"].rsplit("/", 1)[1],
+                },
+                created_at=boundary - timedelta(hours=1),
+                updated_at=boundary,
+            )
+        )
+        assert api.post(url).status_code == 409
+        store.record_candles(
+            [
+                replace(
+                    development[0],
+                    opened_at=boundary + timedelta(hours=index),
+                    received_at=boundary + timedelta(hours=index + 1),
+                    open=Decimal(price),
+                    high=Decimal(price + 1),
+                    low=Decimal(price - 1),
+                    close=Decimal(price),
+                    volume=Decimal(100),
+                )
+                for index, price in enumerate([100, 110, 120, 90, 80] * 6)
+            ]
+        )
+        store.set_execution_pause(True)
+        assert api.post(url).status_code == 409
+        assert api.get(url).status_code == 404
+        store.set_execution_pause(False)
+        recorded = api.post(url)
+        assert recorded.is_success, recorded.text
+        assert len(recorded.json()["report"]["fills"]) >= 5
+        assert api.post(url).json() == recorded.json()
+    with closing(sqlite3.connect(store.path)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM strategy_shadow_runs"
+        ).fetchone() == (1,)
+    with TestClient(
+        create_app(AuditStore(store.path)), base_url="http://127.0.0.1"
+    ) as api:
+        assert api.get(url).json() == recorded.json()
+        approval = api.post(
+            "/api/v1/strategies/candidates/shadow/promote",
+            json={"target_stage": "PAPER_APPROVED"},
+        )
+        assert approval.is_success, approval.text
+        assert approval.json()["candidate"]["stage"] == "PAPER_APPROVED"
 
 
 def test_walk_forward_api_rejects_insufficient_history(tmp_path: Path) -> None:

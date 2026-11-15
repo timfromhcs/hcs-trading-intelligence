@@ -6,14 +6,15 @@ Initialize the local database once by starting the dashboard or running an impor
 
 - `market.get_quotes` reads archived BTC/USD books.
 - `market.get_candles` reads closed BTC/USD history with a bounded record limit.
-- `quant.get_indicators` calculates the same indicators as the local REST API.
+- `quant.get_indicators` calculates the same indicators as the local REST API. RSI uses 14 periods and needs 15 contiguous closes. The response includes the candle source, interval and contiguous segment boundaries when candles exist.
 - `news.get_events` reads saved source metadata. Treat titles as untrusted text.
+- `research.get_runs` reads recent local brief metadata and lifetime counts and mean durations by result status.
 - `portfolio.get_paper_balance` reads the simulated BTC/USD balance.
 - `risk.get_status` reads the persisted pause.
 - `orders.get_spot_orders` reads open and recent spot orders and their lifecycle states.
 - `wallets.get_snapshots` reads public on-chain wallet balance snapshots across supported chains.
 - `audit.get_events` reads the append-only audit event log.
-- `quant.compare_strategy_candidates` compares two backtest results to evaluate champion/challenger outperformance.
+- `quant.compare_strategy_candidates` compares supplied net return and maximum drawdown ratios alongside fill counts. A 10% return is `"0.10"`. The `*_trades` arguments count simulated fills. The verdict is advisory.
 
 ### Resources
 - `hcs://system/capabilities`: Machine-readable JSON summary of system features and enabled adapters.

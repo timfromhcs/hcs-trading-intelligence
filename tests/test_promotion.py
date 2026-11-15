@@ -202,8 +202,7 @@ def test_paper_shadow_and_approved_gates() -> None:
         stage=PromotionStage.WALK_FORWARD_PASSED,
         dataset_hash="abc",
     )
-    # To PAPER_SHADOW passes unconditionally
-    assert evaluate_promotion_gate(cand, PromotionStage.PAPER_SHADOW).passed is True
+    assert evaluate_promotion_gate(cand, PromotionStage.PAPER_SHADOW).passed is False
 
     # PAPER_APPROVED requires >= 5 shadow fills
     shadow_cand = StrategyCandidate(

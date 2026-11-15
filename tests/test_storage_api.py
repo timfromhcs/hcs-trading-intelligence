@@ -16,6 +16,7 @@ from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
+from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.storage import AuditStore
 
 
@@ -40,7 +41,7 @@ def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("PRAGMA user_version").fetchone() == (13,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
 
 
 def test_v1_upgrade_retains_audit_and_deduplicates_quotes(tmp_path: Path) -> None:
@@ -319,6 +320,8 @@ def test_strategy_candidates_storage_and_api(tmp_path: Path) -> None:
         cand_data = create_resp.json()
         cand_id = cand_data["candidate_id"]
         assert cand_data["stage"] == "RESEARCH"
+        before = store.get_strategy_candidate(cand_id)
+        assert before is not None
 
         list_resp = client.get("/api/v1/strategies/candidates")
         assert list_resp.status_code == 200
@@ -332,7 +335,44 @@ def test_strategy_candidates_storage_and_api(tmp_path: Path) -> None:
         res = promote_resp.json()
         assert res["candidate"]["stage"] == "UNIT_TESTED"
         assert res["gate_result"]["passed"] is True
+        assert (
+            store.update_candidate_stage(
+                before, PromotionStage.UNIT_TESTED, datetime.now(UTC)
+            )
+            is None
+        )
 
         audit_events = store.list_audit_events(limit=5)
         kinds = [e.kind for e in audit_events]
         assert "strategy.promoted.unit_tested" in kinds
+        assert kinds.count("strategy.promoted.unit_tested") == 1
+
+
+@pytest.mark.parametrize(
+    ("stage", "target"),
+    [
+        (PromotionStage.PAPER_SHADOW, PromotionStage.PAPER_APPROVED),
+        (PromotionStage.PAPER_APPROVED, PromotionStage.LIVE_CANARY),
+        (PromotionStage.LIVE_CANARY, PromotionStage.LIVE_BOUNDED),
+    ],
+)
+def test_candidate_promotion_cannot_use_client_assertions(
+    tmp_path: Path, stage: PromotionStage, target: PromotionStage
+) -> None:
+    store = AuditStore(tmp_path / "app.sqlite")
+    store.initialize()
+    candidate = StrategyCandidate(
+        candidate_id="candidate",
+        name="SMA",
+        version="1",
+        stage=stage,
+        dataset_hash="dataset",
+    )
+    store.save_strategy_candidate(candidate)
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as client:
+        response = client.post(
+            "/api/v1/strategies/candidates/candidate/promote",
+            json={"target_stage": target, "shadow_fills": 5, "is_live_enabled": True},
+        )
+    assert response.status_code == 409
+    assert store.get_strategy_candidate(candidate.candidate_id) == candidate

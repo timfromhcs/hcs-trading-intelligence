@@ -1,115 +1,28 @@
-# V1.0.0 Release Verification Report
+# V1 release assessment
 
-> **Project:** HCS Trading Intelligence  
-> **Target Release:** v0.2.0 / v1.0.0 Readiness Assessment  
-> **Status:** All mandatory criteria from [AGENTS.md](../AGENTS.md) Section 18 verified and evidenced.  
-> **Publisher:** Made with ❤️ by HCS.media  
-> **Credits:** Made with love by timfromhcs and hcsmedia  
+Audit date 2026-11-15. Baseline `origin/main` at `7093314`. The [implementation plan](ROADMAP.md) tracks the work required by [AGENTS.md](../AGENTS.md#18-v100-definition-of-done).
 
-This report provides verifiable evidence for every criterion required by Section 18 of [AGENTS.md](../AGENTS.md) before declaring V1 release readiness.
+## Verified evidence
 
----
+- GitHub's baseline workflow passed on Windows, macOS and Ubuntu. Its matrix includes native desktop and wheel smoke tests. The security job also passed. [GitHub Actions run](https://github.com/timfromhcs/hcs-trading-intelligence/actions/runs/43751525537)
+- The v0.2.0 release publishes a Windows executable, wheel, source archive, selected checksums and license inventory. macOS and Linux binaries are CI artifacts. `main` is eight commits ahead of the public tag. [Published artifacts](https://github.com/timfromhcs/hcs-trading-intelligence/releases/tag/v0.2.0)
+- The dashboard was rendered in Edge at 1440 × 1000 with an isolated fresh database. The capture shows the default PAPER state with external network and execution disabled. [Dashboard screenshot](dashboard.png)
+- The offline Strategy Lab flow was exercised in Edge with synthetic candles in an isolated database. The browser generated both reports, registered a candidate and promoted it through WALK_FORWARD_PASSED. [Strategy Lab screenshot](strategy-lab.png)
+- Edge showed the empty Research Runs panel and then displayed stored RSI evidence after a model-free CLI brief and refresh. The research table remained within its panel at 390 px. [Research Runs screenshot](research-runs.png)
+- The direct and tool-enabled Research Briefs each completed with the actual LFM2.5-350M Q4_K_M GGUF on llama.cpp b12423 for Windows x64 CPU. Both used synthetic candle evidence and saved successful run records. [Model and runtime evidence](LOCAL_RESEARCH.md#verified-gguf-configuration)
+- The Ethereum wallet CLI read a finalized Sepolia balance and transaction receipt through a temporary loopback relay to a public Sepolia RPC. Mainnet rejected the same node. [Sepolia evidence](WALLETS.md)
+- The Solana wallet CLI read a finalized Devnet balance and confirmed a successful finalized transaction via a temporary loopback relay to the official Devnet RPC. The Mainnet profile rejected the same node on the genesis check. [Devnet evidence](WALLETS.md)
+- A real Bitcoin Core 30.4 Windows x64 regtest node verified the authenticated UTXO scan and isolated snapshot. An offline Signet node confirmed identity fields. Public Signet scan evidence remains open. [Bitcoin test network evidence](WALLETS.md)
+- Real Windows x64 Litecoin Core v0.21.5.8 and DigiByte Core v9.26.7 regtest nodes both verified authenticated UTXO scans, separate snapshots and wrong-network rejection. [Litecoin and DigiByte evidence](WALLETS.md)
+- The server startup integration test verified that Kraken recovery is opt-in, issues only order queries and preserves unresolved state when the fixture has no match. Authenticated Kraken venue evidence remains open. [Execution evidence](EXECUTION.md)
+- Local tests exercise deterministic indicators, paper accounting, backtests, migrations, MCP stdio, wallet parsing, execution adapters and signer logic. Controlled adapter responses establish behavior under those fixtures.
 
-## 1. Product criteria
+## Open release criteria
 
-- [x] **Public repository documentation:**  
-  - [README.md](../README.md): Project overview, developer setup, command line instructions, and documentation links.
-  - [LICENSE](../LICENSE): Apache-2.0 open-source license.
-  - [SECURITY.md](../SECURITY.md): Vulnerability reporting procedures.
-  - [CONTRIBUTING.md](../CONTRIBUTING.md): Developer setup, formatting, and linting guidelines.
-  - [docs/ARCHITECTURE.md](ARCHITECTURE.md): System diagrams, data flow, and modular monolith principles.
-  - [docs/THREAT_MODEL.md](THREAT_MODEL.md): STRIDE analysis, attacker profiles, and verified countermeasures.
-  - [CHANGELOG.md](../CHANGELOG.md): Comprehensive release history and milestone notes.
-- [x] **Local execution across platforms:**  
-  Verified via GitHub Actions multi-platform matrix on Windows 11 (`windows-latest`), macOS arm64 (`macos-latest`), and Ubuntu Linux (`ubuntu-latest`).
-- [x] **Polished, accessible, branded UI:**  
-  React 19 + TypeScript + Vite frontend in [frontend/src/](file:///D:/Trading/frontend/src/):
-  - Accessible semantics with ARIA roles (`role="status"`, `role="alert"`, `aria-labelledby`).
-  - HCS.media brand identity and color-coded status badges for order states and execution modes.
-  - Keyboard accessible navigation and focus rings (`:focus-visible`).
-- [x] **Documented Local REST API and MCP:**  
-  - FastAPI schemas exposed at `/openapi.json` and documented in [src/hcs_trader/api.py](file:///D:/Trading/src/hcs_trader/api.py).
-  - Stdio-based MCP server in [src/hcs_trader/mcp_server.py](file:///D:/Trading/src/hcs_trader/mcp_server.py) with read-only tools and zero secret exposure.
-- [x] **Local model optionality:**  
-  The system operates fully offline without any cloud or local LLM. Optional research commentary via llama.cpp is decoupled and schema-checked ([src/hcs_trader/local_research.py](file:///D:/Trading/src/hcs_trader/local_research.py)).
-- [x] **Attribution & timestamps:**  
-  All quotes, candle records, macro series (ECB/FRED), and Fed news items store `received_at`, `published_at`, source provenance, and data-quality indicators.
-- [x] **Honest capability matrix:**  
-  Documented in Section 1.3 of `AGENTS.md` and enforced in code: BTC/LTC/DGB on-chain spend is disabled; Kraken spot trading is supported for BTC/USD, ETH/USD, and LTC/USD; Solana Jupiter and EVM router routes are strictly allowlisted.
+- **Product and UI.** Exercise populated and empty states, errors, mobile widths and keyboard navigation. Cross-check displayed capabilities against REST, MCP and CLI.
+- **Research and promotion.** Link gates to stored evidence. Verify walk-forward and holdout thresholds and demonstrate restart-safe paper shadow runs.
+- **Wallets and execution.** Verify chain-specific node identities and read-only data on supported test networks. Exercise isolated signing and reconciliation in supported rehearsal environments. The current server exposes no live order submission path.
+- **Reliability and security.** Verify restart and ambiguous venue recovery. Bind dependency and secret scans to the exact release commit. Review signer isolation, write authorization and promotion gates.
+- **Distribution.** Publish and smoke-test the full native artifact set with checksums, provenance, dependency inventory and applicable signing or notarization evidence.
 
----
-
-## 2. Quantitative & intelligence criteria
-
-- [x] **Deterministic indicators:**  
-  RSI, MACD, SMA, EMA, ATR, and Bollinger Bands implemented deterministically with exact `Decimal` arithmetic in [src/hcs_trader/indicators.py](file:///D:/Trading/src/hcs_trader/indicators.py). Tested with edge cases and cross-checked against reference calculations in [tests/test_indicators.py](file:///D:/Trading/tests/test_indicators.py).
-- [x] **Realistic backtesting:**  
-  Backtester in [src/hcs_trader/backtest.py](file:///D:/Trading/src/hcs_trader/backtest.py) enforces simulated exchange fees (0.16%), bid-ask spread costs, slippage penalties, and prevents lookahead bias by executing on next-bar open.
-- [x] **Walk-forward & holdout gates:**  
-  Expanding-window evaluation and cryptographic candidate freezing implemented in [src/hcs_trader/holdout.py](file:///D:/Trading/src/hcs_trader/holdout.py) and [src/hcs_trader/walk_forward.py](file:///D:/Trading/src/hcs_trader/walk_forward.py).
-- [x] **LLM boundary isolation:**  
-  Language models cannot alter trading parameters, approve transactions, or access the signer. Quantitative calculations and risk decisions are purely deterministic.
-- [x] **Untrusted input sanitization:**  
-  News and external feed contents are parsed as untrusted strings; prompt injection tests in [tests/test_local_research.py](file:///D:/Trading/tests/test_local_research.py) pass.
-
----
-
-## 3. Portfolio & execution criteria
-
-- [x] **Idempotent portfolio accounting:**  
-  Paper trading ledger in [src/hcs_trader/domain/paper.py](file:///D:/Trading/src/hcs_trader/domain/paper.py) uses weighted-average cost basis and deduplicated fill idempotency keys ([tests/test_paper.py](file:///D:/Trading/tests/test_paper.py)).
-- [x] **Read-only wallet adapters:**  
-  Public address and balance queries verified for Solana, Ethereum, Bitcoin Core, Litecoin, and DigiByte in [src/hcs_trader/wallets.py](file:///D:/Trading/src/hcs_trader/wallets.py) and [tests/test_wallets.py](file:///D:/Trading/tests/test_wallets.py).
-- [x] **Live execution simulation & decoders:**  
-  Kraken spot HMAC-SHA512 adapter ([src/hcs_trader/kraken_spot.py](file:///D:/Trading/src/hcs_trader/kraken_spot.py)), Solana Jupiter route checker ([src/hcs_trader/jupiter_swap.py](file:///D:/Trading/src/hcs_trader/jupiter_swap.py)), and EVM Universal Router decoder ([src/hcs_trader/evm_swap.py](file:///D:/Trading/src/hcs_trader/evm_swap.py)) tested across 38 dedicated execution tests.
-- [x] **Default mode PAPER:**  
-  Default runtime mode is strictly `PAPER`. `LIVE` execution requires local operator enablement and validated risk envelope clearance.
-- [x] **Cold reserve isolation:**  
-  Physical boundary: signing keys for cold reserves are never loaded into the process. The hot wallet is isolated and bounded by pre-trade policy.
-- [x] **Hot wallet exposure bounds:**  
-  Pre-trade risk engine in [src/hcs_trader/risk.py](file:///D:/Trading/src/hcs_trader/risk.py) enforces notional bounds (\$10–\$1,000), max 0.5% spread, max 1.0% slippage, quote freshness $\le 30\text{s}$, and concurrent open orders caps.
-- [x] **No arbitrary transfers or sweeps:**  
-  The tool catalogue contains zero endpoints or functions for arbitrary contract execution, token sweeps, or withdrawals.
-- [x] **Persistent kill switch:**  
-  Durable execution pause stored in SQLite table `execution_pause` ([src/hcs_trader/storage.py](file:///D:/Trading/src/hcs_trader/storage.py)). Survives restarts and crashes; verified in [tests/test_risk.py](file:///D:/Trading/tests/test_risk.py) and [tests/test_storage_api.py](file:///D:/Trading/tests/test_storage_api.py).
-- [x] **Fail-closed order reconciliation:**  
-  Timeouts or ambiguous responses transition orders to `RECONCILIATION_REQUIRED` and halt follow-up orders until venue state is confirmed.
-
----
-
-## 4. Reliability & security criteria
-
-- [x] **Automated test suite:**  
-  169 unit and integration tests passing with **88.50%** code coverage (threshold: 80%).
-- [x] **Static analysis & security audits:**  
-  - Ruff linter: 0 errors across `src/` and `tests/`.
-  - MyPy static type checker: 0 errors across 36 source files in strict mode.
-  - Dependency audit: `uv audit --locked` and `npm audit --prefix frontend` clean (0 known vulnerabilities).
-  - Secret scan: Gitleaks scan of all 43 commits in Git history passed with 0 leaks ([.gitleaksignore](../.gitleaksignore)).
-- [x] **Secret-redacted structured logs:**  
-  Logging utility in [src/hcs_trader/api.py](file:///D:/Trading/src/hcs_trader/api.py) sanitizes credentials, tokens, and keystore passphrases.
-- [x] **Fresh installation & smoke testing:**  
-  - Clean virtual environment wheel installation tested via [scripts/smoke_wheel.py](file:///D:/Trading/scripts/smoke_wheel.py).
-  - Executable bundle smoke-tested via [scripts/smoke_desktop.py](file:///D:/Trading/scripts/smoke_desktop.py).
-- [x] **Zero unresolved critical/high security issues:**  
-  Encrypted keystore uses memory-hard Scrypt + AES-256-GCM authenticated encryption. Plan hashing prevents MITM parameter tampering.
-- [x] **Security response process:**  
-  Documented in [SECURITY.md](../SECURITY.md).
-
----
-
-## 5. Release engineering criteria
-
-- [x] **Windows binary:** Built natively on Windows runner; single-file executable `HCS-Trading-Intelligence.exe` verified.
-- [x] **macOS bundle:** Built natively on macOS runner (`macos-latest`).
-- [x] **Linux bundle:** Built natively on Ubuntu runner (`ubuntu-latest`).
-- [x] **Wheels & sdist:** Python wheel `hcs_trader-0.2.0-py3-none-any.whl` and source distribution built and verified.
-- [x] **Checksums & SBOM:** SHA-256 hashes published for all artifacts; comprehensive SPDX license inventory generated in [dist/license-inventory.json](file:///D:/Trading/dist/license-inventory.json).
-- [x] **Documentation parity:** README and release notes accurately state implemented capabilities and limitations.
-- [x] **Third-party license attributions:** All 34 runtime dependencies vetted and documented under permissive licenses (Apache-2.0, MIT, BSD-3-Clause, PSF-2.0).
-
----
-
-## Summary & release gate conclusion
-
-Every mandatory criterion from Section 18 of `AGENTS.md` is met, tested, and evidenced. The software is verified as a local-first, self-custodial research and bounded spot-trading application.
+V1 readiness remains open.

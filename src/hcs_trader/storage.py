@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -27,10 +27,14 @@ from hcs_trader.domain.paper import (
     book_fill,
 )
 from hcs_trader.domain.wallet import WalletSnapshot
+from hcs_trader.local_research import ResearchHistory, ResearchRun, ResearchRunStats
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
+from hcs_trader.risk import RiskRejected
 
-_SCHEMA_VERSION = 13
+_SCHEMA_VERSION = 17
 _PAPER_FILL = TypeAdapter(PaperFill)
+_RESEARCH_RUN = TypeAdapter(ResearchRun)
+_RESEARCH_STATS = TypeAdapter(ResearchRunStats)
 WALLET_SNAPSHOT = TypeAdapter(WalletSnapshot)
 
 
@@ -271,6 +275,140 @@ class AuditStore:
                     "ON strategy_candidates (stage, updated_at DESC)"
                 )
                 connection.execute("PRAGMA user_version = 13")
+            if version < 14:
+                connection.execute(
+                    """
+                    CREATE TABLE strategy_shadow_runs (
+                        candidate_id TEXT NOT NULL REFERENCES strategy_candidates,
+                        run_id TEXT NOT NULL,
+                        evaluated_until TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        PRIMARY KEY (candidate_id, run_id)
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 14")
+            if version < 15:
+                connection.execute(
+                    """
+                    CREATE TABLE research_runs (
+                        run_id TEXT PRIMARY KEY NOT NULL,
+                        started_at TEXT NOT NULL,
+                        duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                        status TEXT NOT NULL,
+                        payload TEXT NOT NULL
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX research_runs_recent "
+                    "ON research_runs(started_at DESC, run_id DESC)"
+                )
+                connection.execute("PRAGMA user_version = 15")
+            if version < 16:
+                connection.execute(
+                    """
+                    CREATE TABLE research_schedule (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        next_run_at TEXT NOT NULL,
+                        consecutive_failures INTEGER NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute("PRAGMA user_version = 16")
+            if version < 17:
+                connection.execute(
+                    """
+                    CREATE TABLE spot_canary_approval (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        candidate_id TEXT NOT NULL REFERENCES strategy_candidates,
+                        candidate_version TEXT NOT NULL,
+                        dataset_hash TEXT NOT NULL,
+                        key_fingerprint TEXT NOT NULL,
+                        max_notional TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute("PRAGMA user_version = 17")
+                connection.execute(
+                    "ALTER TABLE spot_orders ADD COLUMN canary_candidate_id TEXT "
+                    "REFERENCES strategy_candidates(candidate_id)"
+                )
+
+    @contextmanager
+    def research_worker_lock(self) -> Iterator[None]:
+        # A separate SQLite file keeps the worker lock independent of data writes.
+        path = self.path.resolve()
+        lock_path = path.with_name(path.name + ".research-worker")
+        with closing(sqlite3.connect(lock_path, timeout=0)) as lock:
+            try:
+                lock.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode == sqlite3.SQLITE_BUSY:
+                    raise ValueError(
+                        "A research schedule worker is already running"
+                    ) from error
+                raise
+            yield
+
+    def research_schedule(self) -> tuple[datetime | None, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT next_run_at, consecutive_failures "
+                "FROM research_schedule WHERE id = 1"
+            ).fetchone()
+        return (datetime.fromisoformat(row[0]), int(row[1])) if row else (None, 0)
+
+    def record_research_run(
+        self,
+        run: ResearchRun,
+        *,
+        schedule: tuple[datetime, int] | None = None,
+    ) -> None:
+        with self._connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO research_runs VALUES (?, ?, ?, ?, ?)",
+                (
+                    run.run_id,
+                    run.started_at.isoformat(timespec="microseconds"),
+                    run.duration_ms,
+                    run.status,
+                    _RESEARCH_RUN.dump_json(run).decode("utf-8"),
+                ),
+            )
+            if schedule is not None:
+                next_run_at, failures = schedule
+                connection.execute(
+                    "INSERT INTO research_schedule VALUES (1, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET next_run_at = excluded.next_run_at, "
+                    "consecutive_failures = excluded.consecutive_failures",
+                    (next_run_at.isoformat(), failures),
+                )
+
+    def research_history(self, limit: int = 25) -> ResearchHistory:
+        if not 1 <= limit <= 100:
+            raise ValueError("Research history limit must be between 1 and 100")
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN")
+            rows = connection.execute(
+                "SELECT payload FROM research_runs "
+                "ORDER BY started_at DESC, run_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            totals = connection.execute(
+                "SELECT status, COUNT(*), AVG(duration_ms) FROM research_runs "
+                "GROUP BY status ORDER BY status"
+            ).fetchall()
+        return ResearchHistory(
+            runs=[_RESEARCH_RUN.validate_json(payload) for (payload,) in rows],
+            statistics=[
+                _RESEARCH_STATS.validate_python(
+                    {"status": status, "count": count, "mean_duration_ms": duration}
+                )
+                for status, count, duration in totals
+            ],
+        )
 
     def save_wallet_snapshot(self, snapshot: WalletSnapshot) -> None:
         with self._connect() as connection, connection:
@@ -440,6 +578,15 @@ class AuditStore:
             if row is None:
                 raise ValueError("No candidate is frozen for this holdout")
             return str(row[0])
+
+    def scored_holdout(self, commitment: str) -> tuple[str, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT candidate, result FROM research_holdouts "
+                "WHERE commitment = ? AND result IS NOT NULL",
+                (commitment,),
+            ).fetchone()
+        return (str(row[0]), str(row[1])) if row is not None else None
 
     def record_backtest(self, report_id: str, payload: str) -> None:
         with self._connect() as connection, connection:
@@ -708,6 +855,214 @@ class AuditStore:
             for source, bid, ask, bid_at, ask_at, received_at in rows
         ]
 
+    def authorize_spot_canary(
+        self,
+        candidate: StrategyCandidate,
+        key_fingerprint: str,
+        max_notional: Decimal,
+        at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        if (
+            not max_notional.is_finite()
+            or not 10 <= max_notional <= 1000
+            or not at < expires_at <= at + timedelta(hours=24)
+        ):
+            raise ValueError("Canary authorization bounds are invalid")
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT 1 FROM strategy_candidates "
+                "WHERE candidate_id = ? AND stage IN ('PAPER_APPROVED', 'LIVE_CANARY') "
+                "AND updated_at = ? AND version = ? AND dataset_hash = ?",
+                (
+                    candidate.candidate_id,
+                    candidate.updated_at.isoformat(),
+                    candidate.version,
+                    candidate.dataset_hash,
+                ),
+            ).fetchone()
+            if current is None:
+                raise RiskRejected("A paper-approved strategy candidate is required")
+            connection.execute(
+                "INSERT INTO spot_canary_approval VALUES (1, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET candidate_id = excluded.candidate_id, "
+                "candidate_version = excluded.candidate_version, "
+                "dataset_hash = excluded.dataset_hash, "
+                "key_fingerprint = excluded.key_fingerprint, "
+                "max_notional = excluded.max_notional, "
+                "expires_at = excluded.expires_at",
+                (
+                    candidate.candidate_id,
+                    candidate.version,
+                    candidate.dataset_hash,
+                    key_fingerprint,
+                    str(max_notional),
+                    expires_at.isoformat(),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO audit_events (event_id, recorded_at, kind) "
+                "VALUES (?, ?, ?)",
+                (uuid4().hex, at.isoformat(), "spot.canary.authorized"),
+            )
+
+    def revoke_spot_canary(self) -> None:
+        with self._connect() as connection, connection:
+            deleted = connection.execute(
+                "DELETE FROM spot_canary_approval WHERE id = 1"
+            )
+            if deleted.rowcount:
+                connection.execute(
+                    "INSERT INTO audit_events (event_id, recorded_at, kind) "
+                    "VALUES (?, ?, ?)",
+                    (uuid4().hex, datetime.now(UTC).isoformat(), "spot.canary.revoked"),
+                )
+
+    @staticmethod
+    def _canary_approval(
+        connection: sqlite3.Connection,
+        candidate_id: str,
+        at: datetime,
+    ) -> tuple[str, Decimal, str, str] | None:
+        row = connection.execute(
+            """
+            SELECT a.key_fingerprint, a.max_notional, c.version, c.stage
+            FROM spot_canary_approval AS a
+            JOIN strategy_candidates AS c ON c.candidate_id = a.candidate_id
+            WHERE a.id = 1 AND c.candidate_id = ? AND a.expires_at > ?
+            AND c.version = a.candidate_version AND c.dataset_hash = a.dataset_hash
+            """,
+            (candidate_id, at.isoformat()),
+        ).fetchone()
+        return (str(row[0]), Decimal(row[1]), str(row[2]), str(row[3])) if row else None
+
+    def has_spot_canary_approval(self, candidate_id: str, at: datetime) -> bool:
+        with self._connect() as connection:
+            return self._canary_approval(connection, candidate_id, at) is not None
+
+    def reserve_spot_submission(
+        self,
+        order: SpotOrder,
+        max_open_orders: int,
+        *,
+        candidate_id: str,
+        strategy_version: str,
+        key_fingerprint: str,
+    ) -> None:
+        if order.state != OrderState.SUBMITTED:
+            raise ValueError("Submission reservation requires a submitted order")
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._execution_pause(connection).paused:
+                raise RiskRejected("Execution is paused")
+            approval = self._canary_approval(
+                connection, candidate_id, datetime.now(UTC)
+            )
+            if approval is None or (
+                approval[0] != key_fingerprint
+                or approval[2] != strategy_version
+                or approval[3] != PromotionStage.LIVE_CANARY
+                or order.limit_price is None
+                or order.limit_price * order.quantity > approval[1]
+            ):
+                raise RiskRejected(
+                    "No matching active canary authorization for this order"
+                )
+            if connection.execute(
+                "SELECT 1 FROM spot_orders WHERE client_order_id = ?",
+                (order.client_order_id,),
+            ).fetchone():
+                raise RiskRejected("Client order ID is already recorded")
+            (unresolved, active) = connection.execute(
+                """
+                SELECT COUNT(CASE WHEN state IN (
+                    'SUBMITTED', 'RECONCILIATION_REQUIRED'
+                ) THEN 1 END), COUNT(*)
+                FROM spot_orders
+                WHERE venue = ? AND state IN (
+                    'SUBMITTED', 'RECONCILIATION_REQUIRED', 'ACKNOWLEDGED',
+                    'PARTIALLY_FILLED'
+                )
+                """,
+                (order.venue,),
+            ).fetchone()
+            if unresolved:
+                raise RiskRejected("Venue has an unresolved submission")
+            if active >= max_open_orders:
+                raise RiskRejected("Venue has reached its open-order limit")
+            connection.execute(
+                """
+                INSERT INTO spot_orders (
+                    client_order_id, order_id, venue, market, side, order_type,
+                    quantity, limit_price, state, risk_decision_id, created_at,
+                    updated_at, canary_candidate_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order.client_order_id,
+                    order.order_id,
+                    order.venue,
+                    order.market,
+                    order.side.value,
+                    order.order_type.value,
+                    str(order.quantity),
+                    str(order.limit_price) if order.limit_price is not None else None,
+                    order.state.value,
+                    order.risk_decision_id,
+                    order.created_at.isoformat(),
+                    order.updated_at.isoformat(),
+                    candidate_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO audit_events (event_id, recorded_at, kind) "
+                "VALUES (?, ?, ?)",
+                (uuid4().hex, order.updated_at.isoformat(), "spot.submission.reserved"),
+            )
+
+    def apply_spot_observation(self, before: SpotOrder, after: SpotOrder) -> bool:
+        if before == after:
+            return True
+        before.state.advance(after.state)
+        with self._connect() as connection, connection:
+            result = connection.execute(
+                """
+                UPDATE spot_orders
+                SET state = ?, updated_at = ?, venue_order_id = ?,
+                    filled_quantity = ?, average_price = ?, fee = ?
+                WHERE client_order_id = ? AND order_id = ?
+                    AND state = ? AND updated_at = ?
+                """,
+                (
+                    after.state.value,
+                    after.updated_at.isoformat(),
+                    after.venue_order_id,
+                    str(after.filled_quantity)
+                    if after.filled_quantity is not None
+                    else None,
+                    str(after.average_price)
+                    if after.average_price is not None
+                    else None,
+                    str(after.fee) if after.fee is not None else None,
+                    before.client_order_id,
+                    before.order_id,
+                    before.state.value,
+                    before.updated_at.isoformat(),
+                ),
+            )
+            if result.rowcount:
+                connection.execute(
+                    "INSERT INTO audit_events (event_id, recorded_at, kind) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        uuid4().hex,
+                        after.updated_at.isoformat(),
+                        f"spot.order.{after.state.value.lower()}",
+                    ),
+                )
+            return result.rowcount == 1
+
     def save_spot_order(self, order: SpotOrder) -> None:
         with self._connect() as connection, connection:
             connection.execute(
@@ -941,27 +1296,100 @@ class AuditStore:
                 for r in rows
             ]
 
-    def update_candidate_stage(
-        self, candidate_id: str, new_stage: PromotionStage
-    ) -> StrategyCandidate:
+    def record_shadow_run(
+        self,
+        candidate: StrategyCandidate,
+        run_id: str,
+        evaluated_until: datetime,
+        payload: str,
+    ) -> bool:
         with self._connect() as connection, connection:
-            now = datetime.now(UTC).isoformat()
+            connection.execute("BEGIN IMMEDIATE")
+            if self._execution_pause(connection).paused:
+                raise PaperRejected("Execution is paused")
+            row = connection.execute(
+                "SELECT stage, updated_at FROM strategy_candidates "
+                "WHERE candidate_id = ?",
+                (candidate.candidate_id,),
+            ).fetchone()
+            if row != (
+                PromotionStage.PAPER_SHADOW.value,
+                candidate.updated_at.isoformat(),
+            ):
+                return False
+            inserted = connection.execute(
+                "INSERT INTO strategy_shadow_runs VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (candidate_id, run_id) DO NOTHING",
+                (candidate.candidate_id, run_id, evaluated_until.isoformat(), payload),
+            )
+            if inserted.rowcount:
+                connection.execute(
+                    "INSERT INTO audit_events (event_id, recorded_at, kind) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        uuid4().hex,
+                        datetime.now(UTC).isoformat(),
+                        "strategy.shadow.recorded",
+                    ),
+                )
+            return True
+
+    def latest_shadow_run(self, candidate_id: str) -> tuple[str, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT run_id, payload FROM strategy_shadow_runs "
+                "WHERE candidate_id = ? "
+                "ORDER BY evaluated_until DESC, run_id DESC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+        return (str(row[0]), str(row[1])) if row is not None else None
+
+    def update_candidate_stage(
+        self,
+        candidate: StrategyCandidate,
+        new_stage: PromotionStage,
+        evaluated_at: datetime,
+        *,
+        shadow_run_id: str | None = None,
+    ) -> StrategyCandidate | None:
+        with self._connect() as connection, connection:
+            if new_stage is PromotionStage.LIVE_CANARY:
+                connection.execute("BEGIN IMMEDIATE")
+                if (
+                    self._canary_approval(
+                        connection, candidate.candidate_id, datetime.now(UTC)
+                    )
+                    is None
+                ):
+                    return None
+            now = evaluated_at.isoformat()
             updated = connection.execute(
                 "UPDATE strategy_candidates SET stage = ?, updated_at = ? "
-                "WHERE candidate_id = ?",
-                (new_stage.value, now, candidate_id),
+                "WHERE candidate_id = ? AND stage = ? AND updated_at = ? "
+                "AND (? IS NULL OR ? = ("
+                "SELECT run_id FROM strategy_shadow_runs "
+                "WHERE candidate_id = strategy_candidates.candidate_id "
+                "ORDER BY evaluated_until DESC, run_id DESC LIMIT 1))",
+                (
+                    new_stage.value,
+                    now,
+                    candidate.candidate_id,
+                    candidate.stage.value,
+                    candidate.updated_at.isoformat(),
+                    shadow_run_id,
+                    shadow_run_id,
+                ),
             )
             if updated.rowcount == 0:
-                raise ValueError(f"Strategy candidate '{candidate_id}' not found")
+                return None
             connection.execute(
                 "INSERT INTO audit_events (event_id, recorded_at, kind) "
                 "VALUES (?, ?, ?)",
                 (uuid4().hex, now, f"strategy.promoted.{new_stage.value.lower()}"),
             )
-        candidate = self.get_strategy_candidate(candidate_id)
-        if candidate is None:
-            raise RuntimeError("Failed to reload updated candidate")
-        return candidate
+        return candidate.model_copy(
+            update={"stage": new_stage, "updated_at": evaluated_at}
+        )
 
     def backup(self, target: Path) -> None:
         """Write a snapshot to a new destination using SQLite's online backup API."""

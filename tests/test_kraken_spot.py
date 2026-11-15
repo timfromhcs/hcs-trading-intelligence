@@ -1,19 +1,30 @@
 """Tests for KrakenSpotAdapter, order lifecycle transitions and SQLite persistence."""
 
+import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx2
 import pytest
+import uvicorn
+from fastapi.testclient import TestClient
 
+from hcs_trader import __main__ as launcher
+from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
+from hcs_trader.domain.market_data import Quote
 from hcs_trader.kraken_spot import KrakenSpotAdapter
+from hcs_trader.promotion import PromotionStage, StrategyCandidate
+from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
+from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import AuditStore
 
 # Synthetic test credentials
@@ -185,6 +196,391 @@ async def test_reconcile_order_filled() -> None:
     assert filled.filled_quantity == Decimal("0.01000000")
     assert filled.average_price == Decimal("50000.00")
     assert filled.fee == Decimal("1.25")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("venue_outcome", ["closed", "missing", "duplicate", "partial"])
+async def test_kraken_reconciliation_after_reopen_never_resubmits(
+    tmp_path: Path, venue_outcome: str
+) -> None:
+    path = tmp_path / "orders.db"
+    store = AuditStore(path)
+    store.initialize()
+    order = _sample_order()
+    calls: list[str] = []
+    venue_id = "OXXXXX-XXXXX-XXXXX"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        endpoint = request.url.path.rsplit("/", 1)[1]
+        calls.append(endpoint)
+        if endpoint == "AddOrder":
+            assert len(calls) == 1
+            raise httpx2.ReadTimeout("Venue reply lost", request=request)
+        fields = urllib.parse.parse_qs(request.content.decode())
+        assert fields["cl_ord_id"] == [order.client_order_id]
+        collection = "open" if endpoint == "OpenOrders" else "closed"
+        entries = {}
+        if venue_outcome in {"closed", "duplicate"} and collection == "closed":
+            entries[venue_id] = {
+                "cl_ord_id": order.client_order_id,
+                "status": "closed",
+                "vol_exec": "0.01",
+                "cost": "500",
+                "fee": "1.25",
+            }
+        if venue_outcome in {"duplicate", "partial"} and collection == "open":
+            entries["OOTHER-OTHER-OTHER"] = {
+                "cl_ord_id": order.client_order_id,
+                "status": "open",
+                "vol_exec": "0.005",
+                "cost": "250",
+                "fee": "0.625",
+            }
+        return httpx2.Response(200, json={"error": [], "result": {collection: entries}})
+
+    transport = httpx2.MockTransport(handler)
+    async with httpx2.AsyncClient(transport=transport) as client:
+        pending = await KrakenSpotAdapter(
+            _API_KEY, _API_SECRET, client
+        ).submit_spot_order(order, at=datetime.now(UTC))
+        assert pending.state is OrderState.RECONCILIATION_REQUIRED
+        store.save_spot_order(pending)
+    restarted = AuditStore(path)
+    restored = restarted.get_spot_order(order.client_order_id)
+    assert restored is not None and restored == pending
+    async with httpx2.AsyncClient(transport=transport) as client:
+        reconciled = await KrakenSpotAdapter(
+            _API_KEY, _API_SECRET, client
+        ).reconcile_order(restored, at=datetime.now(UTC))
+    assert calls == ["AddOrder", "OpenOrders", "ClosedOrders"]
+    assert (
+        reconciled.state
+        is {
+            "closed": OrderState.FILLED,
+            "partial": OrderState.PARTIALLY_FILLED,
+            "missing": OrderState.RECONCILIATION_REQUIRED,
+            "duplicate": OrderState.RECONCILIATION_REQUIRED,
+        }[venue_outcome]
+    )
+    assert reconciled.venue_order_id == {
+        "closed": venue_id,
+        "partial": "OOTHER-OTHER-OTHER",
+    }.get(venue_outcome)
+    restarted.save_spot_order(reconciled)
+    assert AuditStore(path).get_spot_order(order.client_order_id) == reconciled
+
+
+@pytest.mark.anyio
+async def test_durable_submission_recovers_after_cancellation(tmp_path: Path) -> None:
+    path = tmp_path / "execution.db"
+    store = AuditStore(path)
+    store.initialize()
+    order = _sample_order()
+    now = datetime.now(UTC)
+    quote = Quote(BTC_USD, SOURCE, Decimal("49999"), Decimal("50000"), now, now, now)
+    risk = RiskEngine(RiskPolicy(live_mode_enabled=True))
+    candidate = StrategyCandidate(
+        candidate_id="canary",
+        name="SMA",
+        version="v1.0.0",
+        dataset_hash="snapshot",
+        stage=PromotionStage.PAPER_APPROVED,
+    )
+    store.save_strategy_candidate(candidate)
+    store.authorize_spot_canary(
+        candidate,
+        hashlib.sha256(_API_KEY.encode()).hexdigest(),
+        Decimal("500"),
+        now,
+        now + timedelta(hours=1),
+    )
+    assert store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
+    strategy = {
+        "candidate_id": candidate.candidate_id,
+        "strategy_version": candidate.version,
+    }
+    calls: list[str] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        endpoint = request.url.path.rsplit("/", 1)[1]
+        calls.append(endpoint)
+        before = AuditStore(path).get_spot_order(order.client_order_id)
+        assert before is not None and before.state == OrderState.SUBMITTED
+        assert before.risk_decision_id != order.risk_decision_id
+        if endpoint == "AddOrder":
+            raise asyncio.CancelledError
+        collection = "open" if endpoint == "OpenOrders" else "closed"
+        result = {}
+        if collection == "open":
+            result["OXXXXX-XXXXX-XXXXX"] = {
+                "cl_ord_id": order.client_order_id,
+                "status": "open",
+                "vol_exec": "0",
+                "cost": "0",
+                "fee": "0",
+            }
+        return httpx2.Response(200, json={"error": [], "result": {collection: result}})
+
+    transport = httpx2.MockTransport(handler)
+    async with httpx2.AsyncClient(transport=transport) as client:
+        spot = KrakenSpotExecution(
+            store, KrakenSpotAdapter(_API_KEY, _API_SECRET, client), risk
+        )
+        other_key = KrakenSpotExecution(
+            store, KrakenSpotAdapter("different-key", _API_SECRET, client), risk
+        )
+        with pytest.raises(RiskRejected, match="authorization"):
+            await other_key.submit(order, quote, **strategy)
+        with pytest.raises(RiskRejected, match="authorization"):
+            await spot.submit(_sample_order(quantity="0.012"), quote, **strategy)
+        assert calls == []
+        store.set_execution_pause(True)
+        with pytest.raises(RiskRejected, match="paused"):
+            await spot.submit(order, quote, **strategy)
+        assert not calls and store.get_spot_order(order.client_order_id) is None
+        store.set_execution_pause(False)
+        with pytest.raises(asyncio.CancelledError):
+            await spot.submit(order, quote, **strategy)
+    reopened = AuditStore(path)
+    pending = reopened.get_spot_order(order.client_order_id)
+    assert pending is not None and pending.state == OrderState.SUBMITTED
+    async with httpx2.AsyncClient(transport=transport) as client:
+        recovered = KrakenSpotExecution(
+            reopened, KrakenSpotAdapter(_API_KEY, _API_SECRET, client), risk
+        )
+        with pytest.raises(RiskRejected, match="already recorded"):
+            await recovered.submit(order, quote, **strategy)
+        with pytest.raises(RiskRejected, match="unresolved"):
+            await recovered.submit(
+                _sample_order(client_id="other-id"), quote, **strategy
+            )
+        (observed,) = await recovered.reconcile_startup()
+    assert observed.state == OrderState.ACKNOWLEDGED
+    assert reopened.get_spot_order(order.client_order_id) == observed
+    assert not reopened.apply_spot_observation(
+        pending, pending.transition_to(OrderState.RECONCILIATION_REQUIRED, now)
+    )
+    assert calls == ["AddOrder", "OpenOrders", "ClosedOrders"]
+
+
+def test_canary_cli_authorization_persists_expires_and_revokes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "audit.sqlite"
+    store = AuditStore(path)
+    store.initialize()
+    candidate = StrategyCandidate(
+        candidate_id="test-canary",
+        name="SMA",
+        version="v1.0.0",
+        dataset_hash="research-data",
+        stage=PromotionStage.PAPER_APPROVED,
+    )
+    store.save_strategy_candidate(candidate)
+    credentials = tmp_path / "keys.json"
+    credentials.write_text(
+        json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}), encoding="utf-8"
+    )
+    monkeypatch.setattr(launcher, "local_store", lambda: AuditStore(path))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "spot-canary-allow",
+            candidate.candidate_id,
+            "--credentials-file",
+            str(credentials),
+            "--max-notional",
+            "75",
+        ],
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "declined")
+    with pytest.raises(SystemExit) as rejected:
+        launcher.main()
+    assert rejected.value.code == 1
+    assert not store.has_spot_canary_approval(candidate.candidate_id, datetime.now(UTC))
+    monkeypatch.setattr("builtins.input", lambda prompt: "AUTHORIZE")
+    launcher.main()
+    report = capsys.readouterr()
+    assert "USD 75.00" in report.err
+    assert (
+        _API_KEY not in report.err + report.out
+        and _API_SECRET not in report.err + report.out
+    )
+    reopened = AuditStore(path)
+    now = datetime.now(UTC)
+    assert reopened.has_spot_canary_approval(candidate.candidate_id, now)
+    assert not reopened.has_spot_canary_approval(
+        candidate.candidate_id, now + timedelta(hours=25)
+    )
+
+    from hcs_trader.api import create_app
+
+    with TestClient(create_app(reopened), base_url="http://127.0.0.1") as client:
+        uri = f"/api/v1/strategies/candidates/{candidate.candidate_id}/promote"
+        assert client.post(uri, json={"target_stage": "LIVE_CANARY"}).is_success
+        assert (
+            client.post(uri, json={"target_stage": "LIVE_BOUNDED"}).status_code == 409
+        )
+        assert client.get("/api/v1/system/capabilities").json()["live_orders"] is False
+    monkeypatch.setattr("sys.argv", ["hcs-trader", "spot-canary-revoke"])
+    launcher.main()
+    assert not reopened.has_spot_canary_approval(candidate.candidate_id, now)
+
+
+@pytest.mark.parametrize("unexpected_txid", [False, True])
+def test_validation_cli_never_records_a_live_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unexpected_txid: bool,
+) -> None:
+    credentials = tmp_path / "keys.json"
+    credentials.write_text(
+        json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}), encoding="utf-8"
+    )
+    calls = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        assert str(request.url) == "https://api.kraken.com/0/private/AddOrder"
+        fields = urllib.parse.parse_qs(request.content.decode())
+        assert fields["validate"] == ["true"]
+        assert fields["ordertype"] == ["limit"]
+        assert fields["volume"] == ["0.01000000"]
+        assert fields["price"] == ["50000.00"]
+        assert "leverage" not in fields and "margin" not in fields
+        result: dict[str, object] = {"descr": {"order": "buy 0.01 XBTUSD @ 50000"}}
+        if unexpected_txid:
+            result["txid"] = ["unexpected-order"]
+        return httpx2.Response(200, json={"error": [], "result": result})
+
+    client_class = httpx2.AsyncClient
+
+    def client(*, trust_env: bool) -> httpx2.AsyncClient:
+        assert trust_env is False
+        return client_class(transport=httpx2.MockTransport(handler), trust_env=False)
+
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
+    monkeypatch.setattr(
+        launcher, "local_store", lambda: pytest.fail("Validation used SQLite")
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "kraken-validate",
+            "--credentials-file",
+            str(credentials),
+            "--side",
+            "buy",
+            "--quantity",
+            "0.01",
+            "--limit-price",
+            "50000",
+        ],
+    )
+    if unexpected_txid:
+        with pytest.raises(SystemExit) as exit_info:
+            launcher.main()
+        assert exit_info.value.code == 1
+        assert capsys.readouterr().out == ""
+    else:
+        launcher.main()
+        result = json.loads(capsys.readouterr().out)
+        assert result["validated"] is True and result["market"] == "BTC/USD"
+        assert "state" not in result and "venue_order_id" not in result
+    assert calls == 1
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_serve_recovers_kraken_orders_only_when_opted_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visible: bool
+) -> None:
+    store = AuditStore(tmp_path / "audit.sqlite")
+    store.initialize()
+    order = _sample_order().transition_to(OrderState.SUBMITTED, at=datetime.now(UTC))
+    store.save_spot_order(order)
+    credentials = tmp_path / "keys.json"
+    credentials.write_text(
+        json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}), encoding="utf-8"
+    )
+    calls: list[str] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        endpoint = request.url.path.rsplit("/", 1)[1]
+        assert endpoint in {"OpenOrders", "ClosedOrders"}
+        calls.append(endpoint)
+        kind = "open" if endpoint == "OpenOrders" else "closed"
+        records = {}
+        if visible and kind == "open":
+            records["OXXXXX-XXXXX-XXXXX"] = {
+                "cl_ord_id": order.client_order_id,
+                "status": "open",
+                "vol_exec": "0",
+                "cost": "0",
+                "fee": "0",
+            }
+        return httpx2.Response(200, json={"error": [], "result": {kind: records}})
+
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(
+        httpx2,
+        "AsyncClient",
+        lambda *, trust_env: client_class(
+            trust_env=trust_env, transport=httpx2.MockTransport(respond)
+        ),
+    )
+    status: dict[str, object] = {}
+
+    class Server:
+        def __init__(self, config: uvicorn.Config) -> None:
+            self.app: Any = config.app
+
+        async def serve(self) -> None:
+            with TestClient(self.app, base_url="http://127.0.0.1") as client:
+                status.update(client.get("/api/v1/system/status").json())
+                assert (
+                    client.get("/api/v1/system/capabilities").json()["live_orders"]
+                    is False
+                )
+
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    monkeypatch.setattr(
+        "sys.argv", ["hcs-trader", "serve", "--data-dir", str(tmp_path)]
+    )
+    launcher.main()
+    assert calls == [] and status["network_enabled"] is False
+    assert store.get_spot_order(order.client_order_id) == order
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "serve",
+            "--data-dir",
+            str(tmp_path),
+            "--kraken-reconcile-credentials",
+            str(credentials),
+        ],
+    )
+    launcher.main()
+    assert calls == ["OpenOrders", "ClosedOrders"]
+    assert status == {
+        "mode": "DATA_ONLY",
+        "execution_available": False,
+        "network_enabled": True,
+    }
+    updated = store.get_spot_order(order.client_order_id)
+    assert updated and updated.state is (
+        OrderState.ACKNOWLEDGED if visible else OrderState.RECONCILIATION_REQUIRED
+    )
+    events = {event.kind for event in store.list_audit_events(limit=10)}
+    assert (
+        "spot.recovery.completed" if visible else "spot.recovery.incomplete"
+    ) in events
 
 
 def test_spot_order_storage_persistence(tmp_path: Path) -> None:

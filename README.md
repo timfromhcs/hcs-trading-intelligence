@@ -27,7 +27,7 @@ Run `uv run --locked hcs-trader import-candles --interval 60` to fetch and store
 
 Download the same candles as CSV from `GET /api/v1/market/candles.csv?interval=60`. Both formats support the `limit` query parameter and include source and observation timestamps.
 
-Run `uv run --locked hcs-trader import-news` to import Federal Reserve monetary-policy release metadata. `GET /api/v1/news/events` reads the stored timeline offline.
+Run `uv run --locked hcs-trader import-news` to import Federal Reserve monetary-policy release metadata. The dashboard and `GET /api/v1/news/events` read the stored timeline offline.
 
 See [AGENTS.md](AGENTS.md) for the roadmap and release gate and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 

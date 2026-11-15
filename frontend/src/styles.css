@@ -42,3 +42,8 @@ dd { margin: 0; }
 .quote-warning { color: #ffbf5a; }
 .quote-prices dd { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .quote-time, .quote-prices .quote-time { color: var(--muted); font-size: 0.875rem; font-weight: 400; }
+.news-list { list-style: none; padding: 0; margin: 1rem 0 0; }
+.news-list li { border-top: 1px solid var(--border); padding-block: 0.9rem; overflow-wrap: anywhere; }
+.news-list li:last-child { padding-bottom: 0; }
+.news-list h3 { margin: 0; font-size: 1rem; line-height: 1.45; }
+.news-list p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.875rem; line-height: 1.45; }

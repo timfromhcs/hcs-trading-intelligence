@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MarketQuote } from "./MarketQuote";
+import { NewsTimeline } from "./NewsTimeline";
 import "./styles.css";
 
 interface SystemStatus {
@@ -97,6 +98,7 @@ function App() {
           </div>
         </section>
         {snapshot.state === "ready" && snapshot.capabilities.market_data && <MarketQuote />}
+        {snapshot.state === "ready" && <NewsTimeline />}
         {snapshot.state === "ready" && (
           <section className="panel" aria-labelledby="capabilities-heading">
             <h2 id="capabilities-heading">Capabilities</h2>

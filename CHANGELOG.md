@@ -17,6 +17,7 @@
 - Added a deterministic SMA trend research backtest with simulated fees, spread, slippage and partial fills.
 - Added expanding-window evaluation, a final holdout and a cost-matched buy-and-hold benchmark.
 - Added persistent, content-addressed backtest reports with an integrity check on retrieval.
+- Added a CLI workflow that freezes a research candidate before opening a committed holdout file.
 
 ## 0.1.0 — development foundation
 

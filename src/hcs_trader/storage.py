@@ -14,7 +14,7 @@ from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +150,58 @@ class AuditStore:
                     ) STRICT, WITHOUT ROWID
                     """
                 )
-                connection.execute("PRAGMA user_version = 7")
+            if version < 8:
+                connection.execute(
+                    """
+                    CREATE TABLE research_holdouts (
+                        commitment TEXT PRIMARY KEY NOT NULL,
+                        candidate TEXT NOT NULL,
+                        result TEXT
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 8")
+
+    def freeze_holdout(self, commitment: str, candidate: str) -> None:
+        with self._connect() as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO research_holdouts (commitment, candidate) VALUES (?, ?)
+                ON CONFLICT (commitment) DO NOTHING
+                """,
+                (commitment, candidate),
+            )
+            (original,) = connection.execute(
+                "SELECT candidate FROM research_holdouts WHERE commitment = ?",
+                (commitment,),
+            ).fetchone()
+            if original != candidate:
+                raise ValueError(
+                    "A different candidate is already frozen for this holdout"
+                )
+
+    def frozen_candidate(self, commitment: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT candidate FROM research_holdouts WHERE commitment = ?",
+                (commitment,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def finalize_holdout(self, commitment: str, result: str) -> str:
+        with self._connect() as connection, connection:
+            connection.execute(
+                "UPDATE research_holdouts SET result = ? "
+                "WHERE commitment = ? AND result IS NULL",
+                (result, commitment),
+            )
+            row = connection.execute(
+                "SELECT result FROM research_holdouts WHERE commitment = ?",
+                (commitment,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("No candidate is frozen for this holdout")
+            return str(row[0])
 
     def record_backtest(self, report_id: str, payload: str) -> None:
         with self._connect() as connection, connection:

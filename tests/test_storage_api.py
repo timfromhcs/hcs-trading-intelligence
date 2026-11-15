@@ -38,7 +38,7 @@ def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (8,)
 
 
 def test_v1_upgrade_retains_audit_and_deduplicates_quotes(tmp_path: Path) -> None:

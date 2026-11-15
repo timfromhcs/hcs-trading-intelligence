@@ -12,15 +12,29 @@ from pathlib import Path
 import httpx2
 import uvicorn
 from platformdirs import user_data_path
+from pydantic import TypeAdapter
 
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
 from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.fred import fetch_fred_cpi
-from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, KrakenQuoteProvider
+from hcs_trader.data.kraken import (
+    BTC_USD,
+    CANDLE_INTERVALS,
+    SOURCE,
+    KrakenQuoteProvider,
+)
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.holdout import (
+    CANDIDATE_JSON,
+    MAX_HOLDOUT_BYTES,
+    RESULT_JSON,
+    freeze_candidate,
+    score_holdout,
+)
 from hcs_trader.storage import AuditStore
+from hcs_trader.walk_forward import WalkForwardConfig
 
 
 def local_store() -> AuditStore:
@@ -72,6 +86,39 @@ def _read_fred_key() -> str:
             ) from None
 
 
+def freeze_research(commitment: str, interval: int, config_path: Path | None) -> None:
+    config = WalkForwardConfig()
+    if config_path is not None:
+        with config_path.open("rb") as handle:
+            model = handle.read(16_385)
+        if len(model) > 16_384:
+            raise ValueError("Research configuration exceeds the supported size")
+        config = TypeAdapter(WalkForwardConfig).validate_json(model)
+    store = local_store()
+    store.initialize()
+    development = store.candle_history(BTC_USD, SOURCE, interval, limit=1000)
+    candidate = freeze_candidate(development, config, commitment)
+    payload = CANDIDATE_JSON.dump_json(candidate).decode("utf-8")
+    store.freeze_holdout(commitment, payload)
+    print(f"Frozen candidate for {commitment}")
+
+
+def score_research(commitment: str, path: Path) -> None:
+    store = local_store()
+    store.initialize()
+    payload = store.frozen_candidate(commitment)
+    if payload is None:
+        raise ValueError("No candidate is frozen for this holdout")
+    candidate = CANDIDATE_JSON.validate_json(payload)
+    if candidate.holdout_sha256 != commitment:
+        raise ValueError("Stored candidate commitment is inconsistent")
+    with path.open("rb") as handle:
+        content = handle.read(MAX_HOLDOUT_BYTES + 1)
+    outcome = score_holdout(candidate, content)
+    result = RESULT_JSON.dump_json(outcome).decode("utf-8")
+    print(store.finalize_holdout(commitment, result))
+
+
 async def serve(market_data: bool) -> None:
     store = local_store()
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -119,6 +166,19 @@ def main() -> None:
     )
     fred_parser = commands.add_parser("import-fred", help="Import a FRED CPI snapshot")
     fred_parser.add_argument("--as-of", type=date.fromisoformat)
+    freeze_parser = commands.add_parser(
+        "freeze-research", help="Freeze a research candidate against a holdout hash"
+    )
+    freeze_parser.add_argument("commitment")
+    freeze_parser.add_argument(
+        "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
+    )
+    freeze_parser.add_argument("--config", type=Path)
+    score_parser = commands.add_parser(
+        "score-holdout", help="Score a frozen candidate using the committed dataset"
+    )
+    score_parser.add_argument("commitment")
+    score_parser.add_argument("file", type=Path)
     arguments = parser.parse_args()
     if arguments.command == "serve":
         asyncio.run(serve(arguments.public_market_data))
@@ -149,6 +209,16 @@ def main() -> None:
         except MacroUnavailable as error:
             parser.exit(1, f"{error}\n")
         print(f"Imported {count} new or revised FRED observations.")
+    elif arguments.command in {"freeze-research", "score-holdout"}:
+        try:
+            if arguments.command == "freeze-research":
+                freeze_research(
+                    arguments.commitment, arguments.interval, arguments.config
+                )
+            else:
+                score_research(arguments.commitment, arguments.file)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
     else:
         print(Status().model_dump_json())
 

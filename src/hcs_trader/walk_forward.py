@@ -78,18 +78,19 @@ def walk_forward(
     for start in range(
         config.training_candles, len(development) - test_size + 1, test_size
     ):
-        winner = _select(development[:start], config, warmup)
+        winner = select_candidate(development[:start], config)
         folds.append(_evaluate(development, start, start + test_size, winner, warmup))
 
     # The final fit only receives development data. There is no refit after scoring.
-    final = _select(development, config, warmup)
+    final = select_candidate(development, config)
     holdout = _evaluate(candles, boundary, len(candles), final, warmup)
     return WalkForwardResult(config, tuple(folds), holdout)
 
 
-def _select(
-    training: Sequence[Candle], config: WalkForwardConfig, warmup: int
+def select_candidate(
+    training: Sequence[Candle], config: WalkForwardConfig
 ) -> BacktestResult:
+    warmup = max(pair.slow for pair in config.candidates)
     results = (
         run_backtest(
             training,

@@ -3,15 +3,19 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 
+from hcs_trader import __main__ as launcher
 from hcs_trader.api import create_app
 from hcs_trader.backtest import BacktestConfig, run_backtest
 from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.market_data import Candle
+from hcs_trader.holdout import RESULT_JSON, freeze_candidate, score_holdout
 from hcs_trader.storage import AuditStore
 from hcs_trader.walk_forward import PeriodPair, WalkForwardConfig, walk_forward
 
@@ -182,3 +186,53 @@ def test_backtest_reports_survive_restart_and_detect_corruption(tmp_path: Path) 
         with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("UPDATE backtest_reports SET payload = '{}'")
         assert api.get(location).status_code == 503
+
+
+def test_frozen_holdout_cli_enforces_commitment_and_keeps_first_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candles = fixture_candles()
+    development, holdout = candles[:4], candles[4:]
+    holdout_file = tmp_path / "holdout.json"
+    payload = TypeAdapter(list[Candle]).dump_json(holdout)
+    commitment = sha256(payload).hexdigest()
+    config_path = tmp_path / "config.json"
+    config = WalkForwardConfig(4, 1, 2, (PeriodPair(2, 3),))
+    config_path.write_bytes(TypeAdapter(WalkForwardConfig).dump_json(config))
+    store = AuditStore(tmp_path / "research.sqlite")
+    store.initialize()
+    store.record_candles(development)
+    monkeypatch.setattr(launcher, "local_store", lambda: AuditStore(store.path))
+
+    launcher.freeze_research(commitment, 60, config_path)
+    assert commitment in capsys.readouterr().out
+    launcher.freeze_research(commitment, 60, config_path)
+    capsys.readouterr()
+
+    holdout_file.write_bytes(payload + b" ")
+    with pytest.raises(ValueError, match="commitment"):
+        launcher.score_research(commitment, holdout_file)
+    holdout_file.write_bytes(payload)
+    launcher.score_research(commitment, holdout_file)
+    first = capsys.readouterr().out
+    result = RESULT_JSON.validate_json(first)
+    assert result.holdout_sha256 == commitment
+    assert all(fill.filled_at >= holdout[0].opened_at for fill in result.strategy.fills)
+    launcher.score_research(commitment, holdout_file)
+    assert capsys.readouterr().out == first
+
+    store.record_candles([holdout[0]])
+    with pytest.raises(ValueError, match="different candidate"):
+        launcher.freeze_research(commitment, 60, config_path)
+
+
+def test_committed_overlapping_holdout_is_rejected() -> None:
+    candles = fixture_candles()
+    payload = TypeAdapter(list[Candle]).dump_json(candles[3:5])
+    candidate = freeze_candidate(
+        candles[:4],
+        WalkForwardConfig(4, 1, 2, (PeriodPair(2, 3),)),
+        sha256(payload).hexdigest(),
+    )
+    with pytest.raises(ValueError, match="end of the development"):
+        score_holdout(candidate, payload)

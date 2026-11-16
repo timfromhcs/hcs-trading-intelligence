@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Enforce the operator's hot-wallet USD cap and portfolio share in the LIVE risk engine. A missing valuation blocks authorization when a share cap is configured.
+- Require venue health and a recent reconciliation timestamp for LIVE authorization. Reject reconciliation timestamps in the future.
 
 - Report a forward shadow replay only when its result is newly recorded. An explicit replay still returns the existing result for identical inputs.
 - Require a fresh Kraken quote for CLI and HTTP canary submission. Cached quotes remain visible with their data-quality status during outages.

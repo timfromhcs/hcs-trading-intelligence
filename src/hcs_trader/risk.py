@@ -61,6 +61,7 @@ class RiskPolicy:
     max_consecutive_rejects: int = 5
     max_hot_wallet_usd: Decimal | None = None
     hot_fraction_of_portfolio: Decimal | None = None
+    require_venue_reconciliation: bool = False
 
 
 def _canonical(value: object) -> object:
@@ -76,6 +77,8 @@ def policy_version(policy: RiskPolicy) -> str:
     fields = {
         key: _canonical(val) for key, val in asdict(policy).items() if val is not None
     }
+    if not policy.require_venue_reconciliation:
+        fields.pop("require_venue_reconciliation")
     blob = json.dumps(fields, sort_keys=True, separators=(",", ":"))
     return "policy-" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -202,9 +205,16 @@ class RiskEngine:
 
         if venue_healthy is False:
             return "Pre-trade rejected: venue is unhealthy"
+        if pol.require_venue_reconciliation:
+            if venue_healthy is not True:
+                return "Pre-trade rejected: venue health is required"
+            if last_reconciled_at is None:
+                return "Pre-trade rejected: venue reconciliation is required"
         if last_reconciled_at is not None and (
             last_reconciled_at.utcoffset() is None
-            or (at - last_reconciled_at).total_seconds() > pol.max_reconcile_age_seconds
+            or not 0
+            <= (at - last_reconciled_at).total_seconds()
+            <= pol.max_reconcile_age_seconds
         ):
             return "Pre-trade rejected: reconciliation is stale"
         if unresolved_market_orders > 0:

@@ -209,6 +209,7 @@ def active_live_policy(store: AuditStore) -> RiskPolicy | None:
         max_spread_bps=lim.max_spread_bps,
         max_slippage_bps=lim.max_slippage_bps,
         require_portfolio_state=True,
+        require_venue_reconciliation=True,
         risk_fraction=lim.risk_fraction,
         max_daily_loss_fraction=lim.max_daily_loss_fraction,
         max_drawdown_fraction=lim.max_drawdown_fraction,

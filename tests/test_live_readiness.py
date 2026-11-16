@@ -106,6 +106,7 @@ def test_ceremony_enables_persists_and_revokes(
     assert policy.live_mode_enabled
     assert policy.max_notional_usd == Decimal("100")
     assert policy.require_portfolio_state
+    assert policy.require_venue_reconciliation
     assert policy.max_hot_wallet_usd == LIMITS.max_hot_wallet_usd
     assert policy.hot_fraction_of_portfolio == LIMITS.hot_fraction_of_portfolio
     assert revoke_live(store, operator="op").mode == "PAPER"

@@ -422,6 +422,40 @@ def test_health_reconcile_and_market_gates() -> None:
     assert _eval(order, venue_healthy=True, last_reconciled_at=fresh).allowed
 
 
+@pytest.mark.parametrize(
+    ("healthy", "age_seconds", "expected"),
+    [
+        (None, 0, "venue health is required"),
+        (False, 0, "venue is unhealthy"),
+        (True, None, "venue reconciliation is required"),
+        (True, 301, "reconciliation is stale"),
+        (True, -1, "reconciliation is stale"),
+        (True, 300, None),
+    ],
+)
+def test_live_reconciliation_window(
+    healthy: bool | None, age_seconds: int | None, expected: str | None
+) -> None:
+    quote = _sample_quote()
+    at = quote.received_at
+    engine = RiskEngine(replace(_active_policy(), require_venue_reconciliation=True))
+    decision = engine.evaluate_order(
+        _sample_order(),
+        quote,
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        at,
+        venue_healthy=healthy,
+        last_reconciled_at=(
+            at - timedelta(seconds=age_seconds) if age_seconds is not None else None
+        ),
+    )
+    assert decision.allowed == (expected is None)
+    if expected is not None:
+        assert expected in (decision.reason or "")
+
+
 def test_plan_hash_bound_and_mutation_changes_it() -> None:
     order = _sample_order(limit_price="50060.00")
     d = _eval(order)

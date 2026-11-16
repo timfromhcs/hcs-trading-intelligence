@@ -1,5 +1,9 @@
 # V1 release assessment
 
+## Hosted platform rehearsal · 2026-11-16
+
+[Foundation checks run 43850707718](https://github.com/timfromhcs/hcs-trading-intelligence/actions/runs/43850707718) passed on commit `dbfc633`. Windows, macOS and Ubuntu each passed the native desktop smoke test, clean-environment wheel and source installs, and the upgrade from the pinned v0.2.0 wheel. The upgrade preserves the execution pause and audit event across installation. The Windows single-file build also passed on this run. These results are historical candidate evidence. Repeat on the exact release commit.
+
 ## Candidate CodeQL findings · 2026-11-16
 
 [CodeQL run 43851455472](https://github.com/timfromhcs/hcs-trading-intelligence/actions/runs/43851455472) analyzed commit `47ca6c3`. JavaScript/TypeScript reported zero findings. Python reported six `py/weak-sensitive-data-hashing` findings. The two production occurrences fingerprint the Kraken API key identifier to bind an approval to that identifier. Kraken authenticates requests with a separate private signing key. The remaining four findings fingerprint test fixtures. Reviewed as false positives for password storage. Repeat the scan and review on the final release commit. [Kraken API authorization](https://docs.kraken.com/api/docs/rest-api/get-api-key-info)

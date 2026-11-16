@@ -24,7 +24,11 @@ from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
-from hcs_trader.kraken_spot import KrakenExecutionError, KrakenSpotAdapter
+from hcs_trader.kraken_spot import (
+    KrakenExecutionError,
+    KrakenSpotAdapter,
+    kraken_key_fingerprint,
+)
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
 from hcs_trader.spot_execution import KrakenSpotExecution
@@ -642,7 +646,7 @@ async def test_durable_submission_recovers_after_cancellation(tmp_path: Path) ->
     store.save_strategy_candidate(candidate)
     store.authorize_spot_canary(
         candidate,
-        hashlib.sha256(_API_KEY.encode()).hexdigest(),
+        kraken_key_fingerprint(_API_KEY),
         Decimal("500"),
         now,
         now + timedelta(hours=1),
@@ -984,7 +988,7 @@ async def test_canary_execution_end_to_end_and_fail_closed(tmp_path: Path) -> No
     )
     store.save_strategy_candidate(candidate)
 
-    fingerprint = hashlib.sha256(_API_KEY.encode()).hexdigest()
+    fingerprint = kraken_key_fingerprint(_API_KEY)
     expires_at = now + timedelta(hours=24)
     store.authorize_spot_canary(candidate, fingerprint, Decimal("500"), now, expires_at)
 
@@ -1150,7 +1154,7 @@ def test_canary_cli_submit_and_fail_closed(
         json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}), encoding="utf-8"
     )
 
-    fingerprint = hashlib.sha256(_API_KEY.encode()).hexdigest()
+    fingerprint = kraken_key_fingerprint(_API_KEY)
     store.authorize_spot_canary(
         candidate, fingerprint, Decimal("500"), now, now + timedelta(hours=24)
     )
@@ -1290,7 +1294,7 @@ def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
             == 404
         )
 
-    fingerprint = hashlib.sha256(_API_KEY.encode()).hexdigest()
+    fingerprint = kraken_key_fingerprint(_API_KEY)
     store.authorize_spot_canary(
         candidate, fingerprint, Decimal("500"), now, now + timedelta(hours=24)
     )

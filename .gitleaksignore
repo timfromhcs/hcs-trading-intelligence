@@ -1,3 +1,4 @@
 1756ef3f43b39ae986d7378b78381e8050789123:tests/test_kraken_spot.py:generic-api-key:20
 4a6a133e853aa43495930bec4bfe0dbad046ade8:tests/test_signing.py:generic-api-key:342
 4a6a133e853aa43495930bec4bfe0dbad046ade8:tests/test_signing.py:generic-api-key:354
+97e8f3e3202ae50db4f3e521c52d927be7a7ab24:tests/test_binance_testnet.py:generic-api-key:236

@@ -15,7 +15,6 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from getpass import GetPassWarning, getpass
-from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
 from time import monotonic_ns
@@ -63,6 +62,7 @@ from hcs_trader.kraken_spot import (
     KrakenOrderValidation,
     KrakenSpotAdapter,
     KrakenSpotBalances,
+    kraken_key_fingerprint,
     kraken_validate_probe,
 )
 from hcs_trader.live_readiness import (
@@ -1134,7 +1134,7 @@ def main() -> None:
             }:
                 raise ValueError("A paper-approved strategy candidate is required")
             key, _ = read_kraken_credentials(arguments.credentials_file)
-            identity = sha256(key.encode("utf-8")).hexdigest()
+            identity = kraken_key_fingerprint(key)
             print(
                 "Kraken BTC/USD spot limit orders · "
                 f"candidate {candidate.candidate_id} "

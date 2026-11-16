@@ -116,6 +116,13 @@ def _parse_cash_entry(row: dict[str, Any]) -> _LedgerEntry:
     )
 
 
+def kraken_key_fingerprint(api_key: str) -> str:
+    """Keyed digest of the public API key identifier (not the signing secret)."""
+    return hmac.new(
+        b"hcs-trader:kraken-key-fingerprint:v1", api_key.encode("utf-8"), "sha256"
+    ).hexdigest()
+
+
 class KrakenSpotAdapter:
     """Spot-only Kraken adapter. Margin, leverage, and withdrawals are forbidden."""
 
@@ -136,7 +143,7 @@ class KrakenSpotAdapter:
 
     @property
     def key_fingerprint(self) -> str:
-        return hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()
+        return kraken_key_fingerprint(self.api_key)
 
     async def trading_is_online(self) -> bool:
         return await KrakenQuoteProvider(self.client).trading_is_online()

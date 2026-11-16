@@ -1,7 +1,6 @@
 """Execution wiring: persisted risk verdicts, kill-switch auto-triggers, dry run."""
 
 import base64
-import hashlib
 import urllib.parse
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -15,7 +14,11 @@ from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
-from hcs_trader.kraken_spot import KrakenAmbiguousExecutionError, KrakenSpotAdapter
+from hcs_trader.kraken_spot import (
+    KrakenAmbiguousExecutionError,
+    KrakenSpotAdapter,
+    kraken_key_fingerprint,
+)
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected, policy_version
 from hcs_trader.spot_execution import KrakenSpotExecution
@@ -64,7 +67,7 @@ def _store(tmp_path: Path, *, canary: bool = True) -> tuple[AuditStore, str]:
         store.save_strategy_candidate(candidate)
         store.authorize_spot_canary(
             candidate,
-            hashlib.sha256(_KEY.encode()).hexdigest(),
+            kraken_key_fingerprint(_KEY),
             Decimal("500"),
             now,
             now + timedelta(hours=1),

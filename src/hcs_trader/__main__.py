@@ -388,6 +388,19 @@ async def check_kraken_orders(credentials_file: Path, store: AuditStore) -> int:
     return len(expected)
 
 
+async def sync_kraken_fills(
+    credentials_file: Path, store: AuditStore, client_order_id: str
+) -> int:
+    order = store.get_spot_order(client_order_id)
+    if order is None:
+        raise KrakenExecutionError("Local Kraken order was not found")
+    key, secret = read_kraken_credentials(credentials_file)
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        fills = await adapter.read_reconciled_fills(order)
+    return store.import_spot_fills(order, fills)
+
+
 async def submit_canary_order(
     store: AuditStore,
     credentials_file: Path,
@@ -775,6 +788,13 @@ def main() -> None:
     )
     orders_parser.add_argument("--credentials-file", type=Path, required=True)
     orders_parser.add_argument("--data-dir", type=Path)
+    fills_parser = commands.add_parser(
+        "kraken-sync-fills",
+        help="Fetch and record executions for a reconciled spot order",
+    )
+    fills_parser.add_argument("client_order_id")
+    fills_parser.add_argument("--credentials-file", type=Path, required=True)
+    fills_parser.add_argument("--data-dir", type=Path)
     allow_canary = commands.add_parser(
         "spot-canary-allow",
         help="Locally authorize one Kraken BTC/USD canary candidate",
@@ -1256,6 +1276,25 @@ def main() -> None:
             return
         except (sqlite3.Error, ValueError) as error:
             parser.exit(1, f"{error}\n")
+    elif arguments.command == "kraken-sync-fills":
+        path = (
+            local_store().path
+            if arguments.data_dir is None
+            else arguments.data_dir / "audit.sqlite"
+        )
+        if not path.is_file():
+            parser.exit(1, "Local Kraken order ledger was not found\n")
+        try:
+            count = asyncio.run(
+                sync_kraken_fills(
+                    arguments.credentials_file,
+                    AuditStore(path),
+                    arguments.client_order_id,
+                )
+            )
+        except (KrakenExecutionError, sqlite3.Error, OSError, ValueError):
+            parser.exit(1, "Kraken executions could not be verified and recorded\n")
+        print(json.dumps({"recorded_fills": count}))
     elif arguments.command == "kraken-check-orders":
         path = (
             local_store().path

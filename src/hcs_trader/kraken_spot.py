@@ -4,18 +4,25 @@ import base64
 import binascii
 import hashlib
 import hmac
+import re
 import time
 import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import batched
 from typing import Any
 
 import httpx2
 
 from hcs_trader.data.kraken import KrakenQuoteProvider
-from hcs_trader.domain.execution import SpotCashTrade, SpotOrder, SpotOrderType
+from hcs_trader.domain.execution import (
+    SpotCashTrade,
+    SpotFill,
+    SpotOrder,
+    SpotOrderType,
+)
 from hcs_trader.domain.lifecycle import OrderState
 
 KRAKEN_PAIR_MAP = {
@@ -396,6 +403,96 @@ class KrakenSpotAdapter:
         result = await self._post_private("QueryOrders", {"txid": venue_order_id})
         info = result.get(venue_order_id, {})
         return dict(info) if isinstance(info, dict) else {}
+
+    async def read_reconciled_fills(self, order: SpotOrder) -> list[SpotFill]:
+        """Read all executions for an already reconciled BTC/USD limit order."""
+        if (
+            order.venue != "kraken"
+            or order.market != "BTC/USD"
+            or order.order_type is not SpotOrderType.LIMIT
+            or not order.venue_order_id
+            or order.state
+            not in (
+                OrderState.PARTIALLY_FILLED,
+                OrderState.FILLED,
+                OrderState.CANCELLED,
+            )
+            or not order.filled_quantity
+            or order.average_price is None
+            or order.fee is None
+        ):
+            raise KrakenExecutionError(
+                "A reconciled Kraken BTC/USD order with fills is required"
+            )
+        result = await self._post_private(
+            "QueryOrders",
+            {
+                "txid": order.venue_order_id,
+                "trades": "true",
+                "consolidate_taker": "false",
+            },
+        )
+        info = result.get(order.venue_order_id)
+        if not isinstance(info, dict) or info.get("cl_ord_id") != order.client_order_id:
+            raise KrakenExecutionError("Kraken order identity is unconfirmed")
+        ids = info.get("trades")
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or any(
+                not isinstance(item, str)
+                or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", item)
+                for item in ids
+            )
+            or len(set(ids)) != len(ids)
+        ):
+            raise KrakenExecutionError("Kraken order trade IDs are invalid")
+        fills: list[SpotFill] = []
+        for batch in batched(ids, 20):
+            trades = await self._post_private("QueryTrades", {"txid": ",".join(batch)})
+            if trades.keys() != set(batch):
+                raise KrakenExecutionError(
+                    "Kraken did not return the complete trade batch"
+                )
+            for trade_id in batch:
+                fills.append(self._parse_spot_fill(order, trade_id, trades[trade_id]))
+        if (
+            sum(fill.quantity for fill in fills) != order.filled_quantity
+            or sum(fill.quantity * fill.price for fill in fills) / order.filled_quantity
+            != order.average_price
+            or sum(fill.fee for fill in fills) != order.fee
+        ):
+            raise KrakenExecutionError(
+                "Kraken executions differ from reconciled order totals"
+            )
+        return fills
+
+    @staticmethod
+    def _parse_spot_fill(order: SpotOrder, trade_id: str, row: object) -> SpotFill:
+        if not isinstance(row, dict) or (
+            row.get("ordertxid") != order.venue_order_id
+            or row.get("pair") not in ("XBTUSD", "XXBTZUSD", "XBT/USD")
+            or row.get("type") != order.side.value
+            or row.get("ordertype") != "limit"
+            or _balance_amount(row.get("margin")) != 0
+        ):
+            raise KrakenExecutionError(
+                "Kraken execution terms differ from the local order"
+            )
+        qty = _balance_amount(row.get("vol"))
+        price = _balance_amount(row.get("price"))
+        fee = _balance_amount(row.get("fee"))
+        if not qty or not price or qty * price != _balance_amount(row.get("cost")):
+            raise KrakenExecutionError("Kraken execution amounts are invalid")
+        seconds = _balance_amount(row.get("time"))
+        if not seconds or seconds > Decimal(str(time.time())) + 2:
+            raise KrakenExecutionError("Kraken execution timestamp is invalid")
+        at = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(
+            microseconds=int(seconds * 1_000_000)
+        )
+        if at < order.created_at - timedelta(seconds=2):
+            raise KrakenExecutionError("Kraken execution predates the order")
+        return SpotFill(order.client_order_id, trade_id, qty, price, fee, at)
 
     async def verify_open_orders(self, expected: Sequence[SpotOrder]) -> None:
         """Compare the authenticated account's open orders with the local ledger."""

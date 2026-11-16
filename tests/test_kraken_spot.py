@@ -35,6 +35,106 @@ _API_KEY = "test-api-key-12345"
 _API_SECRET = base64.b64encode(b"01234567890123456789012345678901").decode("ascii")
 
 
+@pytest.mark.parametrize("fault", [None, "wrong-order", "conflicting-replay"])
+def test_sync_reconciled_kraken_fills_is_atomic_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str | None,
+) -> None:
+    store = AuditStore(tmp_path / "audit.sqlite")
+    store.initialize()
+    order = replace(
+        _sample_order(
+            state=OrderState.PARTIALLY_FILLED, venue_order_id="fixture-order"
+        ),
+        filled_quantity=Decimal("0.004"),
+        average_price=Decimal("50000"),
+        fee=Decimal("0.20"),
+    )
+    store.save_spot_order(order)
+    if fault == "conflicting-replay":
+        store.record_spot_fill(
+            SpotFill(
+                order.client_order_id,
+                "trade-b",
+                Decimal("0.001"),
+                Decimal("50000"),
+                Decimal("0.10"),
+                order.created_at,
+            )
+        )
+    before = store.spot_fills(order.client_order_id)
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        name = request.url.path.rsplit("/", 1)[1]
+        calls.append(name)
+        payload = urllib.parse.parse_qs(request.content.decode())
+        result: dict[str, Any]
+        if name == "QueryOrders":
+            assert payload["trades"] == ["true"]
+            result = {
+                "fixture-order": {
+                    "trades": ["trade-a", "trade-b"],
+                    "cl_ord_id": order.client_order_id,
+                }
+            }
+        else:
+            assert name == "QueryTrades"
+            assert payload["txid"] == ["trade-a,trade-b"]
+            result = {
+                trade_id: {
+                    "ordertxid": "other" if fault == "wrong-order" else "fixture-order",
+                    "pair": "XXBTZUSD",
+                    "type": order.side.value,
+                    "ordertype": "limit",
+                    "vol": "0.002",
+                    "price": "50000",
+                    "cost": "100",
+                    "fee": "0.10",
+                    "margin": "0",
+                    "time": int(order.created_at.timestamp()),
+                }
+                for trade_id in ("trade-a", "trade-b")
+            }
+        return httpx2.Response(200, json={"error": [], "result": result})
+
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(
+        httpx2,
+        "AsyncClient",
+        lambda **kw: client_class(**kw, transport=httpx2.MockTransport(handler)),
+    )
+    keys = tmp_path / "fixture.json"
+    keys.write_text(json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "kraken-sync-fills",
+            order.client_order_id,
+            "--credentials-file",
+            str(keys),
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    if fault is None:
+        launcher.main()
+        assert json.loads(capsys.readouterr().out) == {"recorded_fills": 2}
+        launcher.main()
+        assert json.loads(capsys.readouterr().out) == {"recorded_fills": 0}
+        assert set(store.spot_cash_trades("kraken")) == {"trade-a", "trade-b"}
+        assert calls == ["QueryOrders", "QueryTrades"] * 2
+    else:
+        with pytest.raises(SystemExit) as error:
+            launcher.main()
+        assert error.value.code == 1
+        assert store.spot_fills(order.client_order_id) == before
+        assert calls == ["QueryOrders", "QueryTrades"]
+
+
 @pytest.mark.parametrize("mismatch", [None, "unknown", "volume", "leverage", "fee"])
 def test_kraken_check_orders_compares_full_open_set(
     tmp_path: Path,

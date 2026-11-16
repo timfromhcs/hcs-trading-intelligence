@@ -24,6 +24,7 @@ from hcs_trader.domain.execution import (
     SpotOrderType,
     SpotSide,
 )
+from hcs_trader.domain.execution import SpotFill as SpotFill
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
@@ -193,16 +194,6 @@ class StoreHealth:
     detail: str
     schema_version: int | None = None
     execution_paused: bool | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SpotFill:
-    client_order_id: str
-    fill_id: str
-    quantity: Decimal
-    price: Decimal
-    fee: Decimal
-    filled_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1087,6 +1078,28 @@ class AuditStore:
 
     def record_spot_fill(self, fill: SpotFill) -> bool:
         """Idempotently record one fill; a conflicting replay is an error."""
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._record_spot_fill(connection, fill)
+
+    def import_spot_fills(self, order: SpotOrder, fills: list[SpotFill]) -> int:
+        """Commit a verified batch only if the local order is still current."""
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._get_spot_order(connection, order.client_order_id) != order:
+                raise ValueError("Local spot order changed before import")
+            if any(fill.client_order_id != order.client_order_id for fill in fills):
+                raise ValueError("Spot fill does not match the local order")
+            ids = {fill.fill_id for fill in fills}
+            existing = connection.execute(
+                "SELECT fill_id FROM spot_fills WHERE client_order_id = ?",
+                (order.client_order_id,),
+            ).fetchall()
+            if any(row[0] not in ids for row in existing):
+                raise ValueError("Previously recorded fills are missing from the venue")
+            return sum(self._record_spot_fill(connection, fill) for fill in fills)
+
+    def _record_spot_fill(self, connection: sqlite3.Connection, fill: SpotFill) -> bool:
         if (
             not (fill.quantity.is_finite() and fill.price.is_finite())
             or not fill.fee.is_finite()
@@ -1103,30 +1116,28 @@ class AuditStore:
             str(fill.fee),
             fill.filled_at.isoformat(),
         )
-        with self._connect() as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            inserted = connection.execute(
-                "INSERT INTO spot_fills VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (client_order_id, fill_id) DO NOTHING",
-                (*values, datetime.now(UTC).isoformat()),
+        inserted = connection.execute(
+            "INSERT INTO spot_fills VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (client_order_id, fill_id) DO NOTHING",
+            (*values, datetime.now(UTC).isoformat()),
+        )
+        if inserted.rowcount:
+            self._insert_audit(
+                connection,
+                "spot.fill.recorded",
+                order_or_tx_id=fill.client_order_id,
+                idempotency_key=fill.fill_id,
+                outcome="recorded",
             )
-            if inserted.rowcount:
-                self._insert_audit(
-                    connection,
-                    "spot.fill.recorded",
-                    order_or_tx_id=fill.client_order_id,
-                    idempotency_key=fill.fill_id,
-                    outcome="recorded",
-                )
-                return True
-            existing = connection.execute(
-                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at "
-                "FROM spot_fills WHERE client_order_id = ? AND fill_id = ?",
-                values[:2],
-            ).fetchone()
-            if tuple(existing) != values:
-                raise ValueError("Fill ID was already recorded with different values")
-            return False
+            return True
+        existing = connection.execute(
+            "SELECT client_order_id, fill_id, quantity, price, fee, filled_at "
+            "FROM spot_fills WHERE client_order_id = ? AND fill_id = ?",
+            values[:2],
+        ).fetchone()
+        if tuple(existing) != values:
+            raise ValueError("Fill ID was already recorded with different values")
+        return False
 
     def spot_fills(self, client_order_id: str) -> list[SpotFill]:
         with self._connect() as connection:
@@ -1879,35 +1890,41 @@ class AuditStore:
 
     def get_spot_order(self, client_order_id: str) -> SpotOrder | None:
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT client_order_id, order_id, venue, market, side, order_type,
-                       quantity, limit_price, state, risk_decision_id, created_at,
-                       updated_at, venue_order_id, filled_quantity, average_price, fee
-                FROM spot_orders WHERE client_order_id = ?
-                """,
-                (client_order_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            return SpotOrder(
-                client_order_id=row[0],
-                order_id=row[1],
-                venue=row[2],
-                market=row[3],
-                side=SpotSide(row[4]),
-                order_type=SpotOrderType(row[5]),
-                quantity=Decimal(row[6]),
-                limit_price=Decimal(row[7]) if row[7] is not None else None,
-                state=OrderState(row[8]),
-                risk_decision_id=row[9],
-                created_at=datetime.fromisoformat(row[10]),
-                updated_at=datetime.fromisoformat(row[11]),
-                venue_order_id=row[12],
-                filled_quantity=Decimal(row[13]) if row[13] is not None else None,
-                average_price=Decimal(row[14]) if row[14] is not None else None,
-                fee=Decimal(row[15]) if row[15] is not None else None,
-            )
+            return self._get_spot_order(connection, client_order_id)
+
+    @staticmethod
+    def _get_spot_order(
+        connection: sqlite3.Connection, client_order_id: str
+    ) -> SpotOrder | None:
+        row = connection.execute(
+            """
+            SELECT client_order_id, order_id, venue, market, side, order_type,
+                   quantity, limit_price, state, risk_decision_id, created_at,
+                   updated_at, venue_order_id, filled_quantity, average_price, fee
+            FROM spot_orders WHERE client_order_id = ?
+            """,
+            (client_order_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SpotOrder(
+            client_order_id=row[0],
+            order_id=row[1],
+            venue=row[2],
+            market=row[3],
+            side=SpotSide(row[4]),
+            order_type=SpotOrderType(row[5]),
+            quantity=Decimal(row[6]),
+            limit_price=Decimal(row[7]) if row[7] is not None else None,
+            state=OrderState(row[8]),
+            risk_decision_id=row[9],
+            created_at=datetime.fromisoformat(row[10]),
+            updated_at=datetime.fromisoformat(row[11]),
+            venue_order_id=row[12],
+            filled_quantity=Decimal(row[13]) if row[13] is not None else None,
+            average_price=Decimal(row[14]) if row[14] is not None else None,
+            fee=Decimal(row[15]) if row[15] is not None else None,
+        )
 
     def list_open_spot_orders(self, venue: str) -> list[SpotOrder]:
         with self._connect() as connection:

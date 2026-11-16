@@ -32,6 +32,16 @@ class SpotCashTrade:
 
 
 @dataclass(frozen=True, slots=True)
+class SpotFill:
+    client_order_id: str
+    fill_id: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal
+    filled_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class SpotCanaryApproval:
     candidate_id: str
     candidate_version: str

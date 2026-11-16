@@ -353,7 +353,7 @@ def test_preview_transaction_success() -> None:
     assert preview["amount_in"] == plan.amount_in_base_units
 
 
-def test_solana_signing_execution() -> None:
+def test_legacy_json_path_rejects_solana_plans() -> None:
     policy = _active_policy()
     passphrase = "solana-password-456"
     sol_address = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
@@ -398,9 +398,10 @@ def test_solana_signing_execution() -> None:
     ).encode("utf-8")
 
     now = datetime.now(UTC)
-    signed = signer.sign_transaction(plan, payload, passphrase, at=now)
-    assert signed.plan_hash == plan.plan_hash
-    assert len(signed.tx_hash) == 64
+    # The JSON-envelope path is not chain-valid for Solana and would bypass the
+    # message decoder; chain-valid signing is sign_solana_transaction only.
+    with pytest.raises(SigningUnsupported, match="sign_solana_transaction"):
+        signer.sign_transaction(plan, payload, passphrase, at=now)
 
 
 def test_mcp_server_has_no_secret_export_or_signing_tools(tmp_path: Path) -> None:

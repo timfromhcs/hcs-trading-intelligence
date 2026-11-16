@@ -27,6 +27,11 @@ from hcs_trader.evm_signing import (
     sign_evm_payload,
 )
 from hcs_trader.keystore import decrypt_keystore_record
+from hcs_trader.solana_signing import (
+    SolanaMessagePolicy,
+    decode_solana_message,
+    sign_solana_message,
+)
 
 
 def decode_and_verify_payload(
@@ -119,8 +124,10 @@ class IsolatedSigner:
         allow_test_only_signing: bool = False,
         signed_plans: SignedPlanLedger | None = None,
         evm_policy: EvmSigningPolicy | None = None,
+        solana_policy: SolanaMessagePolicy | None = None,
     ) -> None:
         self.policy = policy
+        self.solana_policy = solana_policy or SolanaMessagePolicy()
         self.evm_policy = evm_policy or EvmSigningPolicy()
         self._ledger = signed_plans
         self._pause_state = pause_state
@@ -252,6 +259,13 @@ class IsolatedSigner:
         at: datetime,
     ) -> SignedTransaction:
         """Validate policy, decode payload, and produce a signed transaction."""
+        # 0. Solana signs only serialized messages via sign_solana_transaction;
+        #    the JSON-envelope path would bypass every Solana message check.
+        if plan.canonical_chain_id.startswith("solana:"):
+            raise SigningUnsupported(
+                "Signing rejected: solana plans must use sign_solana_transaction "
+                "(the JSON-envelope path is not chain-valid)"
+            )
         # 1. Persisted kill switch / execution pause (read at signing time)
         self._assert_not_paused()
 
@@ -346,6 +360,48 @@ class IsolatedSigner:
         raw_secret = decrypt_keystore_record(record, passphrase)
         try:
             signed = sign_evm_payload(plan, decoded, raw_secret, at)
+        finally:
+            del raw_secret
+        self._record_signed(plan, signed.tx_hash, at)
+        return signed
+
+    def sign_solana_transaction(
+        self,
+        plan: ValidatedTransactionPlan,
+        message_bytes: bytes,
+        passphrase: str,
+        at: datetime,
+    ) -> SignedTransaction:
+        """Chain-valid Solana signing; the message is decoded before key access.
+
+        Runs the same pause, policy, persisted risk-decision and idempotency
+        checks as every other namespace. A repeated idempotency key is always
+        refused (no cached replay), durably when a ledger is injected. The
+        Jupiter allowance comes from the signer's own immutable
+        ``solana_policy``, never from the caller.
+        """
+        self._assert_not_paused()
+        self.policy.validate_plan(plan, at)
+        if not plan.canonical_chain_id.startswith("solana:"):
+            raise SignerTamperingError("Plan chain is not a Solana network")
+        self._assert_risk_decision(plan)
+        if self._already_signed(plan.idempotency_key):
+            raise SignerPolicyViolation(
+                f"Signing rejected: idempotency key '{plan.idempotency_key}' "
+                "was already signed"
+            )
+        decode_solana_message(message_bytes, plan, self.solana_policy)
+        record = self._keystore.get(("solana", plan.signer_address))
+        if record is None:
+            raise KeystoreError(
+                f"No keystore record registered for address {plan.signer_address} "
+                "in namespace solana"
+            )
+        raw_secret = decrypt_keystore_record(record, passphrase)
+        try:
+            signed = sign_solana_message(
+                message_bytes, plan, self.solana_policy, raw_secret, at
+            )
         finally:
             del raw_secret
         self._record_signed(plan, signed.tx_hash, at)

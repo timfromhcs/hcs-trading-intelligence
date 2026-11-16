@@ -77,12 +77,14 @@ _SIGNING_CAPABILITIES: dict[str, SigningCapability] = {
     ),
     "solana": SigningCapability(
         namespace="solana",
-        chain_valid=False,
+        chain_valid=True,
         requires_test_only_flag=False,
         note=(
-            "Ed25519 signature over the supplied payload bytes. The payload is a "
-            "JSON test envelope, not a serialized Solana transaction message, so "
-            "the output is not broadcastable."
+            "Chain-valid legacy/v0 message signing via sign_solana_transaction "
+            "with independent message decoding, a program allowlist, a sole "
+            "signer/fee payer and fee caps. Jupiter route data is opaque and "
+            "Jupiter mode is off unless the signer's policy enables it. Not yet "
+            "verified on a live cluster."
         ),
     ),
 }

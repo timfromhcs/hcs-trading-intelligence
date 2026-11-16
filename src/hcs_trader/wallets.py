@@ -66,6 +66,7 @@ _HASH = re.compile(r"0x[0-9a-fA-F]{64}")
 _ADDRESS = re.compile(r"0x[0-9a-f]{40}")
 _UTXO_ADDRESS = re.compile(r"[A-Za-z0-9]{14,90}")
 _UTXO_HASH = re.compile(r"[0-9a-fA-F]{64}")
+_WALLET_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 class WalletUnavailable(Exception):
@@ -271,11 +272,30 @@ UTXO_NETWORK_PROFILES = {
 
 
 class LocalWalletRpc:
-    def __init__(self, client: httpx2.AsyncClient, port: int) -> None:
+    def __init__(
+        self,
+        client: httpx2.AsyncClient,
+        port: int,
+        wallet_name: str | None = None,
+    ) -> None:
         if not 1 <= port <= 65535:
             raise ValueError("Wallet RPC port must be between 1 and 65535")
+        if wallet_name is not None and not _WALLET_NAME.fullmatch(wallet_name):
+            raise ValueError("Wallet name must be 1-64 letters, digits, _ or -")
         self._client = client
-        self._url = f"http://127.0.0.1:{port}/"
+        suffix = f"wallet/{wallet_name}" if wallet_name else ""
+        self._url = f"http://127.0.0.1:{port}/{suffix}"
+
+    async def call(
+        self,
+        method: str,
+        parameters: list[object],
+        *,
+        timeout: int = 30,
+        version: Literal["1.0", "2.0"] = "2.0",
+    ) -> object:
+        """Issue one loopback JSON-RPC call (used by the regtest PSBT flow)."""
+        return await self._request(method, parameters, timeout=timeout, version=version)
 
     async def _request(
         self,

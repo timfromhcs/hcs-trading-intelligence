@@ -67,4 +67,5 @@ testpaths = ["tests"]
 addopts = "--cov=hcs_trader --cov-fail-under=80"
 markers = [
     "rehearsal: live testnet rehearsal; needs testnet API keys in env, skipped otherwise, never run in CI",
+    "regtest: needs a real regtest node binary via HCS_BITCOIND/HCS_LITECOIND/HCS_DIGIBYTED",
 ]

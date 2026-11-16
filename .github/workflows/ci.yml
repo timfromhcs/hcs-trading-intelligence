@@ -29,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0 # the upgrade smoke test needs the v0.2.0 tag
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -65,6 +66,8 @@ jobs:
       - name: Fail on strong-copyleft licenses
         run: uv run --locked python scripts/license_inventory.py --check > license-inventory.json
       - run: uv run --locked python scripts/generate_sbom.py --output sbom-${{ matrix.os }}.cdx.json
+      - name: Manifest and registry template match the project version
+        run: uv run --locked python scripts/build_mcpb.py check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: licenses-${{ matrix.os }}
@@ -81,14 +84,11 @@ jobs:
             dist/desktop/*.tar.gz
             dist/desktop/*.tar.gz.sha256
           if-no-files-found: error
-      - name: Build and verify the Windows single-file executable
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Build, selftest and archive the single-file executable
+        shell: bash
         run: |
           uv run --locked --group packaging python scripts/build_desktop.py --onefile
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --locked python scripts/smoke_desktop.py --onefile
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --locked python scripts/archive_desktop.py --onefile
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: runner.os == 'Windows'
@@ -97,6 +97,20 @@ jobs:
           path: |
             dist/desktop-single/*.exe
             dist/desktop-single/*.exe.sha256
+          if-no-files-found: error
+      - name: Build the MCPB bundle from the frozen single-file binary
+        shell: bash
+        run: |
+          binary=dist/desktop-single/HCS-Trading-Intelligence
+          if [ "$RUNNER_OS" = "Windows" ]; then binary="$binary.exe"; fi
+          uv run --locked python scripts/build_mcpb.py bundle --binary "$binary"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-single-${{ matrix.os }}
+          path: |
+            dist/desktop-single/HCS-Trading-Intelligence
+            dist/desktop-single/HCS-Trading-Intelligence.exe
+            dist/mcpb/*.mcpb
           if-no-files-found: error
 
   python313:
@@ -133,6 +147,10 @@ jobs:
       # finding from uv audit / npm audit fails the step despite the tee.
       - run: uv audit --locked 2>&1 | tee security-reports/uv-audit.txt
       - run: uv audit --locked --only-group packaging 2>&1 | tee security-reports/uv-audit-packaging.txt
+      - name: pip-audit the exported runtime requirements
+        run: |
+          uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file requirements-audit.txt
+          uvx --from pip-audit==2.10.1 pip-audit --requirement requirements-audit.txt --no-deps --disable-pip --strict 2>&1 | tee security-reports/pip-audit.txt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'

@@ -12,11 +12,9 @@ NAME = "HCS-Trading-Intelligence"
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--onefile", action="store_true", help="Build the Windows single EXE"
+        "--onefile", action="store_true", help="Build a single-file executable"
     )
     args = parser.parse_args()
-    if args.onefile and sys.platform != "win32":
-        parser.error("The single-file build currently targets Windows")
     layout = "desktop-single" if args.onefile else "desktop"
     assets = ROOT / "src" / "hcs_trader" / "ui_assets"
     skills = ROOT / "src" / "hcs_trader" / "skills"

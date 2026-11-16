@@ -8,7 +8,7 @@ import license_inventory
 import pytest
 import smoke_desktop
 import verify_release
-from collect_release import collect
+from collect_release import collect, collect_extras
 
 from hcs_trader.live_readiness import (
     EVIDENCED,
@@ -256,3 +256,33 @@ def test_pyinstaller_exception_is_bound_to_the_reviewed_version() -> None:
     }
     assert license_inventory.copyleft_violations([record]) == []
     assert license_inventory.copyleft_violations([{**record, "version": "6.22.4"}])
+
+
+def test_extra_release_assets_are_collected_and_checksummed(tmp_path: Path) -> None:
+    downloads = tmp_path / "collected"
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    uploads = {
+        "desktop-single-windows-latest": ("HCS-Trading-Intelligence.exe", "w.mcpb"),
+        "desktop-single-macos-latest": ("HCS-Trading-Intelligence", "m.mcpb"),
+        "desktop-single-ubuntu-latest": ("HCS-Trading-Intelligence", "l.mcpb"),
+    }
+    for upload, names in uploads.items():
+        (downloads / upload).mkdir(parents=True)
+        for name in names:
+            (downloads / upload / name).write_text(upload + name, encoding="ascii")
+    collect_extras(downloads, staging)
+    assert sorted(path.name for path in staging.iterdir()) == [
+        "HCS-Trading-Intelligence-linux-x64",
+        "HCS-Trading-Intelligence-macos-arm64",
+        "l.mcpb",
+        "m.mcpb",
+        "w.mcpb",
+    ]
+    verify_release.write_sums(staging)
+    assert verify_release.verify_sums(staging) == []
+    (downloads / "desktop-single-macos-latest" / "m.mcpb").unlink()
+    again = tmp_path / "again"
+    again.mkdir()
+    with pytest.raises(ValueError, match="mcpb"):
+        collect_extras(downloads, again)

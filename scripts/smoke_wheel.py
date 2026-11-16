@@ -59,6 +59,13 @@ def _smoke(
                 f"Unexpected capabilities from installed {artifact.name}"
             )
         probe_installed(python, cli, root)
+        subprocess.run(  # noqa: S603
+            [str(cli), "selftest"],
+            check=True,
+            timeout=300,
+            env=offline_environment(root),
+            cwd=root,
+        )
         if upgrade_from is not None:
             _check_upgrade_state(python, root, seed=False)
 

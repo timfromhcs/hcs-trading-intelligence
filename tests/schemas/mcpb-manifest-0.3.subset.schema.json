@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Offline subset of the MCPB manifest 0.3 specification (modelcontextprotocol/mcpb MANIFEST.md): required fields, binary server shape and platform_overrides.",
+  "type": "object",
+  "required": ["manifest_version", "name", "version", "description", "author", "server"],
+  "properties": {
+    "manifest_version": { "const": "0.3" },
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "display_name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$" },
+    "description": { "type": "string", "minLength": 1 },
+    "long_description": { "type": "string" },
+    "author": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "email": { "type": "string" },
+        "url": { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    },
+    "repository": {
+      "type": "object",
+      "required": ["type", "url"],
+      "properties": { "type": { "type": "string" }, "url": { "type": "string" } }
+    },
+    "license": { "type": "string" },
+    "keywords": { "type": "array", "items": { "type": "string" } },
+    "tools_generated": { "type": "boolean" },
+    "server": {
+      "type": "object",
+      "required": ["type", "entry_point", "mcp_config"],
+      "properties": {
+        "type": { "enum": ["node", "python", "binary", "uv"] },
+        "entry_point": { "type": "string", "minLength": 1 },
+        "mcp_config": {
+          "type": "object",
+          "required": ["command"],
+          "properties": {
+            "command": { "type": "string", "minLength": 1 },
+            "args": { "type": "array", "items": { "type": "string" } },
+            "env": { "type": "object", "additionalProperties": { "type": "string" } },
+            "platform_overrides": {
+              "type": "object",
+              "propertyNames": { "enum": ["win32", "darwin", "linux"] },
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "command": { "type": "string" },
+                  "args": { "type": "array", "items": { "type": "string" } },
+                  "env": { "type": "object", "additionalProperties": { "type": "string" } }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "platforms": {
+          "type": "array",
+          "items": { "enum": ["darwin", "win32", "linux"] }
+        }
+      }
+    }
+  }
+}

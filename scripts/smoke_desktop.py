@@ -84,16 +84,30 @@ def _verify(process: subprocess.Popen[bytes], data: Path) -> None:
         raise RuntimeError("Desktop dashboard assets are unavailable")
 
 
+def _selftest(executable: Path) -> None:
+    """Run the frozen binary's own offline selftest; any failed check is fatal."""
+    result = subprocess.run(  # noqa: S603
+        [str(executable), "selftest"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    print(result.stdout, end="")
+    if result.returncode != 0:
+        print(result.stderr)
+        raise RuntimeError("Frozen selftest failed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--onefile", action="store_true")
     args = parser.parse_args()
-    if args.onefile and os.name != "nt":
-        parser.error("The single-file build currently targets Windows")
     suffix = ".exe" if os.name == "nt" else ""
     layout = Path("dist") / ("desktop-single" if args.onefile else "desktop")
     program_dir = layout if args.onefile else layout / _NAME
     executable = (program_dir / (_NAME + suffix)).resolve()
+    _selftest(executable)
     with _temporary_root(wait_for_extracted_files=args.onefile) as root:
         data = root / "Données héhé 数据" / "app data"
         log = root / "desktop.log"
@@ -116,7 +130,7 @@ def main() -> None:
             raise RuntimeError(f"{error}\n{log.read_text(errors='replace')}") from error
         finally:
             if process.poll() is None:
-                if args.onefile:
+                if args.onefile and os.name == "nt":
                     # The Windows bootloader runs a child containing the Python runtime.
                     taskkill = shutil.which("taskkill")
                     if taskkill is None:

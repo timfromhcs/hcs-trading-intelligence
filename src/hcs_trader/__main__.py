@@ -776,7 +776,17 @@ def main() -> None:
     score_parser.add_argument("file", type=Path)
     commands.add_parser("pause-execution", help="Persist the local execution pause")
     commands.add_parser("resume-execution", help="Clear the local execution pause")
-    commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
+    for mcp_name in ("mcp", "mcp-stdio"):
+        mcp_parser = commands.add_parser(
+            mcp_name, help="Run the read-only local MCP server on stdio"
+        )
+        mcp_parser.add_argument(
+            "--data-dir", type=Path, help="Use a separate local data directory"
+        )
+    selftest_parser = commands.add_parser(
+        "selftest", help="Run the offline installation self-test"
+    )
+    selftest_parser.add_argument("--trip-and-die", type=Path, help=argparse.SUPPRESS)
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1084,8 +1094,22 @@ def main() -> None:
             parser.exit(1, f"{error}\n")
         if code:
             parser.exit(code)
-    elif arguments.command == "mcp":
-        create_mcp_server(local_store().path).run(transport="stdio")
+    elif arguments.command in {"mcp", "mcp-stdio"}:
+        mcp_store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        if arguments.command == "mcp-stdio" and not mcp_store.path.exists():
+            # A fresh install (for example a bundle) needs a migrated database.
+            mcp_store.initialize()
+        create_mcp_server(mcp_store.path).run(transport="stdio")
+    elif arguments.command == "selftest":
+        from hcs_trader import selftest
+
+        if arguments.trip_and_die is not None:
+            selftest.trip_and_die(arguments.trip_and_die)
+        sys.exit(selftest.main())
     elif arguments.command in {"spot-canary-allow", "spot-canary-revoke"}:
         store = local_store()
         try:

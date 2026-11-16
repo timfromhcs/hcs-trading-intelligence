@@ -1,5 +1,14 @@
 # V1 release assessment
 
+## Release candidate evidence · 2026-11-16 (local Windows, commit b66c2d2 plus this documentation commit)
+
+- Gates (`scripts/run_gates.py`): ruff, ruff format, mypy, pytest (coverage gate 80%) and secret scan all exited 0.
+- `hcs-trader selftest` passed on the source install and on the frozen single-file `HCS-Trading-Intelligence.exe` (27,455,196 bytes, SHA-256 `e61b5e35ee9e50692ef0b0a6c0103fa1e78fe20a650bea46d7ba3a6b078a9b89`): migrations, PAPER default, kill switch surviving a process kill, loopback bind, MCP stdio tool listing.
+- Wheel `hcs_trader-0.2.0-py3-none-any.whl` SHA-256 `ffe6d0d82bb1854ff6f80f2f92246dc077956f82c999b7f403970893d43ef476`; sdist `007ed4f68736994f924f1f3c52d6975a6e198f1a7cf5e5f27152a453dc47a3dd`.
+- New this candidate: venue-agnostic spot port with Binance Spot Testnet adapter and Kraken validate probe, EVM/Solana chain-valid signers, regtest PSBT node-signer, release workflows with `selftest`, MCPB bundle. All verified offline or against fixtures only.
+- Not verified: macOS and Linux native runs, any live testnet or venue run, signing/notarization, provenance on a published release. These need the operator (keys, public repository, signing identities) and GitHub-hosted runners. `v1.0.0` is therefore not declared; this is a release candidate.
+
+
 ## Hosted platform rehearsal · 2026-11-16
 
 [Foundation checks run 43850707718](https://github.com/timfromhcs/hcs-trading-intelligence/actions/runs/43850707718) passed on commit `dbfc633`. Windows, macOS and Ubuntu each passed the native desktop smoke test, clean-environment wheel and source installs, and the upgrade from the pinned v0.2.0 wheel. The upgrade preserves the execution pause and audit event across installation. The Windows single-file build also passed on this run. These results are historical candidate evidence. Repeat on the exact release commit.

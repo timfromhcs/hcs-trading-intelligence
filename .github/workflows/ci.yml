@@ -2,7 +2,7 @@ name: Foundation checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
   workflow_call:
   schedule:

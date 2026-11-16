@@ -20,6 +20,8 @@ The artifacts are development builds. Signing, notarization and production relea
 
 ## Release pipeline
 
+Push a candidate commit to a `release/**` branch to run the automated cross-platform build, smoke tests and security checks before tagging. The draft-release workflow runs on version tags.
+
 Tag a commit on `main` as `vX.Y.Z` (or `vX.Y.Z-rc.N`, which is marked pre-release). `.github/workflows/release.yml` then:
 
 1. re-runs every gate in `ci.yml` (lint, types, tests, security scans, native desktop builds) on the tagged commit,

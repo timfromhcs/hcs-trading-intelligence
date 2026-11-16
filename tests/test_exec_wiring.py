@@ -248,14 +248,15 @@ async def test_startup_reconcile_of_unconfirmed_order_trips(tmp_path: Path) -> N
 
 def test_risk_engine_reads_persisted_pause_and_fails_closed(tmp_path: Path) -> None:
     store, _ = _store(tmp_path, canary=False)
-    now = datetime.now(UTC)
     quote = _quote()
+    order = _order()
+    now = datetime.now(UTC)
     quality = quote.quality_at(
         now, max_age=timedelta(seconds=30), max_clock_skew=timedelta(seconds=2)
     )
 
     def verdict(engine: RiskEngine) -> bool:
-        return engine.evaluate_order(_order(), quote, quality, 0, "v1.0.0", now).allowed
+        return engine.evaluate_order(order, quote, quality, 0, "v1.0.0", now).allowed
 
     engine = RiskEngine(RiskPolicy(live_mode_enabled=True), store.fail_safe_paused)
     assert verdict(engine)

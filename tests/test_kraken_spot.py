@@ -1395,3 +1395,39 @@ def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
             },
         )
         assert over_resp.status_code == 409
+
+
+@pytest.mark.anyio
+async def test_kraken_validate_probe_sends_validate_and_places_nothing() -> None:
+    from hcs_trader.kraken_spot import kraken_validate_probe
+
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/0/private/AddOrder"
+        seen.update(urllib.parse.parse_qsl(request.content.decode()))
+        return httpx2.Response(
+            200,
+            json={"error": [], "result": {"descr": {"order": "buy 0.0001 @ limit"}}},
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        result = await kraken_validate_probe(_API_KEY, _API_SECRET, client)
+
+    assert seen["validate"] == "true"
+    assert result["accepted"] is True
+    assert result["order_placed"] is False
+
+
+@pytest.mark.anyio
+async def test_kraken_validate_probe_reports_rejection() -> None:
+    from hcs_trader.kraken_spot import kraken_validate_probe
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"error": ["EOrder:Invalid price"]})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        result = await kraken_validate_probe(_API_KEY, _API_SECRET, client)
+
+    assert result["accepted"] is False
+    assert result["order_placed"] is False

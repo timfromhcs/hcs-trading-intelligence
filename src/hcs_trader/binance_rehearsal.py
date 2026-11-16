@@ -89,8 +89,13 @@ async def _cleanup(
                 ambiguous, now(), never_acknowledged=True
             )
         if current.state in (OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED):
-            await adapter.cancel_spot_order(current, now())
-        return True
+            cancelled = await adapter.cancel_spot_order(current, now())
+            return cancelled.state is OrderState.CANCELLED
+        return current.state in (
+            OrderState.CANCELLED,
+            OrderState.FILLED,
+            OrderState.REJECTED,
+        )
     except (BinanceTestnetError, ValueError, KeyError, ArithmeticError):
         return False
 

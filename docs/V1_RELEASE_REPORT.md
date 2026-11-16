@@ -1,5 +1,9 @@
 # V1 release assessment
 
+## Candidate CodeQL findings · 2026-11-16
+
+[CodeQL run 43851455472](https://github.com/timfromhcs/hcs-trading-intelligence/actions/runs/43851455472) analyzed commit `47ca6c3`. JavaScript/TypeScript reported zero findings. Python reported six `py/weak-sensitive-data-hashing` findings. The two production occurrences fingerprint the Kraken API key identifier to bind an approval to that identifier. Kraken authenticates requests with a separate private signing key. The remaining four findings fingerprint test fixtures. Reviewed as false positives for password storage. Repeat the scan and review on the final release commit. [Kraken API authorization](https://docs.kraken.com/api/docs/rest-api/get-api-key-info)
+
 ## Research and market-data regression evidence · 2026-11-16
 
 - A persisted forward shadow replay survives reopening SQLite. The scheduler emits it once, and an explicit replay returns the same ID. REST, CLI and MCP agree on that ID after restart. The replay leaves the paper fill ledger untouched. The walk-forward promotion test also rejects a mismatched report and requires the separately scored holdout.

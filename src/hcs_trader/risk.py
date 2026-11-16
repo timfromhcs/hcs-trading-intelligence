@@ -59,6 +59,8 @@ class RiskPolicy:
     max_reconcile_age_seconds: int = 300
     # Consecutive rejected verdicts/venue rejects that trip the kill switch (7.2).
     max_consecutive_rejects: int = 5
+    max_hot_wallet_usd: Decimal | None = None
+    hot_fraction_of_portfolio: Decimal | None = None
 
 
 def _canonical(value: object) -> object:
@@ -71,7 +73,9 @@ def _canonical(value: object) -> object:
 
 def policy_version(policy: RiskPolicy) -> str:
     """Stable content hash identifying the exact policy a decision was made under."""
-    fields = {key: _canonical(val) for key, val in asdict(policy).items()}
+    fields = {
+        key: _canonical(val) for key, val in asdict(policy).items() if val is not None
+    }
     blob = json.dumps(fields, sort_keys=True, separators=(",", ":"))
     return "policy-" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -213,7 +217,11 @@ class RiskEngine:
             )
 
         if portfolio is None:
-            if pol.require_portfolio_state:
+            if (
+                pol.require_portfolio_state
+                or pol.max_hot_wallet_usd is not None
+                or pol.hot_fraction_of_portfolio is not None
+            ):
                 return "Pre-trade rejected: portfolio state is required"
             return None
         return self._portfolio_reason(
@@ -254,6 +262,18 @@ class RiskEngine:
         edge_bps: Decimal | None,
     ) -> str | None:
         pol = self.policy
+        if (
+            pol.max_hot_wallet_usd is not None
+            and pf.hot_equity_usd > pol.max_hot_wallet_usd
+        ):
+            return "Hot-wallet equity exceeds the configured USD cap"
+        if pol.hot_fraction_of_portfolio is not None:
+            if pf.total_equity_usd is None:
+                return (
+                    "Total portfolio equity is required for the hot-wallet share limit"
+                )
+            if pf.hot_equity_usd > pf.total_equity_usd * pol.hot_fraction_of_portfolio:
+                return "Hot-wallet share exceeds the configured portfolio limit"
         base = order.market.split("/")[0]
         fee_bps = pol.estimated_fee_bps
         if fee_bps > pol.max_fee_bps:

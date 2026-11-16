@@ -15,7 +15,7 @@ def _frozen(values: Mapping[str, Decimal], name: str) -> Mapping[str, Decimal]:
 
 @dataclass(frozen=True, slots=True)
 class PortfolioState:
-    """Hot-wallet state in USD terms; never includes cold-reserve funds."""
+    """Hot-wallet balances and optional read-only total portfolio valuation."""
 
     hot_equity_usd: Decimal
     peak_equity_usd: Decimal
@@ -25,6 +25,7 @@ class PortfolioState:
     base_balances: Mapping[str, Decimal] = field(default_factory=dict)
     open_positions: int = 0
     consecutive_losses: int = 0
+    total_equity_usd: Decimal | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -37,6 +38,11 @@ class PortfolioState:
                 raise ValueError(f"{name} must be finite")
         if self.hot_equity_usd <= 0 or self.peak_equity_usd < self.hot_equity_usd:
             raise ValueError("equity must be positive and not exceed peak equity")
+        if self.total_equity_usd is not None and (
+            not self.total_equity_usd.is_finite()
+            or self.total_equity_usd < self.hot_equity_usd
+        ):
+            raise ValueError("total portfolio equity must cover hot-wallet equity")
         if self.available_quote_usd < 0:
             raise ValueError("available_quote_usd must be non-negative")
         if self.open_positions < 0 or self.consecutive_losses < 0:

@@ -213,6 +213,8 @@ def active_live_policy(store: AuditStore) -> RiskPolicy | None:
         max_daily_loss_fraction=lim.max_daily_loss_fraction,
         max_drawdown_fraction=lim.max_drawdown_fraction,
         max_positions=lim.max_positions,
+        max_hot_wallet_usd=lim.max_hot_wallet_usd,
+        hot_fraction_of_portfolio=lim.hot_fraction_of_portfolio,
     )
 
 

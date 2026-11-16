@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.execution import (
     SpotOrder,
@@ -355,6 +357,52 @@ def test_require_portfolio_state_fails_closed() -> None:
         datetime.now(UTC),
     )
     assert not d.allowed and "portfolio state" in (d.reason or "")
+
+
+@pytest.mark.parametrize(
+    ("portfolio", "expected"),
+    [
+        (None, "portfolio state is required"),
+        (_pf(), "Total portfolio equity is required"),
+        (_pf(total_equity_usd=Decimal("19999")), "portfolio limit"),
+        (_pf(total_equity_usd=Decimal("20000")), None),
+        (
+            _pf(
+                hot_equity_usd=Decimal("10001"),
+                peak_equity_usd=Decimal("10001"),
+                total_equity_usd=Decimal("30000"),
+            ),
+            "USD cap",
+        ),
+    ],
+)
+def test_hot_wallet_allocation_limits(
+    portfolio: PortfolioState | None, expected: str | None
+) -> None:
+    policy = RiskPolicy(
+        live_mode_enabled=True,
+        max_hot_wallet_usd=Decimal("10000"),
+        hot_fraction_of_portfolio=Decimal("0.5"),
+    )
+    decision = RiskEngine(policy).evaluate_order(
+        _sample_order(quantity="0.0003"),
+        _sample_quote(),
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        datetime.now(UTC),
+        portfolio=portfolio,
+        invalidation_price=Decimal("49550"),
+    )
+    assert decision.allowed == (expected is None)
+    if expected is not None:
+        assert expected in (decision.reason or "")
+
+
+@pytest.mark.parametrize("total", [Decimal("NaN"), Decimal("9999")])
+def test_portfolio_total_cannot_be_invalid_or_omit_hot_equity(total: Decimal) -> None:
+    with pytest.raises(ValueError, match="total portfolio equity"):
+        _pf(total_equity_usd=total)
 
 
 def test_limit_price_deviation_both_sides() -> None:

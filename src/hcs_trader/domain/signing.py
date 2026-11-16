@@ -56,12 +56,13 @@ class SigningCapability:
 _SIGNING_CAPABILITIES: dict[str, SigningCapability] = {
     "eip155": SigningCapability(
         namespace="eip155",
-        chain_valid=False,
-        requires_test_only_flag=True,
+        chain_valid=True,
+        requires_test_only_flag=False,
         note=(
-            "Placeholder only: SECP256K1 ECDSA over SHA-256 of a JSON test "
-            "envelope. Not Ethereum keccak-256/RLP/EIP-1559 signing; output is "
-            "not a broadcastable transaction."
+            "Chain-valid EIP-1559 (type 0x02) signing for allowlisted Sepolia "
+            "ERC-20 approve and SwapRouter02 exactInputSingle plans, with "
+            "independent RLP/ABI decoding before key access. Mainnet is disabled "
+            "unless an operator supplies routers and tokens explicitly."
         ),
     ),
     "bip122": SigningCapability(
@@ -105,6 +106,7 @@ class ValidatedTransactionPlan:
     destination_id: str
     max_slippage_bps: int
     max_network_fee_base_units: int
+    # EVM: wei per gas (compared with maxPriorityFeePerGas), not a total.
     max_priority_fee_base_units: int
     idempotency_key: str
     risk_decision_id: str

@@ -14,10 +14,13 @@ authors = [{ name = "HCS.media" }]
 dependencies = [
     "cryptography>=50.0.2",
     "defusedxml>=0.7.1",
+    "eth-abi==6.0.0",
+    "eth-account==0.14.0",
     "fastapi>=0.163.1",
     "httpx2>=2.16.0",
     "mcp>=2.3,<3",
     "platformdirs>=4.14.5",
+    "rlp==5.0.0",
     "uvicorn>=0.54.0",
 ]
 

@@ -21,6 +21,11 @@ from hcs_trader.domain.signing import (
     ValidatedTransactionPlan,
     signing_capabilities,
 )
+from hcs_trader.evm_signing import (
+    EvmSigningPolicy,
+    decode_evm_payload,
+    sign_evm_payload,
+)
 from hcs_trader.keystore import decrypt_keystore_record
 
 
@@ -98,9 +103,11 @@ class IsolatedSigner:
     decision through injected read-only callables at signing time, so a pause
     or a revoked decision recorded after construction still blocks signing.
 
-    EVM (``eip155``) and UTXO (``bip122``) signing paths are placeholders that
-    do not produce chain-valid transactions. They raise ``SigningUnsupported``
-    unless ``allow_test_only_signing`` is explicitly set (tests only).
+    EVM (``eip155``) signing is chain-valid EIP-1559 (see ``evm_signing``) and
+    is independent of ``allow_test_only_signing``. The UTXO (``bip122``) path is
+    a placeholder that does not produce chain-valid transactions. It raises
+    ``SigningUnsupported`` unless ``allow_test_only_signing`` is explicitly set
+    (tests only).
     """
 
     def __init__(
@@ -111,8 +118,10 @@ class IsolatedSigner:
         risk_decision_lookup: RiskDecisionLookup,
         allow_test_only_signing: bool = False,
         signed_plans: SignedPlanLedger | None = None,
+        evm_policy: EvmSigningPolicy | None = None,
     ) -> None:
         self.policy = policy
+        self.evm_policy = evm_policy or EvmSigningPolicy()
         self._ledger = signed_plans
         self._pause_state = pause_state
         self._risk_decision_lookup = risk_decision_lookup
@@ -265,6 +274,8 @@ class IsolatedSigner:
         self._assert_namespace_supported(chain_ns)
 
         # 6. Independent payload decoding & consistency check
+        if chain_ns == "eip155":
+            return self._sign_evm(plan, unsigned_payload, passphrase, at)
         decode_and_verify_payload(plan, unsigned_payload)
 
         # 7. Key retrieval
@@ -311,3 +322,31 @@ class IsolatedSigner:
             tx_hash=tx_hash,
             signed_at=at,
         )
+
+    def _sign_evm(
+        self,
+        plan: ValidatedTransactionPlan,
+        unsigned_payload: bytes,
+        passphrase: str,
+        at: datetime,
+    ) -> SignedTransaction:
+        """Chain-valid EIP-1559 signing; decode is verified before key access.
+
+        Runs after the pause, policy, risk-decision and idempotency checks, so a
+        repeated idempotency key is always refused (no cached replay) and every
+        call decodes the payload independently.
+        """
+        decoded = decode_evm_payload(plan, unsigned_payload, self.evm_policy)
+        record = self._keystore.get(("eip155", plan.signer_address))
+        if record is None:
+            raise KeystoreError(
+                f"No keystore record registered for address {plan.signer_address} "
+                "in namespace eip155"
+            )
+        raw_secret = decrypt_keystore_record(record, passphrase)
+        try:
+            signed = sign_evm_payload(plan, decoded, raw_secret, at)
+        finally:
+            del raw_secret
+        self._record_signed(plan, signed.tx_hash, at)
+        return signed

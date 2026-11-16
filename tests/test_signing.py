@@ -20,6 +20,12 @@ from hcs_trader.domain.signing import (
     ValidatedTransactionPlan,
     signing_capabilities,
 )
+from hcs_trader.evm_signing import (
+    SEPOLIA_SWAP_ROUTER02,
+    SEPOLIA_USDC,
+    SEPOLIA_WETH,
+    build_swap_payload,
+)
 from hcs_trader.keystore import (
     create_keystore_record,
     decrypt_keystore_record,
@@ -32,8 +38,9 @@ from hcs_trader.signing import (
 )
 from hcs_trader.storage import AuditStore, KillSwitchCause
 
+# Public Hardhat/Anvil test key #0 (controls 0xf39F...2266; never holds real funds).
 _SYNTHETIC_EVM_KEY = bytes.fromhex(
-    "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36088a"
+    "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 )
 _SYNTHETIC_SOL_KEY = bytes.fromhex(
     "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
@@ -43,28 +50,28 @@ _SYNTHETIC_SOL_KEY = bytes.fromhex(
 def _sample_plan(
     *,
     chain_id: str = "eip155:11155111",
-    destination: str = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
-    amount_in: int = 100000000000000000,
+    destination: str = SEPOLIA_SWAP_ROUTER02,
+    amount_in: int = 10**16,
     slippage_bps: int = 50,
-    fee: int = 50000,
+    fee: int = 10**16,
     deadline: datetime | None = None,
     simulation_success: bool = True,
-    token_in: str | None = None,
-    token_out: str | None = None,
+    token_in: str | None = SEPOLIA_WETH,
+    token_out: str | None = SEPOLIA_USDC,
 ) -> ValidatedTransactionPlan:
     plan = ValidatedTransactionPlan(
         canonical_chain_id=chain_id,
         network="ethereum:sepolia",
         wallet_id="wallet-test-01",
         signer_address="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-        asset_in="eip155:11155111/native:ETH",
-        asset_out="eip155:11155111/erc20:0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+        asset_in=f"eip155:11155111/erc20:{SEPOLIA_WETH}",
+        asset_out=f"eip155:11155111/erc20:{SEPOLIA_USDC}",
         amount_in_base_units=amount_in,
-        min_amount_out_base_units=95000000000000000,
+        min_amount_out_base_units=20_000_000,
         destination_id=destination,
         max_slippage_bps=slippage_bps,
         max_network_fee_base_units=fee,
-        max_priority_fee_base_units=10000,
+        max_priority_fee_base_units=2 * 10**9,
         idempotency_key="swap-test-0001",
         risk_decision_id="risk-dec-0001",
         risk_policy_version="v1.0.0",
@@ -83,18 +90,19 @@ def _active_policy() -> SignerPolicy:
         allowed_chain_ids=frozenset({"eip155:11155111", "solana:devnet"}),
         allowed_destinations=frozenset(
             {
-                "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+                SEPOLIA_SWAP_ROUTER02,
                 "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
             }
         ),
         allowed_tokens=frozenset(
             {
-                "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+                SEPOLIA_USDC,
+                SEPOLIA_WETH,
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             }
         ),
         max_slippage_bps_limit=100,
-        max_network_fee_limit=100000,
+        max_network_fee_limit=10**17,
         live_mode_enabled=True,
         kill_switch_active=False,
     )
@@ -127,14 +135,13 @@ def _approve(plan: ValidatedTransactionPlan) -> dict[str, ApprovedRiskDecision]:
 
 
 def _evm_payload(plan: ValidatedTransactionPlan) -> bytes:
-    return json.dumps(
-        {
-            "to": plan.destination_id,
-            "chain_id": plan.canonical_chain_id,
-            "amount": plan.amount_in_base_units,
-            "from": plan.signer_address,
-        }
-    ).encode("utf-8")
+    return build_swap_payload(
+        plan,
+        fee_tier=3000,
+        gas_limit=250_000,
+        max_fee_per_gas=30 * 10**9,
+        max_priority_fee_per_gas=10**9,
+    )
 
 
 def _evm_record(passphrase: str) -> dict[str, Any]:
@@ -207,10 +214,10 @@ def test_keystore_associated_data_tampering_fails() -> None:
 def test_invariant_live_mode_false_rejects() -> None:
     policy = SignerPolicy(
         allowed_chain_ids=frozenset({"eip155:11155111"}),
-        allowed_destinations=frozenset({"0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"}),
+        allowed_destinations=frozenset({SEPOLIA_SWAP_ROUTER02}),
         allowed_tokens=frozenset(),
         max_slippage_bps_limit=100,
-        max_network_fee_limit=100000,
+        max_network_fee_limit=10**17,
         live_mode_enabled=False,
         kill_switch_active=False,
     )
@@ -223,10 +230,10 @@ def test_invariant_live_mode_false_rejects() -> None:
 def test_invariant_kill_switch_active_rejects() -> None:
     policy = SignerPolicy(
         allowed_chain_ids=frozenset({"eip155:11155111"}),
-        allowed_destinations=frozenset({"0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"}),
+        allowed_destinations=frozenset({SEPOLIA_SWAP_ROUTER02}),
         allowed_tokens=frozenset(),
         max_slippage_bps_limit=100,
-        max_network_fee_limit=100000,
+        max_network_fee_limit=10**17,
         live_mode_enabled=True,
         kill_switch_active=True,
     )
@@ -344,29 +351,6 @@ def test_preview_transaction_success() -> None:
     assert preview["plan_hash"] == plan.plan_hash
     assert preview["destination"] == plan.destination_id
     assert preview["amount_in"] == plan.amount_in_base_units
-
-
-def test_evm_signing_execution() -> None:
-    policy = _active_policy()
-    passphrase = "secure-password-123"
-    plan = _sample_plan()
-    signer = _signer(policy, decisions=_approve(plan))
-    signer.register_keystore_record(_evm_record(passphrase))
-    payload = json.dumps(
-        {
-            "to": plan.destination_id,
-            "chain_id": plan.canonical_chain_id,
-            "amount": plan.amount_in_base_units,
-            "from": plan.signer_address,
-        }
-    ).encode("utf-8")
-
-    now = datetime.now(UTC)
-    signed = signer.sign_transaction(plan, payload, passphrase, at=now)
-    assert signed.plan_hash == plan.plan_hash
-    assert len(signed.raw_transaction_hex) > 0
-    assert len(signed.tx_hash) == 64
-    assert signed.signed_at == now
 
 
 def test_solana_signing_execution() -> None:
@@ -572,17 +556,34 @@ def test_failed_signing_does_not_consume_idempotency_key() -> None:
     assert signed.plan_hash == plan.plan_hash
 
 
-def test_evm_signing_unsupported_without_test_only_flag() -> None:
+def test_evm_signing_does_not_require_test_only_flag() -> None:
     passphrase = "evm-password"
     plan = _sample_plan()
     signer = _signer(
         _active_policy(), decisions=_approve(plan), allow_test_only_signing=False
     )
     signer.register_keystore_record(_evm_record(passphrase))
-    with pytest.raises(SigningUnsupported, match="eip155"):
-        signer.sign_transaction(
-            plan, _evm_payload(plan), passphrase, at=datetime.now(UTC)
-        )
+    signed = signer.sign_transaction(
+        plan, _evm_payload(plan), passphrase, at=datetime.now(UTC)
+    )
+    assert signed.raw_transaction_hex.startswith("02")
+
+
+def test_evm_json_envelope_payload_is_rejected() -> None:
+    passphrase = "evm-password"
+    plan = _sample_plan()
+    signer = _signer(_active_policy(), decisions=_approve(plan))
+    signer.register_keystore_record(_evm_record(passphrase))
+    envelope = json.dumps(
+        {
+            "to": plan.destination_id,
+            "chain_id": plan.canonical_chain_id,
+            "amount": plan.amount_in_base_units,
+            "from": plan.signer_address,
+        }
+    ).encode("utf-8")
+    with pytest.raises(SignerTamperingError):
+        signer.sign_transaction(plan, envelope, passphrase, at=datetime.now(UTC))
 
 
 def test_utxo_signing_unsupported_without_test_only_flag() -> None:
@@ -636,11 +637,11 @@ def test_utxo_signing_unsupported_without_test_only_flag() -> None:
         signer.sign_transaction(plan, payload, passphrase, at=datetime.now(UTC))
 
 
-def test_signing_capabilities_report_evm_and_utxo_unsupported() -> None:
+def test_signing_capabilities_report_evm_valid_and_utxo_unsupported() -> None:
     caps = signing_capabilities()
-    assert caps["eip155"].chain_valid is False
+    assert caps["eip155"].chain_valid is True
+    assert caps["eip155"].requires_test_only_flag is False
     assert caps["bip122"].chain_valid is False
-    assert "placeholder" in caps["eip155"].note.lower()
     assert "placeholder" in caps["bip122"].note.lower()
     assert set(caps) >= {"eip155", "bip122", "solana"}
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Report a forward shadow replay only when its result is newly recorded. An explicit replay still returns the existing result for identical inputs.
+- Require a fresh Kraken quote for CLI and HTTP canary submission. Cached quotes remain visible with their data-quality status during outages.
+
 - Gate the Kraken CLI and HTTP serving paths on the persisted operator policy and security-critical limitations. Recheck approval before submission.
 - Verify denied paper writes in the installed MCP smoke test and run frontend tests in CI.
 

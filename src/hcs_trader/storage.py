@@ -2052,7 +2052,8 @@ class AuditStore:
         run_id: str,
         evaluated_until: datetime,
         payload: str,
-    ) -> bool:
+    ) -> bool | None:
+        """Return insertion status, or None when the candidate changed."""
         with self._connect() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             if self._execution_pause(connection).paused:
@@ -2066,7 +2067,7 @@ class AuditStore:
                 PromotionStage.PAPER_SHADOW.value,
                 candidate.updated_at.isoformat(),
             ):
-                return False
+                return None
             inserted = connection.execute(
                 "INSERT INTO strategy_shadow_runs VALUES (?, ?, ?, ?) "
                 "ON CONFLICT (candidate_id, run_id) DO NOTHING",
@@ -2082,7 +2083,7 @@ class AuditStore:
                         "strategy.shadow.recorded",
                     ),
                 )
-            return True
+            return bool(inserted.rowcount)
 
     def latest_shadow_run(self, candidate_id: str) -> tuple[str, str] | None:
         with self._connect() as connection:

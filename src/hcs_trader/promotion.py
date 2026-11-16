@@ -359,6 +359,16 @@ def execute_shadow_run(
     at: datetime | None = None,
 ) -> tuple[str, BacktestResult]:
     """Execute and persist a paper shadow replay for a candidate in PAPER_SHADOW."""
+    run_id, result, _ = _record_shadow_replay(store, candidate_id, candles, at)
+    return run_id, result
+
+
+def _record_shadow_replay(
+    store: Any,
+    candidate_id: str,
+    candles: Sequence[Candle] | None,
+    at: datetime | None,
+) -> tuple[str, BacktestResult, bool]:
     candidate = store.get_strategy_candidate(candidate_id)
     if candidate is None:
         raise CandidateNotFound(f"Strategy candidate '{candidate_id}' not found")
@@ -399,12 +409,12 @@ def execute_shadow_run(
         raise PromotionRejected(str(error)) from error
     payload = ReportPayload(report=result).model_dump_json()
     run_id = sha256(payload.encode("utf-8")).hexdigest()
-    saved = store.record_shadow_run(
+    inserted: bool | None = store.record_shadow_run(
         candidate, run_id, result.dataset_closed_at, payload
     )
-    if not saved:
+    if inserted is None:
         raise PromotionRejected("Candidate changed during shadow simulation")
-    return run_id, result
+    return run_id, result, inserted
 
 
 def run_forward_shadow_observation(
@@ -431,10 +441,11 @@ def run_forward_shadow_observation(
         if cand.stage != PromotionStage.PAPER_SHADOW:
             continue
         try:
-            run_id, result = execute_shadow_run(
-                store, cand.candidate_id, candles=candles, at=now
+            run_id, result, inserted = _record_shadow_replay(
+                store, cand.candidate_id, candles, now
             )
-            results.append((cand.candidate_id, run_id, result))
+            if inserted:
+                results.append((cand.candidate_id, run_id, result))
         except (PromotionRejected, PaperRejected):
             continue
     return results

@@ -813,18 +813,18 @@ def create_app(
         if spot_execution is None:
             raise HTTPException(403, "Live spot execution is disabled")
         _verify_local_origin(request, "Spot orders")
-        latest_quote: Any = None
-        if quote_service is not None:
-            try:
-                snap = await quote_service.snapshot()
-                latest_quote = snap.quote
-            except (QuoteUnavailable, sqlite3.Error):
-                latest_quote = None
-        if latest_quote is None:
-            for q in store.quote_history(BTC_USD, limit=1):
-                latest_quote = q
-        if latest_quote is None:
-            raise HTTPException(503, "Market quote unavailable for spot execution")
+        if quote_service is None:
+            raise HTTPException(
+                503, "Market quote service unavailable for spot execution"
+            )
+        try:
+            snap = await quote_service.snapshot()
+        except (QuoteUnavailable, sqlite3.Error) as error:
+            raise HTTPException(
+                503, "Market quote unavailable for spot execution"
+            ) from error
+        if snap.quality is not DataQuality.FRESH or snap.quote is None:
+            raise HTTPException(503, "Spot execution requires a fresh market quote")
         now = datetime.now(UTC)
         order = SpotOrder(
             client_order_id=submission.client_order_id or uuid4().hex,
@@ -843,7 +843,7 @@ def create_app(
         try:
             observed = await spot_execution.submit(
                 order,
-                latest_quote,
+                snap.quote,
                 candidate_id=submission.candidate_id,
                 strategy_version=submission.strategy_version,
             )

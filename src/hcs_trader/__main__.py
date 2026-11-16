@@ -39,6 +39,7 @@ from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
+from hcs_trader.domain.market_data import DataQuality
 from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.domain.wallet import (
     SolanaBalance,
@@ -381,15 +382,12 @@ async def submit_canary_order(
             RiskEngine(policy),
             live_policy=lambda: require_runtime_live_policy(store),
         )
-        quote_provider = KrakenQuoteProvider(client)
-        try:
-            quote = await quote_provider.get_quote(BTC_USD)
-            store.record_quote(quote)
-        except Exception:
-            quotes = store.quote_history(BTC_USD, limit=1)
-            if not quotes:
-                raise
-            quote = quotes[0]
+        quotes = QuoteService(
+            KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+        )
+        snap = await quotes.snapshot()
+        if snap.quality is not DataQuality.FRESH or snap.quote is None:
+            raise RiskRejected("Spot execution requires a fresh market quote")
 
         now = datetime.now(UTC)
         order = SpotOrder(
@@ -408,7 +406,7 @@ async def submit_canary_order(
         )
         return await execution.submit(
             order,
-            quote,
+            snap.quote,
             candidate_id=candidate_id,
             strategy_version=cand.version,
         )

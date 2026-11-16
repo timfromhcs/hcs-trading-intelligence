@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import stat
+import subprocess  # noqa: S404
 import sys
 from contextlib import closing
 from dataclasses import replace
@@ -117,7 +118,23 @@ def test_kill_switch_trip_survives_restart_and_blocks_reservation(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "chaos.sqlite"
-    _fresh(path).trip_kill_switch(KillSwitchCause.VENUE_UNHEALTHY, "venue down")
+    child = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; from pathlib import Path; "
+            "from hcs_trader.storage import AuditStore, KillSwitchCause; "
+            "store = AuditStore(Path(sys.argv[1])); store.initialize(); "
+            "store.trip_kill_switch(KillSwitchCause.VENUE_UNHEALTHY, 'venue down'); "
+            "os._exit(73)",
+            str(path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 73, child.stderr
     restarted = _fresh(path)
     assert restarted.kill_switch_state().active
     with pytest.raises(RiskRejected, match="paused"):

@@ -1,5 +1,11 @@
 # V1 release assessment
 
+## Research and market-data regression evidence · 2026-11-16
+
+- A persisted forward shadow replay survives reopening SQLite. The scheduler emits it once, and an explicit replay returns the same ID. REST, CLI and MCP agree on that ID after restart. The replay leaves the paper fill ledger untouched. The walk-forward promotion test also rejects a mismatched report and requires the separately scored holdout.
+- A Kraken route test exercises a provider outage with a recent cached quote. REST still displays the source and degraded quote status, while both submission entry points reject an outage before reserving an order. A fresh fixture quote restores eligibility for the remaining risk and canary checks. These tests use a simulated provider and venue.
+- On Windows, a separate Python process persisted a kill-switch trip and exited immediately via `os._exit`. Reopening its database preserved the active switch and blocked a new spot reservation. Clean-machine and cross-platform evidence for KL-003 remains open.
+
 ## Integration checkout · 2026-11-16
 
 The integration checkout combines the 16 local commits beyond `7093314` with the implementation from the separate Claude worktree. Its release artifacts retain version `0.2.0`. Local Windows verification includes a native desktop build, a single-file EXE, wheel and source installs, the PAPER API, and a packaged MCP stdio request denied by the default capability policy.

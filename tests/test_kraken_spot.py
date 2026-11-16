@@ -758,6 +758,22 @@ async def test_canary_execution_end_to_end_and_fail_closed(tmp_path: Path) -> No
             )
 
 
+def _depth_response() -> httpx2.Response:
+    timestamp = int(datetime.now(UTC).timestamp())
+    return httpx2.Response(
+        200,
+        json={
+            "error": [],
+            "result": {
+                "XXBTZUSD": {
+                    "asks": [["50000", "1", timestamp]],
+                    "bids": [["49999", "1", timestamp]],
+                }
+            },
+        },
+    )
+
+
 def test_canary_cli_submit_and_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -789,8 +805,12 @@ def test_canary_cli_submit_and_fail_closed(
     )
     store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
 
+    market_available = False
+
     def handler(request: httpx2.Request) -> httpx2.Response:
         endpoint = request.url.path.rsplit("/", 1)[1]
+        if endpoint == "Depth":
+            return _depth_response() if market_available else httpx2.Response(503)
         if endpoint == "AddOrder":
             return httpx2.Response(
                 200,
@@ -845,6 +865,13 @@ def test_canary_cli_submit_and_fail_closed(
         "require_runtime_live_policy",
         lambda _store: RiskPolicy(live_mode_enabled=True),
     )
+    with pytest.raises(SystemExit) as unavailable:
+        launcher.main()
+    assert unavailable.value.code == 1
+    assert "requires a fresh market quote" in capsys.readouterr().err
+    assert store.list_open_spot_orders("kraken") == []
+
+    market_available = True
     launcher.main()
     out = json.loads(capsys.readouterr().out)
     assert out["state"] == "ACKNOWLEDGED"
@@ -877,7 +904,7 @@ def test_canary_cli_submit_and_fail_closed(
 def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
     store = AuditStore(tmp_path / "api_test.db")
     store.initialize()
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(microsecond=0)
     quote = Quote(BTC_USD, SOURCE, Decimal("49999"), Decimal("50000"), now, now, now)
     store.record_quote(quote)
 
@@ -918,8 +945,13 @@ def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
     )
     store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
 
+    market_available = False
+    elapsed = 0.0
+
     def handler(request: httpx2.Request) -> httpx2.Response:
         endpoint = request.url.path.rsplit("/", 1)[1]
+        if endpoint == "Depth":
+            return _depth_response() if market_available else httpx2.Response(503)
         if endpoint == "AddOrder":
             return httpx2.Response(
                 200,
@@ -939,7 +971,10 @@ def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
         store, adapter, RiskEngine(RiskPolicy(live_mode_enabled=True))
     )
     quote_srv = QuoteService(
-        KrakenQuoteProvider(mock_client), BTC_USD, record_quote=store.record_quote
+        KrakenQuoteProvider(mock_client),
+        BTC_USD,
+        record_quote=store.record_quote,
+        elapsed=lambda: elapsed,
     )
     quote_srv.restore(quote)
 
@@ -974,16 +1009,25 @@ def test_spot_order_api_serving_and_canary_approval(tmp_path: Path) -> None:
         )
         assert cross.status_code == 403
 
-        submit_resp = client.post(
-            "/api/v1/orders/spot",
-            json={
-                "side": "buy",
-                "quantity": "0.005",
-                "limit_price": "50000",
-                "candidate_id": "cand-api",
-                "strategy_version": "v1.0.0",
-            },
-        )
+        proposal = {
+            "side": "buy",
+            "quantity": "0.005",
+            "limit_price": "50000",
+            "candidate_id": "cand-api",
+            "strategy_version": "v1.0.0",
+        }
+        unavailable = client.post("/api/v1/orders/spot", json=proposal)
+        assert unavailable.status_code == 503
+        assert "requires a fresh market quote" in unavailable.json()["detail"]
+        assert store.list_open_spot_orders("kraken") == []
+        cached = client.get("/api/v1/market/quotes").json()
+        assert cached["quality"] == "DEGRADED"
+        assert cached["source"] == SOURCE
+        assert cached["provider_issue"] == "unavailable"
+
+        market_available = True
+        elapsed = 20.0
+        submit_resp = client.post("/api/v1/orders/spot", json=proposal)
         assert submit_resp.status_code == 200
         data = submit_resp.json()
         assert data["state"] == "ACKNOWLEDGED"

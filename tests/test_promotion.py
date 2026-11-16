@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from mcp import Client
 from starlette.testclient import TestClient
 
 from hcs_trader import __main__ as launcher
@@ -11,6 +12,7 @@ from hcs_trader.api import create_app
 from hcs_trader.backtest import BacktestConfig, BacktestResult, SimulatedFill
 from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.domain.market_data import Candle
+from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.promotion import (
     PROMOTION_LADDER,
     PromotionStage,
@@ -293,7 +295,8 @@ def test_champion_challenger_comparison() -> None:
     assert verdict2.challenger_wins is False
 
 
-def test_execute_shadow_run_and_cli_workflow(
+@pytest.mark.anyio
+async def test_execute_shadow_run_and_cli_workflow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -358,12 +361,15 @@ def test_execute_shadow_run_and_cli_workflow(
     )
     store.save_strategy_candidate(cand)
 
-    # 1. Execute shadow run directly
-    run_id, result = execute_shadow_run(store, cand.candidate_id)
-    assert run_id is not None
+    observed = run_forward_shadow_observation(store, cand.candidate_id)
+    [(candidate_id, run_id, result)] = observed
+    assert candidate_id == cand.candidate_id
     assert isinstance(result, BacktestResult)
 
-    # 2. Check latest and list shadow runs
+    store = AuditStore(store.path)
+    store.initialize()
+    assert run_forward_shadow_observation(store, cand.candidate_id) == []
+    assert execute_shadow_run(store, cand.candidate_id) == (run_id, result)
     latest_id, latest_report = get_latest_shadow_run(store, cand.candidate_id)
     assert latest_id == run_id
     assert latest_report == result
@@ -372,15 +378,16 @@ def test_execute_shadow_run_and_cli_workflow(
     assert len(history) == 1
     assert history[0][0] == run_id
 
-    # 3. Forward shadow observation
-    obs = run_forward_shadow_observation(store, cand.candidate_id)
-    assert len(obs) == 1
-    assert obs[0][0] == cand.candidate_id
-
     # 4. CLI strategy-shadow-run
-    monkeypatch.setattr(launcher, "local_store", lambda data_dir=None: store)
     monkeypatch.setattr(
-        "sys.argv", ["hcs-trader", "strategy-shadow-run", cand.candidate_id]
+        "sys.argv",
+        [
+            "hcs-trader",
+            "strategy-shadow-run",
+            cand.candidate_id,
+            "--data-dir",
+            str(tmp_path),
+        ],
     )
     launcher.main()
     out = capsys.readouterr().out
@@ -391,13 +398,34 @@ def test_execute_shadow_run_and_cli_workflow(
     # 5. CLI strategy-shadow-history
     monkeypatch.setattr(
         "sys.argv",
-        ["hcs-trader", "strategy-shadow-history", cand.candidate_id, "--limit", "10"],
+        [
+            "hcs-trader",
+            "strategy-shadow-history",
+            cand.candidate_id,
+            "--limit",
+            "10",
+            "--data-dir",
+            str(tmp_path),
+        ],
     )
     launcher.main()
     hist_out = capsys.readouterr().out
     hist_data = json.loads(hist_out)
     assert len(hist_data) == 1
     assert hist_data[0]["run_id"] == run_id
+    with TestClient(create_app(store), base_url="http://127.0.0.1") as api:
+        replay = api.get(f"/api/v1/strategies/candidates/{candidate_id}/shadow-run")
+        assert replay.is_success, replay.text
+        assert replay.json()["run_id"] == run_id
+    async with Client(create_mcp_server(store.path)) as mcp:
+        reply = await mcp.call_tool(
+            "strategies.get_shadow_runs", {"candidate_id": candidate_id}
+        )
+        assert not reply.is_error
+        [item] = reply.content
+        assert item.type == "text"
+        assert json.loads(item.text) == hist_data[0]
+    assert store.paper_fills(limit=10) == []
 
     # 6. Now promote to PAPER_APPROVED using verified shadow replay
     updated, gate = promote_strategy_candidate(

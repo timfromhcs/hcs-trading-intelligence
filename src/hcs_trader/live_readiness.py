@@ -15,6 +15,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
+from fnmatch import fnmatchcase
 from hashlib import file_digest
 from pathlib import Path
 from typing import Any
@@ -485,31 +486,48 @@ def _chk_checksums(ctx: Context) -> tuple[bool, str]:
     )
 
 
-def _dist_has(ctx: Context, pattern: str) -> tuple[bool, str]:
+def _chk_build(ctx: Context, platform: str, *patterns: str) -> tuple[bool, str]:
     if ctx.dist is None:
         return False, "no release directory supplied"
-    hits = sorted(p.name for p in ctx.dist.glob(pattern))
-    if not hits:
-        return False, f"no artifact matching {pattern}"
-    return True, "artifact present (runner provenance not verified): " + ", ".join(hits)
+    evidence = json.loads(
+        (ctx.dist / "build-evidence.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(evidence, dict) or evidence.get("commit") != ctx.head_sha:
+        return False, "build evidence does not match the source commit"
+    builds = evidence.get("artifacts")
+    files = builds.get(platform) if isinstance(builds, dict) else None
+    if not isinstance(files, dict) or len(files) != len(patterns):
+        return False, f"incomplete {platform} build evidence"
+    for pattern in patterns:
+        names = [name for name in files if fnmatchcase(name, pattern)]
+        if len(names) != 1:
+            return (
+                False,
+                f"expected one attested {platform} artifact matching {pattern}",
+            )
+        name = names[0]
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", name):
+            return False, "invalid build artifact name"
+        with (ctx.dist / name).open("rb") as file:
+            if file_digest(file, "sha256").hexdigest() != files[name]:
+                return False, f"build-evidence checksum mismatch: {name}"
+    return True, f"attested {platform} build and smoke-tested artifacts"
 
 
 def _chk_windows(ctx: Context) -> tuple[bool, str]:
-    return _dist_has(ctx, "*windows*.exe")
+    return _chk_build(ctx, "windows", "HCS-Trading-Intelligence.exe")
 
 
 def _chk_macos(ctx: Context) -> tuple[bool, str]:
-    return _dist_has(ctx, "*macos*")
+    return _chk_build(ctx, "macos", "HCS-Trading-Intelligence-darwin-*.tar.gz")
 
 
 def _chk_linux(ctx: Context) -> tuple[bool, str]:
-    return _dist_has(ctx, "*linux*")
+    return _chk_build(ctx, "linux", "HCS-Trading-Intelligence-linux-*.tar.gz")
 
 
 def _chk_wheels(ctx: Context) -> tuple[bool, str]:
-    whl, detail = _dist_has(ctx, "*.whl")
-    sdist, detail2 = _dist_has(ctx, "*.tar.gz")
-    return whl and sdist, f"{detail}; {detail2}"
+    return _chk_build(ctx, "python", "hcs_trader-*.whl", "hcs_trader-*.tar.gz")
 
 
 def _chk_changelog(ctx: Context) -> tuple[bool, str]:
@@ -602,10 +620,19 @@ def capability_findings() -> list[str]:
 
 def evaluate_checklist(ctx: Context) -> ChecklistReport:
     """Evaluate every section 18 checkbox; a failing or crashing check is unevidenced."""
+    try:
+        provenance = _chk_checksums(ctx)
+    except (OSError, ValueError) as error:
+        provenance = False, f"check failed: {error}"
     items: list[ChecklistItem] = []
     for item_id, section, text, check in _ITEMS:
         status, evidence = UNEVIDENCED, _MANUAL
-        if check is not None:
+        if item_id == "D-05":
+            ok, evidence = provenance
+            status = EVIDENCED if ok else UNEVIDENCED
+        elif item_id in {"D-01", "D-02", "D-03", "D-04"} and not provenance[0]:
+            evidence = "release artifact provenance must be verified first"
+        elif check is not None:
             try:
                 ok, detail = check(ctx) or (False, _MANUAL)
             except (OSError, ValueError) as error:

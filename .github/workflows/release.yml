@@ -96,9 +96,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p staging
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir collected
-          find collected -type f \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.exe' -o -name 'sbom.cdx.json' \) -exec cp {} staging/ \;
+          python3 scripts/collect_release.py collected staging "$GITHUB_SHA"
           ls -l staging
       - name: Aggregate checksums and verify distribution contents
         run: python3 scripts/verify_release.py staging --write

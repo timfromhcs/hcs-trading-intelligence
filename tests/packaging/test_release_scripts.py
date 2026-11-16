@@ -7,8 +7,70 @@ import generate_sbom
 import license_inventory
 import pytest
 import verify_release
+from collect_release import collect
+
+from hcs_trader.live_readiness import (
+    EVIDENCED,
+    UNEVIDENCED,
+    Context,
+    evaluate_checklist,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_native_release_evidence_uses_smoke_tested_uploads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloads = tmp_path / "collected"
+    staging = tmp_path / "staging"
+    sha = "a" * 40
+    uploads = {
+        "desktop-windows-single": ("HCS-Trading-Intelligence.exe",),
+        "desktop-windows-latest": ("HCS-Trading-Intelligence-windows-amd64.tar.gz",),
+        "desktop-macos-latest": ("HCS-Trading-Intelligence-darwin-arm64.tar.gz",),
+        "desktop-ubuntu-latest": ("HCS-Trading-Intelligence-linux-x86_64.tar.gz",),
+        "release-python": (
+            "hcs_trader-1.0.0-py3-none-any.whl",
+            "hcs_trader-1.0.0.tar.gz",
+            "sbom.cdx.json",
+        ),
+    }
+    for upload, names in uploads.items():
+        folder = downloads / upload
+        folder.mkdir(parents=True)
+        for name in names:
+            (folder / name).write_text(name, encoding="ascii")
+    collect(downloads, staging, sha)
+    evidence = json.loads((staging / "build-evidence.json").read_text())
+    assert evidence["commit"] == sha
+    assert len(evidence["artifacts"]) == 4
+
+    platform_items = {"D-01", "D-02", "D-03", "D-04"}
+
+    def statuses(head: str) -> dict[str, str]:
+        return {
+            item.item_id: item.status
+            for item in evaluate_checklist(
+                Context(root=ROOT, dist=staging, head_sha=head)
+            ).items
+            if item.item_id in platform_items
+        }
+
+    assert statuses(sha) == dict.fromkeys(platform_items, UNEVIDENCED)
+    monkeypatch.setattr(
+        "hcs_trader.live_readiness._chk_checksums", lambda _: (True, "verified fixture")
+    )
+    assert statuses(sha) == dict.fromkeys(platform_items, EVIDENCED)
+    assert statuses("b" * 40) == dict.fromkeys(platform_items, UNEVIDENCED)
+    (staging / "HCS-Trading-Intelligence.exe").write_bytes(b"different")
+    assert statuses(sha)["D-01"] == UNEVIDENCED
+
+    linux_name = uploads["desktop-ubuntu-latest"][0]
+    linux = downloads / "desktop-ubuntu-latest" / linux_name
+    linux.rename(downloads / "desktop-macos-latest" / linux_name)
+    with pytest.raises(ValueError, match="desktop-ubuntu-latest"):
+        collect(downloads, tmp_path / "wrong-runner", sha)
 
 
 def test_sbom_shape_from_real_lockfiles() -> None:

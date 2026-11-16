@@ -34,3 +34,5 @@ Verify downloads with `sha256sum --check SHA256SUMS` and verify a built artifact
 Pull request checks validate both lockfiles, audit dependencies and check for unreviewed strong-copyleft packages. `pre-commit install` enables the local hooks from `.pre-commit-config.yaml`.
 
 Run `hcs-trader release-check --dist PATH --gates-report REPORT` from the matching candidate checkout. The provenance check requires the GitHub CLI, complete checksums, a CycloneDX SBOM and the Sigstore bundle produced by the draft workflow. It verifies each attested file against the repository, release workflow and checkout commit.
+
+The draft workflow collects desktop artifacts from their designated native CI uploads and the Python distributions from the clean-install job. It attests `build-evidence.json` with the release files. The platform and distribution checks require that signed evidence and compare each artifact's digest and source commit.

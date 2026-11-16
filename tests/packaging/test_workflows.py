@@ -39,7 +39,11 @@ def test_release_is_tag_triggered_and_draft_only() -> None:
     assert "gh release create" in text
     assert "--draft" in text
     # The re-run of every gate must precede anything that can create a release.
-    assert re.search(r"preflight:\s+needs: gates", text)
+    assert re.search(r"preflight:\s+needs: \[gates, sast\]", text)
+    codeql = (WORKFLOWS / "codeql.yml").read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/codeql.yml" in text
+    assert "workflow_call:" in codeql
+    assert "codeql-results/*.sarif" in codeql
     assert re.search(r"assemble:[\s\S]{0,300}?needs: preflight", text)
     assert re.search(r"publish-draft:\s+needs: assemble", text)
     # Write access exists only on the final job.

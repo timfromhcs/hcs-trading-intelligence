@@ -20,8 +20,14 @@ jobs:
     # Re-run the full PR pipeline (lint, types, tests, scans, native builds).
     uses: ./.github/workflows/ci.yml
 
+  sast:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+
   preflight:
-    needs: gates
+    needs: [gates, sast]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

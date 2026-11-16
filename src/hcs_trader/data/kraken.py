@@ -33,6 +33,16 @@ class _Depth(BaseModel):
     result: dict[str, _Book] | None = None
 
 
+class _TradingStatus(BaseModel):
+    status: str
+    timestamp: datetime
+
+
+class _SystemStatus(BaseModel):
+    error: list[str]
+    result: _TradingStatus | None = None
+
+
 _OhlcRow = tuple[int, str, str, str, str, str, str, int]
 
 
@@ -44,6 +54,25 @@ class _Ohlc(BaseModel):
 class KrakenQuoteProvider:
     def __init__(self, client: httpx2.AsyncClient) -> None:
         self._client = client
+
+    async def trading_is_online(self) -> bool:
+        payload = await self._read(
+            "https://api.kraken.com/0/public/SystemStatus", {}, 65_536
+        )
+        try:
+            envelope = _SystemStatus.model_validate_json(payload, strict=True)
+        except ValidationError as error:
+            raise InvalidQuote("Invalid Kraken system status response") from error
+        _check_errors(envelope.error)
+        status = envelope.result
+        if status is None or status.timestamp.utcoffset() is None:
+            raise InvalidQuote("Kraken trading status or timestamp unavailable")
+        age = (datetime.now(UTC) - status.timestamp).total_seconds()
+        if not -2 <= age <= 30:
+            raise InvalidQuote(
+                "Kraken trading status timestamp is outside the freshness window"
+            )
+        return status.status == "online"
 
     async def get_quote(self, market: MarketId) -> Quote:
         if market != BTC_USD:

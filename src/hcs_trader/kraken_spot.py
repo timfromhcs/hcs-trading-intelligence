@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx2
 
+from hcs_trader.data.kraken import KrakenQuoteProvider
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType
 from hcs_trader.domain.lifecycle import OrderState
 
@@ -64,6 +65,9 @@ class KrakenSpotAdapter:
     @property
     def key_fingerprint(self) -> str:
         return hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()
+
+    async def trading_is_online(self) -> bool:
+        return await KrakenQuoteProvider(self.client).trading_is_online()
 
     def _sign_request(
         self, url_path: str, data: dict[str, Any], nonce: int

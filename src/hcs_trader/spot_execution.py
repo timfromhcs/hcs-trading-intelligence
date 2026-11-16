@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, spot_order_plan_hash
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
@@ -114,10 +115,19 @@ class KrakenSpotExecution:
             raise RiskRejected("Submission is blocked on a validation-only adapter")
         if order.state != OrderState.PREVIEWED:
             raise RiskRejected("Submission requires a preview")
-        if self._live_policy is not None and self._live_policy() != self._risk.policy:
-            raise RiskRejected("LIVE policy changed; restart the execution session")
+        self._check_live_policy()
         self._check_shape(order, quote)
         self._check_bounds(order)
+
+        if (
+            self._risk.policy.require_venue_reconciliation
+            and venue_healthy is not False
+        ):
+            try:
+                venue_healthy = await self._adapter.trading_is_online()
+            except QuoteUnavailable:
+                venue_healthy = None
+            self._check_live_policy()
 
         at = datetime.now(UTC)
         quality = quote.quality_at(
@@ -173,6 +183,10 @@ class KrakenSpotExecution:
             raise RiskRejected("Order state changed during submission; reconcile it")
         await self._after_observation(observed)
         return observed
+
+    def _check_live_policy(self) -> None:
+        if self._live_policy is not None and self._live_policy() != self._risk.policy:
+            raise RiskRejected("LIVE policy changed; restart the execution session")
 
     async def dry_run(
         self,

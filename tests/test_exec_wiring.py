@@ -102,6 +102,76 @@ def _risk(**policy: object) -> RiskEngine:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "age", "rejection"),
+    [
+        ("online", 0, None),
+        ("maintenance", 0, "venue is unhealthy"),
+        ("cancel_only", 0, "venue is unhealthy"),
+        ("online", 60, "venue health is required"),
+        ("online", -60, "venue health is required"),
+        (None, 0, "venue health is required"),
+    ],
+)
+async def test_live_submission_reads_venue_health_before_reserving(
+    tmp_path: Path, status: str | None, age: int, rejection: str | None
+) -> None:
+    store, candidate = _store(tmp_path)
+    calls: list[str] = []
+    venue = _venue(calls)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path != "/0/public/SystemStatus":
+            return venue(request)
+        calls.append("SystemStatus")
+        assert request.method == "GET"
+        assert "API-Key" not in request.headers
+        if status is None:
+            return httpx2.Response(503)
+        return httpx2.Response(
+            200,
+            json={
+                "error": [],
+                "result": {
+                    "status": status,
+                    "timestamp": (
+                        datetime.now(UTC) - timedelta(seconds=age)
+                    ).isoformat(),
+                },
+            },
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        execution = KrakenSpotExecution(
+            store,
+            KrakenSpotAdapter(_KEY, _SECRET, client),
+            _risk(require_venue_reconciliation=True),
+        )
+        if rejection is None:
+            observed = await execution.submit(
+                _order(),
+                _quote(),
+                candidate_id=candidate,
+                strategy_version="v1.0.0",
+                last_reconciled_at=datetime.now(UTC),
+            )
+            assert observed.state is OrderState.ACKNOWLEDGED
+            assert calls == ["SystemStatus", "AddOrder"]
+        else:
+            with pytest.raises(RiskRejected, match=rejection):
+                await execution.submit(
+                    _order(),
+                    _quote(),
+                    candidate_id=candidate,
+                    strategy_version="v1.0.0",
+                    venue_healthy=True,
+                    last_reconciled_at=datetime.now(UTC),
+                )
+            assert calls == ["SystemStatus"]
+            assert store.list_open_spot_orders("kraken") == []
+
+
+@pytest.mark.anyio
 async def test_allowed_and_rejected_verdicts_are_persisted(tmp_path: Path) -> None:
     store, candidate = _store(tmp_path)
     calls: list[str] = []

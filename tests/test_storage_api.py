@@ -17,7 +17,13 @@ from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
-from hcs_trader.storage import AuditStore
+from hcs_trader.risk import RiskEvaluation, RiskRejected
+from hcs_trader.storage import (
+    AuditStore,
+    KillSwitchCause,
+    RiskOutcome,
+    SpotFill,
+)
 
 
 def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> None:
@@ -41,7 +47,7 @@ def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (18,)
 
 
 def test_v1_upgrade_retains_audit_and_deduplicates_quotes(tmp_path: Path) -> None:
@@ -95,7 +101,18 @@ def test_api_exposes_loopback_status_and_openapi(tmp_path: Path) -> None:
         assert client.get("/api/v1/system/capabilities").json()["live_orders"] is False
         assert client.get("/api/v1/market/quotes").status_code == 503
         assert "/api/v1/health" in client.get("/openapi.json").json()["paths"]
-        assert client.post("/api/v1/orders/live").status_code == 404
+        # /orders/live is an alias of the gated spot path: disabled without credentials.
+        live = client.post(
+            "/api/v1/orders/live",
+            json={
+                "side": "buy",
+                "quantity": "0.001",
+                "limit_price": "50000",
+                "candidate_id": "x",
+                "strategy_version": "v1.0.0",
+            },
+        )
+        assert live.status_code == 403
         assert (
             client.get("/api/v1/health", headers={"Host": "untrusted.test"}).status_code
             == 400
@@ -382,3 +399,249 @@ def test_candidate_promotion_cannot_use_client_assertions(
         )
     assert response.status_code == 409
     assert store.get_strategy_candidate(candidate.candidate_id) == candidate
+
+
+# --- Persist-audit track: risk decisions, kill switch, audit, fills ---
+
+
+def _evaluation(
+    decision_id: str = "risk-aaa111", *, allowed: bool = True
+) -> RiskEvaluation:
+    return RiskEvaluation(
+        decision_id=decision_id,
+        allowed=allowed,
+        reason=None if allowed else "Spread too wide",
+        evaluated_at=datetime.now(UTC),
+        plan_hash="ab" * 32,
+    )
+
+
+def _submitted_order(client_order_id: str = "cl-sub-1") -> SpotOrder:
+    now = datetime.now(UTC)
+    return SpotOrder(
+        client_order_id=client_order_id,
+        order_id="ord-" + client_order_id,
+        venue="kraken",
+        market="BTC/USD",
+        side=SpotSide.BUY,
+        order_type=SpotOrderType.LIMIT,
+        quantity=Decimal("0.001"),
+        limit_price=Decimal("50000"),
+        state=OrderState.SUBMITTED,
+        risk_decision_id="risk-aaa111",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_every_risk_verdict_is_persisted_with_typed_outcome(tmp_path: Path) -> None:
+    path = tmp_path / "r.sqlite"
+    store = AuditStore(path)
+    store.initialize()
+    allowed = store.record_risk_decision(
+        _evaluation("risk-allow"), policy_version="v1", inputs={"spread_bps": "3"}
+    )
+    rejected = store.record_risk_decision(
+        _evaluation("risk-reject", allowed=False), policy_version="v1"
+    )
+    no_trade = store.record_risk_decision(
+        _evaluation("risk-notrade", allowed=False),
+        policy_version="v1",
+        no_trade=True,
+    )
+    assert (allowed.outcome, rejected.outcome, no_trade.outcome) == (
+        RiskOutcome.ALLOWED,
+        RiskOutcome.REJECTED,
+        RiskOutcome.NO_TRADE,
+    )
+    reopened = AuditStore(path)
+    reopened.initialize()
+    stored = reopened.get_risk_decision("risk-reject")
+    assert stored is not None
+    assert stored.reason == "Spread too wide" and stored.policy_version == "v1"
+    assert len(reopened.list_risk_decisions()) == 3
+    kinds = [e.kind for e in reopened.list_structured_audit(10)]
+    assert kinds.count("risk.decision.recorded") == 3
+
+
+def test_risk_decision_recording_is_idempotent_but_not_overwritable(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "r.sqlite")
+    store.initialize()
+    evaluation = _evaluation()
+    first = store.record_risk_decision(evaluation, policy_version="v1")
+    assert store.record_risk_decision(evaluation, policy_version="v1") == first
+    with pytest.raises(ValueError, match="already used"):
+        store.record_risk_decision(_evaluation(allowed=False), policy_version="v1")
+    with pytest.raises(ValueError, match="policy version"):
+        store.record_risk_decision(evaluation, policy_version=" ")
+    with pytest.raises(ValueError, match="NO_TRADE"):
+        store.record_risk_decision(
+            _evaluation("risk-x"), policy_version="v1", no_trade=True
+        )
+    assert store.approved_risk_decision("missing") is None
+
+
+def test_submission_rejection_leaves_a_redacted_audit_record(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "r.sqlite")
+    store.initialize()
+    with pytest.raises(RiskRejected, match="canary"):
+        store.reserve_spot_submission(
+            _submitted_order(),
+            2,
+            candidate_id="cand-none",
+            strategy_version="v1.0.0",
+            key_fingerprint="fp",
+        )
+    event = store.list_structured_audit(1)[0]
+    assert event.kind == "spot.submission.rejected"
+    assert event.outcome == "NO_TRADE"
+    assert event.order_or_tx_id == "cl-sub-1"
+    assert event.strategy_version == "v1.0.0"
+    assert event.args_hash is not None and event.redacted_args is not None
+    assert store.get_spot_order("cl-sub-1") is None
+
+
+def test_structured_audit_redacts_secrets_and_hashes_arguments(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "a.sqlite")
+    store.initialize()
+    event = store.record_structured_audit(
+        "mcp.tool.call",
+        arguments={
+            "market": "BTC/USD",
+            "api_key": "sk-live-123",
+            "nested": {"Passphrase": "hunter2", "ok": [1, {"seed_phrase": "x y z"}]},
+        },
+        client_id="client-1",
+        agent_id="agent-1",
+        tool_name="orders.preview",
+        capability_scope="READ",
+        request_id="req-1",
+        simulation_hash="sim-1",
+        model_version="none",
+        policy_version="v1",
+        app_version="0.0.0",
+        commit_sha="deadbeef",
+    )
+    assert event.redacted_args is not None
+    for leaked in ("sk-live-123", "hunter2", "x y z"):
+        assert leaked not in event.redacted_args
+    assert event.redacted_args.count("[REDACTED]") == 3
+    assert "BTC/USD" in event.redacted_args
+    # The hash covers the redacted view, so secret values never influence it.
+    other = store.record_structured_audit(
+        "mcp.tool.call",
+        arguments={
+            "market": "BTC/USD",
+            "api_key": "different",
+            "nested": {"Passphrase": "other", "ok": [1, {"seed_phrase": "q"}]},
+        },
+    )
+    assert other.args_hash == event.args_hash
+    assert (event.client_id, event.agent_id, event.tool_name) == (
+        "client-1",
+        "agent-1",
+        "orders.preview",
+    )
+    with pytest.raises(ValueError, match="Unknown audit fields"):
+        store.record_structured_audit("x", bogus="1")
+    # The legacy three-field view still works on the extended table.
+    assert store.latest_event() is not None
+
+
+def test_kill_switch_typed_trip_persists_and_requires_operator_clear(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "k.sqlite"
+    store = AuditStore(path)
+    store.initialize()
+    state = store.trip_kill_switch(
+        KillSwitchCause.UNEXPLAINED_BALANCE_DELTA, "BTC balance short by 0.1"
+    )
+    assert state.active and state.cause is KillSwitchCause.UNEXPLAINED_BALANCE_DELTA
+
+    reopened = AuditStore(path)
+    reopened.initialize()
+    persisted = reopened.kill_switch_state()
+    assert persisted.active
+    assert persisted.cause is KillSwitchCause.UNEXPLAINED_BALANCE_DELTA
+    assert persisted.detail == "BTC balance short by 0.1"
+    assert reopened.fail_safe_paused() is True
+
+    with pytest.raises(ValueError, match="operator"):
+        reopened.clear_kill_switch("  ", "all good")
+    with pytest.raises(ValueError, match="note"):
+        reopened.clear_kill_switch("tim", "")
+    assert reopened.kill_switch_state().active
+
+    cleared = reopened.clear_kill_switch("tim", "reconciled manually")
+    assert not cleared.active and cleared.cause is None
+    history = reopened.kill_switch_history()
+    assert [(a, c, o) for a, c, o, _ in history] == [
+        ("CLEARED", "MANUAL", "tim"),
+        ("TRIPPED", "UNEXPLAINED_BALANCE_DELTA", "system"),
+    ]
+    kinds = [e.kind for e in reopened.list_structured_audit(10)]
+    assert "kill_switch.tripped" in kinds and "kill_switch.cleared" in kinds
+
+
+def test_repeated_trips_record_each_cause_and_manual_pause_still_works(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "k.sqlite")
+    store.initialize()
+    store.trip_kill_switch(KillSwitchCause.STALE_FEED, "no quotes for 90s")
+    state = store.trip_kill_switch(KillSwitchCause.REPEATED_REJECTS, "3 rejects")
+    assert state.cause is KillSwitchCause.REPEATED_REJECTS
+    assert len(store.kill_switch_history()) == 2
+    with pytest.raises(ValueError, match="detail"):
+        store.trip_kill_switch(KillSwitchCause.MANUAL, " ")
+    store.set_execution_pause(False)
+    assert store.execution_pause().paused is False
+    store.set_execution_pause(True)
+    assert store.kill_switch_state().cause is KillSwitchCause.MANUAL
+
+
+def test_spot_fills_are_recorded_once_and_conflicts_are_rejected(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "f.sqlite")
+    store.initialize()
+    order = _submitted_order()
+    store.save_spot_order(order)
+    fill = SpotFill(
+        order.client_order_id,
+        "T1",
+        Decimal("0.0004"),
+        Decimal("50000"),
+        Decimal("0.08"),
+        datetime.now(UTC),
+    )
+    assert store.record_spot_fill(fill) is True
+    assert store.record_spot_fill(fill) is False
+    with pytest.raises(ValueError, match="different values"):
+        store.record_spot_fill(replace(fill, price=Decimal("50001")))
+    store.record_spot_fill(replace(fill, fill_id="T2", quantity=Decimal("0.0006")))
+    fills = store.spot_fills(order.client_order_id)
+    assert [f.fill_id for f in fills] == ["T1", "T2"]
+    assert sum(f.quantity for f in fills) == Decimal("0.0010")
+    with pytest.raises(ValueError, match="finite and positive"):
+        store.record_spot_fill(replace(fill, fill_id="T3", quantity=Decimal("0")))
+    with pytest.raises(ValueError, match="finite and positive"):
+        store.record_spot_fill(replace(fill, fill_id="T4", fee=Decimal("NaN")))
+    with pytest.raises(sqlite3.IntegrityError):
+        store.record_spot_fill(replace(fill, client_order_id="missing", fill_id="T5"))
+
+
+def test_health_reports_ok_and_failures_without_raising(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "h.sqlite")
+    store.initialize()
+    health = store.health()
+    assert health.ok and health.schema_version == 18
+    assert health.execution_paused is False
+    bad = AuditStore(tmp_path / "nowhere" / "missing.sqlite", read_only=True)
+    report = bad.health()
+    assert report.ok is False and "unavailable" in report.detail

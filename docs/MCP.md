@@ -30,13 +30,33 @@ Initialize the local database once by starting the dashboard or running an impor
 - `strategy_postmortem`: Standardized template for evaluating backtest simulation results and fee models.
 - `release_checklist`: Standardized template for auditing the 30 V1.0.0 release criteria from AGENTS.md Section 18.
 
-### Capability tiers
+### Tool catalogue and tiers
 
-Each tool declares one tier: `READ`, `RESEARCH`, `PAPER_TRADE`, `LIVE_TRADE` or `ADMIN_LOCAL`. The server checks the tier against its grant when the tool is called, not only when tools are listed. A call to a tool whose tier is not granted fails with `Capability tier <TIER> is not granted` and the tool body does not run. The default grant is `READ` only, and every current tool is a `READ` tool. Tiers are separate scopes, not a ladder: granting a higher tier does not imply a lower one. The `hcs-trader mcp` command always uses the default grant.
+Tools use the names from the product brief. Earlier names stay registered as aliases (`quant.get_indicators` = `quant.calculate_indicators`, `wallets.get_snapshots` = `wallet.get_balances`, `strategies.get_candidates` = `strategy.list`) and have their own audit entries.
+
+| Tier | Tools |
+|---|---|
+| `READ` | `market.get_quote`, `market.get_candles`, `market.get_orderbook_snapshot`, `news.search`, `news.get_event_timeline`, `macro.get_series`, `portfolio.get_snapshot`, `wallet.get_addresses`, `wallet.get_balances`, `strategy.list`, `risk.get_status`, `system.get_health`, `quant.calculate_indicators`, `quant.compare_strategy_candidates` and the earlier read tools above |
+| `RESEARCH` | `quant.run_backtest`, `research.create_candidate` (needs an `idempotency_key`; registers a `RESEARCH` stage candidate only) |
+| `PAPER_TRADE` | `orders.preview` (writes nothing), `orders.place_paper` (needs an `idempotency_key`; repeats return the first fill) |
+| `ADMIN_LOCAL` | `system.pause` (sets the durable pause; there is no resume tool) |
+| `LIVE_TRADE` | none. `orders.place_live` and `swaps.*` do not exist on this server |
+
+The server opens the database read-only. `research.create_candidate`, `orders.place_paper`, `system.pause` and the persistence step of `quant.run_backtest` need a writable store (and, for paper orders, a quote feed) passed to `create_mcp_server`; without them they fail with `Write access is not configured for this MCP server`. REST and MCP call the same `ApplicationService` in `src/hcs_trader/application/`.
+
+Each tool declares one tier: `READ`, `RESEARCH`, `PAPER_TRADE`, `LIVE_TRADE` or `ADMIN_LOCAL`. The server checks the tier against the caller's grant when the tool is called, not only when tools are listed. A call to a tool whose tier is not granted fails with `Capability tier <TIER> is not granted` and the tool body does not run. The default grant is `READ` only. Tiers are separate scopes, not a ladder: granting a higher tier does not imply a lower one. The `hcs-trader mcp` command uses the default grant.
+
+### Loopback Streamable HTTP
+
+`mcp_server.create_http_app` serves a stateless Streamable HTTP app and `run_http` binds `127.0.0.1` only. Each request needs a bearer token issued by `ClientRegistry.register(client_id, tiers)`. The registry stores only token hashes, can revoke a client at any time and refuses `ADMIN_LOCAL` and `LIVE_TRADE` for network clients. Non-loopback peers get 403 and missing or revoked tokens get 401. The client's tiers replace the server-level grant for its requests.
+
+### Chain capability resource
+
+`hcs://system/chains` (and the `chains` field of `hcs://system/capabilities`) lists the five supported chains with their wallet scope, execution scope and the signer's own `chain_valid` report. No chain has live on-chain execution enabled.
 
 ### Invocation audit
 
-Each tool call that passes argument validation appends one JSON line to `mcp_invocations.jsonl` next to the local database. A record holds the UTC time, tool name, capability tier, a SHA-256 hash of the canonical JSON arguments and the outcome (`ok`, `denied` or `error`). Argument values are never written. If the audit file cannot be appended, the call fails closed with `Invocation audit unavailable`. Calls rejected by schema validation, and calls to unknown tools, are rejected by the SDK before the guard runs and are not recorded. The file is append-only from the application's perspective; a local administrator can still edit it, so it is not tamper-proof.
+Each tool call that passes argument validation appends one JSON line to `mcp_invocations.jsonl` next to the local database. A record holds the UTC time, tool name, capability tier, `client_id` (`local-stdio` for stdio or the registered client), a per-call `request_id`, the `idempotency_key` when one was given, a SHA-256 hash of the canonical JSON arguments and the outcome (`ok`, `denied` or `error`). Argument values other than the idempotency key are never written. If the audit file cannot be appended, the call fails closed with `Invocation audit unavailable`. Calls rejected by schema validation, and calls to unknown tools, are rejected by the SDK before the guard runs and are not recorded. The file is append-only from the application's perspective; a local administrator can still edit it, so it is not tamper-proof. It is not yet mirrored into the SQLite audit events.
 
 Unexpected exceptions inside a tool reach the client only as `Error executing tool <name>`, without internal details.
 
@@ -44,4 +64,4 @@ Unexpected exceptions inside a tool reach the client only as `Error executing to
 
 `pyproject.toml` pins `mcp>=2.3,<3`, and `uv.lock` resolves `mcp` 2.3.0 (published 2026-10-02). The range tracks the official Python SDK v2 line and excludes a future v3. The 1.x line receives security fixes only. Upgrade within v2 through the locked dependency review and rerun the MCP tests.
 
-Grant access only to local hosts that may read this account and research data. Tool discovery contains no order, key, shell or configuration actions.
+Grant access only to local hosts that may read this account and research data. Tool discovery contains no live order, key, shell or configuration actions.

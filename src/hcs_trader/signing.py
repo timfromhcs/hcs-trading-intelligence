@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from hcs_trader.domain.signing import (
     ApprovedRiskDecision,
     KeystoreError,
+    SignedPlanConflict,
     SignedTransaction,
     SignerPolicy,
     SignerPolicyViolation,
@@ -74,6 +75,22 @@ PauseState = Callable[[], bool]
 RiskDecisionLookup = Callable[[str], ApprovedRiskDecision | None]
 
 
+class SignedPlanLedger(Protocol):
+    """Durable record of signed plans; ``commit`` consumes the risk decision."""
+
+    def is_plan_signed(self, idempotency_key: str) -> bool: ...
+
+    def commit_signed_plan(
+        self,
+        *,
+        idempotency_key: str,
+        plan_hash: str,
+        risk_decision_id: str,
+        tx_hash: str,
+        signed_at: datetime,
+    ) -> None: ...
+
+
 class IsolatedSigner:
     """Isolated signing boundary holding keystore records and immutable policy.
 
@@ -93,8 +110,10 @@ class IsolatedSigner:
         pause_state: PauseState,
         risk_decision_lookup: RiskDecisionLookup,
         allow_test_only_signing: bool = False,
+        signed_plans: SignedPlanLedger | None = None,
     ) -> None:
         self.policy = policy
+        self._ledger = signed_plans
         self._pause_state = pause_state
         self._risk_decision_lookup = risk_decision_lookup
         self._allow_test_only_signing = allow_test_only_signing
@@ -137,6 +156,37 @@ class IsolatedSigner:
             raise SignerTamperingError(
                 "Signing rejected: risk decision plan hash does not match plan"
             )
+
+    def _already_signed(self, idempotency_key: str) -> bool:
+        if self._ledger is None:
+            return idempotency_key in self._signed_idempotency_keys
+        try:
+            return self._ledger.is_plan_signed(idempotency_key)
+        except Exception as err:
+            raise SignerPolicyViolation(
+                "Signing rejected: signed-plan ledger unavailable"
+            ) from err
+
+    def _record_signed(
+        self, plan: ValidatedTransactionPlan, tx_hash: str, at: datetime
+    ) -> None:
+        if self._ledger is None:
+            self._signed_idempotency_keys.add(plan.idempotency_key)
+            return
+        try:
+            self._ledger.commit_signed_plan(
+                idempotency_key=plan.idempotency_key,
+                plan_hash=plan.plan_hash,
+                risk_decision_id=plan.risk_decision_id,
+                tx_hash=tx_hash,
+                signed_at=at,
+            )
+        except SignedPlanConflict:
+            raise
+        except Exception as err:
+            raise SignerPolicyViolation(
+                "Signing rejected: signature could not be recorded durably"
+            ) from err
 
     def _assert_namespace_supported(self, chain_ns: str) -> None:
         capability = signing_capabilities().get(chain_ns)
@@ -202,8 +252,9 @@ class IsolatedSigner:
         # 3. Bind to a persisted, approved risk decision for this exact plan
         self._assert_risk_decision(plan)
 
-        # 4. Refuse to sign the same idempotency key twice
-        if plan.idempotency_key in self._signed_idempotency_keys:
+        # 4. Refuse to sign the same idempotency key twice (durable when a
+        #    ledger is injected, so a restart cannot re-sign a plan)
+        if self._already_signed(plan.idempotency_key):
             raise SignerPolicyViolation(
                 f"Signing rejected: idempotency key '{plan.idempotency_key}' "
                 "was already signed"
@@ -250,7 +301,9 @@ class IsolatedSigner:
 
         raw_tx_hex = unsigned_payload.hex() + signature.hex()
         tx_hash = hashlib.sha256(bytes.fromhex(raw_tx_hex)).hexdigest()
-        self._signed_idempotency_keys.add(plan.idempotency_key)
+        # 9. Atomically consume the risk decision and persist the signature
+        #    record before the signed bytes leave the signer.
+        self._record_signed(plan, tx_hash, at)
 
         return SignedTransaction(
             plan_hash=plan.plan_hash,

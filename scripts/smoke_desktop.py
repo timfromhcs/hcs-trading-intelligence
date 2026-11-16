@@ -52,6 +52,8 @@ def _verify(process: subprocess.Popen[bytes], data: Path) -> None:
         or status["network_enabled"]
     ):
         raise RuntimeError("Unexpected desktop startup capabilities")
+    if "/api/v1/health" not in json.loads(_read("/openapi.json")).get("paths", {}):
+        raise RuntimeError("Desktop OpenAPI schema is unavailable")
     html = _read("/").decode("utf-8")
     script = re.search(r'src="(/assets/[^"]+\.js)"', html)
     if (
@@ -74,7 +76,7 @@ def main() -> None:
     executable = (program_dir / (_NAME + suffix)).resolve()
     with TemporaryDirectory(prefix="hcs-desktop-") as temporary:
         root = Path(temporary)
-        data = root / "app data"
+        data = root / "Données héhé 数据" / "app data"
         log = root / "desktop.log"
         with log.open("wb") as output:
             process = subprocess.Popen(  # noqa: S603

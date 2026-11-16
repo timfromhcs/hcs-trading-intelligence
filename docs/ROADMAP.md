@@ -1,5 +1,17 @@
 # Implementation plan
 
+## Integration status · 2026-11-16
+
+GitHub `main` is at `7093314`. The local reviewed baseline `5dd4705` is 16 commits ahead. PR #1 remains the only PR and is merged. The Claude worktree branch points to the same local commit and contains 48 modified tracked files and 82 untracked files. The integration branch brings that work into one checkout for testing.
+
+1. **Baseline and integration.** Restore the shared shadow promotion functions, preserve the original worktree, and run the locked Python and frontend checks. Confirm the installed app defaults to PAPER, serves OpenAPI and denies MCP write calls without explicit grants.
+2. **Data, research and paper.** Verify provider provenance, stale/degraded states and offline behavior through the app. Exercise promotion with immutable walk-forward and holdout evidence, then reopen the database and verify the shadow run and paper ledger across REST, CLI and MCP.
+3. **Wallet and execution rehearsal.** Complete public test-network checks for claimed read paths. Rehearse authenticated Kraken validation and reconciliation without live-money tests in the coding loop. Keep unsupported chain signing and routes disabled. Before enabling Kraken submission, pass the limitations gate, apply the persisted policy with authoritative portfolio and reconciliation inputs, and exercise pause, revocation and ambiguous outcomes through both entry points.
+4. **Product verification.** Exercise populated, empty and error states on desktop and mobile, verify keyboard navigation, and cross-check the capability matrix, OpenAPI, MCP and documentation against observed behavior.
+5. **Release candidate and v1.** Build and install the candidate on Windows, macOS and Linux. Collect upgrade and kill-switch crash recovery evidence, dependency and license reports, secret scanning, SAST, checksums, SBOM and provenance from that commit. Attach platform signing or notarization evidence where applicable. Review every section 18 item before tagging `v1.0.0`.
+
+Use `hcs-trader release-check` for the current checklist and [the limitations register](KNOWN_LIMITATIONS.md) for LIVE blockers. The older evidence below describes its respective baseline.
+
 Updated 2026-11-15 against GitHub `main` at `7093314`. [AGENTS.md](../AGENTS.md#17-phased-zero-to-v1-implementation-roadmap) defines the scope. The [release assessment](V1_RELEASE_REPORT.md) records verification evidence.
 
 ## Repository and PR status

@@ -1,13 +1,21 @@
 """Tests for deterministic pre-trade risk engine and policy bounds."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from hcs_trader.data.kraken import BTC_USD, SOURCE
-from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.execution import (
+    SpotOrder,
+    SpotOrderType,
+    SpotSide,
+    spot_order_plan_hash,
+)
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import DataQuality, Quote
-from hcs_trader.risk import RiskEngine, RiskPolicy
+from hcs_trader.portfolio_state import PortfolioState
+from hcs_trader.risk import RiskEngine, RiskEvaluation, RiskPolicy
+from hcs_trader.spot_execution import SUPPORTED_MARKETS
 
 
 def _sample_quote(
@@ -216,3 +224,169 @@ def test_risk_approves_valid_spot_order() -> None:
     assert decision.allowed
     assert decision.reason is None
     assert decision.decision_id.startswith("risk-")
+
+
+# --- Portfolio-driven checks (RE-01), plan hash / deviation / gates (RE-06/10) ---
+
+
+def _pf(**kw: object) -> PortfolioState:
+    base: dict[str, object] = {
+        "hot_equity_usd": Decimal("10000"),
+        "peak_equity_usd": Decimal("10000"),
+        "realized_pnl_today_usd": Decimal("0"),
+        "available_quote_usd": Decimal("5000"),
+        "base_balances": {"BTC": Decimal("1")},
+    }
+    base.update(kw)
+    return PortfolioState(**base)  # type: ignore[arg-type]
+
+
+def _eval(order: SpotOrder, **kw: object) -> RiskEvaluation:
+    engine = RiskEngine(_active_policy())
+    return engine.evaluate_order(
+        order,
+        _sample_quote(),
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        datetime.now(UTC),
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+def test_buy_within_risk_budget_allowed_and_oversize_rejected() -> None:
+    ok = _eval(
+        _sample_order(quantity="0.0003"),
+        portfolio=_pf(),
+        invalidation_price=Decimal("49550"),
+    )
+    assert ok.allowed, ok.reason
+    big = _eval(
+        _sample_order(quantity="0.01"),
+        portfolio=_pf(),
+        invalidation_price=Decimal("40000"),
+    )
+    assert not big.allowed and "risk budget" in (big.reason or "")
+
+
+def test_buy_requires_valid_invalidation() -> None:
+    d = _eval(_sample_order(quantity="0.0003"), portfolio=_pf())
+    assert not d.allowed and "invalidation" in (d.reason or "")
+    d = _eval(
+        _sample_order(quantity="0.0003"),
+        portfolio=_pf(),
+        invalidation_price=Decimal("60000"),
+    )
+    assert not d.allowed and "not positive" in (d.reason or "")
+
+
+def test_loss_drawdown_and_consecutive_loss_halts() -> None:
+    order = _sample_order(quantity="0.0003")
+    inv = Decimal("49550")
+    for pf, text in (
+        (_pf(realized_pnl_today_usd=Decimal("-100")), "Daily loss"),
+        (_pf(hot_equity_usd=Decimal("9400")), "drawdown"),
+        (_pf(consecutive_losses=3), "Consecutive"),
+    ):
+        d = _eval(order, portfolio=pf, invalidation_price=inv)
+        assert not d.allowed and text in (d.reason or "")
+
+
+def test_exposure_cash_and_position_limits() -> None:
+    order = _sample_order(quantity="0.0003")
+    inv = Decimal("49550")
+    d = _eval(
+        order,
+        portfolio=_pf(exposure_usd={"BTC": Decimal("4990")}),
+        invalidation_price=inv,
+    )
+    assert not d.allowed and "exposure" in (d.reason or "")
+    d = _eval(
+        order,
+        portfolio=_pf(available_quote_usd=Decimal("10")),
+        invalidation_price=inv,
+    )
+    assert not d.allowed and "quote balance" in (d.reason or "")
+    d = _eval(order, portfolio=_pf(open_positions=2), invalidation_price=inv)
+    assert not d.allowed and "positions" in (d.reason or "")
+
+
+def test_sell_requires_inventory() -> None:
+    sell = _sample_order(quantity="0.01", side=SpotSide.SELL)
+    d = _eval(sell, portfolio=_pf(base_balances={"BTC": Decimal("0")}))
+    assert not d.allowed and "inventory" in (d.reason or "")
+    assert _eval(sell, portfolio=_pf()).allowed
+
+
+def test_fee_edge_gate() -> None:
+    d = _eval(
+        _sample_order(quantity="0.0003"),
+        portfolio=_pf(),
+        invalidation_price=Decimal("49550"),
+        expected_edge_bps=Decimal("50"),
+    )
+    assert not d.allowed and "edge" in (d.reason or "")
+    policy = RiskPolicy(
+        live_mode_enabled=True,
+        allowed_markets=frozenset({"BTC/USD"}),
+        estimated_fee_bps=Decimal("200"),
+    )
+    d = RiskEngine(policy).evaluate_order(
+        _sample_order(quantity="0.0003"),
+        _sample_quote(),
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        datetime.now(UTC),
+        portfolio=_pf(),
+        invalidation_price=Decimal("49550"),
+    )
+    assert not d.allowed and "fee" in (d.reason or "").lower()
+
+
+def test_require_portfolio_state_fails_closed() -> None:
+    policy = RiskPolicy(live_mode_enabled=True, require_portfolio_state=True)
+    d = RiskEngine(policy).evaluate_order(
+        _sample_order(),
+        _sample_quote(),
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        datetime.now(UTC),
+    )
+    assert not d.allowed and "portfolio state" in (d.reason or "")
+
+
+def test_limit_price_deviation_both_sides() -> None:
+    low_buy = _eval(_sample_order(limit_price="40000.00"))
+    assert not low_buy.allowed and "below bid" in (low_buy.reason or "")
+    high_sell = _eval(_sample_order(side=SpotSide.SELL, limit_price="60000.00"))
+    assert not high_sell.allowed and "above ask" in (high_sell.reason or "")
+
+
+def test_health_reconcile_and_market_gates() -> None:
+    order = _sample_order()
+    assert "unhealthy" in (_eval(order, venue_healthy=False).reason or "")
+    stale = datetime.now(UTC) - timedelta(hours=1)
+    assert "reconciliation" in (_eval(order, last_reconciled_at=stale).reason or "")
+    assert "unresolved" in (_eval(order, unresolved_market_orders=1).reason or "")
+    fresh = datetime.now(UTC)
+    assert _eval(order, venue_healthy=True, last_reconciled_at=fresh).allowed
+
+
+def test_plan_hash_bound_and_mutation_changes_it() -> None:
+    order = _sample_order(limit_price="50060.00")
+    d = _eval(order)
+    assert d.plan_hash == spot_order_plan_hash(order)
+    for mutated in (
+        replace(order, quantity=order.quantity + Decimal("0.001")),
+        replace(order, limit_price=Decimal("50061.00")),
+        replace(order, side=SpotSide.SELL),
+        replace(order, market="ETH/USD"),
+    ):
+        assert spot_order_plan_hash(mutated) != d.plan_hash
+    assert spot_order_plan_hash(replace(order, risk_decision_id="x")) == d.plan_hash
+
+
+def test_default_policy_markets_within_executable_scope() -> None:
+    assert RiskPolicy().allowed_markets <= SUPPORTED_MARKETS

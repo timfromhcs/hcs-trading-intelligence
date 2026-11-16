@@ -1,6 +1,9 @@
 """Tests for Phase 7 previews, keystore and isolated signing invariants."""
 
 import json
+import sqlite3
+from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,10 +25,12 @@ from hcs_trader.keystore import (
     decrypt_keystore_record,
 )
 from hcs_trader.mcp_server import create_mcp_server
+from hcs_trader.risk import RiskEvaluation
 from hcs_trader.signing import (
     IsolatedSigner,
     decode_and_verify_payload,
 )
+from hcs_trader.storage import AuditStore, KillSwitchCause
 
 _SYNTHETIC_EVM_KEY = bytes.fromhex(
     "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36088a"
@@ -638,3 +643,166 @@ def test_signing_capabilities_report_evm_and_utxo_unsupported() -> None:
     assert "placeholder" in caps["eip155"].note.lower()
     assert "placeholder" in caps["bip122"].note.lower()
     assert set(caps) >= {"eip155", "bip122", "solana"}
+
+
+# --- Durable (store-backed) signer state: RE-02 / RE-04 ---
+
+
+def _store_signer(
+    store: AuditStore, *, allow_test_only_signing: bool = True
+) -> IsolatedSigner:
+    return IsolatedSigner(
+        _active_policy(),
+        pause_state=store.fail_safe_paused,
+        risk_decision_lookup=store.approved_risk_decision,
+        allow_test_only_signing=allow_test_only_signing,
+        signed_plans=store,
+    )
+
+
+def _persist_decision(
+    store: AuditStore, plan: ValidatedTransactionPlan, *, allowed: bool = True
+) -> None:
+    store.record_risk_decision(
+        RiskEvaluation(
+            decision_id=plan.risk_decision_id,
+            allowed=allowed,
+            reason=None if allowed else "policy said no",
+            evaluated_at=datetime.now(UTC),
+            plan_hash=plan.plan_hash,
+        ),
+        policy_version="v1.0.0",
+    )
+
+
+def test_signer_only_signs_decisions_present_in_the_store(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "s.sqlite")
+    store.initialize()
+    plan = _sample_plan()
+    signer = _store_signer(store)
+    signer.register_keystore_record(_evm_record("pw"))
+    with pytest.raises(SignerPolicyViolation, match="not found"):
+        signer.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+    _persist_decision(store, plan)
+    signed = signer.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+    assert signed.plan_hash == plan.plan_hash
+
+
+def test_rejected_stored_decision_blocks_signing(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "s.sqlite")
+    store.initialize()
+    plan = _sample_plan()
+    _persist_decision(store, plan, allowed=False)
+    signer = _store_signer(store)
+    signer.register_keystore_record(_evm_record("pw"))
+    with pytest.raises(SignerPolicyViolation, match="not approved"):
+        signer.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+    assert not store.is_plan_signed(plan.idempotency_key)
+
+
+def test_signed_plan_survives_restart_and_blocks_resigning(tmp_path: Path) -> None:
+    path = tmp_path / "s.sqlite"
+    store = AuditStore(path)
+    store.initialize()
+    plan = _sample_plan()
+    _persist_decision(store, plan)
+    first = _store_signer(store)
+    first.register_keystore_record(_evm_record("pw"))
+    signed = first.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+
+    reopened = AuditStore(path)
+    reopened.initialize()
+    assert reopened.is_plan_signed(plan.idempotency_key)
+    second = _store_signer(reopened)  # fresh process: no in-memory memory of signing
+    second.register_keystore_record(_evm_record("pw"))
+    with pytest.raises(SignerPolicyViolation, match="not approved"):
+        second.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+    # A fresh, approved decision for a plan reusing the key is still refused.
+    replay = replace(plan, risk_decision_id="risk-dec-0002").with_hash()
+    _persist_decision(reopened, replay)
+    with pytest.raises(SignerPolicyViolation, match="already signed"):
+        second.sign_transaction(replay, _evm_payload(replay), "pw", datetime.now(UTC))
+    with closing(sqlite3.connect(path)) as connection:
+        row = connection.execute(
+            "SELECT tx_hash, plan_hash FROM signed_plans WHERE idempotency_key = ?",
+            (plan.idempotency_key,),
+        ).fetchone()
+    assert row == (signed.tx_hash, plan.plan_hash)
+
+
+def test_one_risk_decision_cannot_sign_a_second_plan_instance(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "s.sqlite")
+    store.initialize()
+    plan = _sample_plan()
+    _persist_decision(store, plan)
+    signer = _store_signer(store)
+    signer.register_keystore_record(_evm_record("pw"))
+    signer.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+    # Same plan content under a new idempotency key shares the plan hash only
+    # if the key is excluded; the decision is bound to it and already consumed.
+    with pytest.raises(SignerPolicyViolation):
+        store.commit_signed_plan(
+            idempotency_key="another-key",
+            plan_hash=plan.plan_hash,
+            risk_decision_id=plan.risk_decision_id,
+            tx_hash="ab" * 32,
+            signed_at=datetime.now(UTC),
+        )
+    decision = store.approved_risk_decision(plan.risk_decision_id)
+    assert decision is not None and decision.allowed is False
+
+
+def test_commit_signed_plan_rejects_hash_mismatch_and_leaves_decision(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "s.sqlite")
+    store.initialize()
+    plan = _sample_plan()
+    _persist_decision(store, plan)
+    with pytest.raises(SignerPolicyViolation):
+        store.commit_signed_plan(
+            idempotency_key=plan.idempotency_key,
+            plan_hash="0" * 64,
+            risk_decision_id=plan.risk_decision_id,
+            tx_hash="cd" * 32,
+            signed_at=datetime.now(UTC),
+        )
+    approved = store.approved_risk_decision(plan.risk_decision_id)
+    assert approved is not None and approved.allowed is True
+
+
+def test_persisted_kill_switch_blocks_signing_across_restart(tmp_path: Path) -> None:
+    path = tmp_path / "s.sqlite"
+    store = AuditStore(path)
+    store.initialize()
+    plan = _sample_plan()
+    _persist_decision(store, plan)
+    store.trip_kill_switch(KillSwitchCause.RECONCILIATION_MISMATCH, "balance drift")
+    restarted = AuditStore(path)
+    restarted.initialize()
+    signer = _store_signer(restarted)
+    signer.register_keystore_record(_evm_record("pw"))
+    with pytest.raises(SignerPolicyViolation, match="paused"):
+        signer.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))
+
+
+def test_unavailable_ledger_fails_closed() -> None:
+    class BrokenLedger:
+        def is_plan_signed(self, idempotency_key: str) -> bool:
+            raise RuntimeError("disk I/O error")
+
+        def commit_signed_plan(self, **_: object) -> None:
+            raise RuntimeError("disk I/O error")
+
+    plan = _sample_plan()
+    decisions = _approve(plan)
+    signer = IsolatedSigner(
+        _active_policy(),
+        pause_state=lambda: False,
+        risk_decision_lookup=decisions.get,
+        allow_test_only_signing=True,
+        signed_plans=BrokenLedger(),
+    )
+    signer.register_keystore_record(_evm_record("pw"))
+    with pytest.raises(SignerPolicyViolation, match="ledger unavailable"):
+        signer.sign_transaction(plan, _evm_payload(plan), "pw", datetime.now(UTC))

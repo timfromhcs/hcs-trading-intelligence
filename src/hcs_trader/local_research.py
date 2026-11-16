@@ -43,6 +43,71 @@ class ResearchOutput(BaseModel):
     )
 
 
+class Citation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    evidence_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9:_./+-]{1,160}$")]
+
+
+class Proposal(BaseModel):
+    """Structured System 2 output. Advisory only: the risk engine decides.
+
+    ``candidate_suggestion`` may only describe a sandbox research candidate; it
+    never mutates an active strategy and never reaches the signer.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["LONG", "EXIT", "NO_TRADE"]
+    thesis: Annotated[str, Field(min_length=1, max_length=600)]
+    uncertainties: list[Annotated[str, Field(min_length=1, max_length=180)]] = Field(
+        min_length=1, max_length=3
+    )
+    citations: list[Citation] = Field(default_factory=list, max_length=10)
+    no_trade_reason: Annotated[str, Field(min_length=1, max_length=180)] | None = None
+    candidate_suggestion: Annotated[str, Field(max_length=300)] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalDecision:
+    proposal: Proposal
+    valid: bool
+    reason: str | None = None
+
+
+def _no_trade_proposal(reason: str) -> Proposal:
+    return Proposal(
+        action="NO_TRADE",
+        thesis="No valid structured proposal was produced.",
+        uncertainties=["Model output was rejected."],
+        no_trade_reason=reason,
+    )
+
+
+def parse_proposal(
+    raw: str | None, known_evidence_ids: frozenset[str]
+) -> ProposalDecision:
+    """Validate untrusted model text; anything malformed becomes NO_TRADE.
+
+    Rejects extra fields, unknown citations (the model cannot invent evidence),
+    a trade action with no citation, and a NO_TRADE without a reason.
+    """
+    if raw is None or len(raw) > 8_192:
+        return ProposalDecision(_no_trade_proposal("missing_or_oversized"), False)
+    try:
+        proposal = Proposal.model_validate_json(raw)
+    except ValueError:
+        return ProposalDecision(_no_trade_proposal("malformed_output"), False)
+    cited = {citation.evidence_id for citation in proposal.citations}
+    if not cited <= known_evidence_ids:
+        return ProposalDecision(_no_trade_proposal("unknown_evidence_id"), False)
+    if proposal.action != "NO_TRADE" and not cited:
+        return ProposalDecision(_no_trade_proposal("uncited_trade_action"), False)
+    if proposal.action == "NO_TRADE" and proposal.no_trade_reason is None:
+        return ProposalDecision(_no_trade_proposal("missing_no_trade_reason"), False)
+    return ProposalDecision(proposal, True)
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchReport:
     status: ResearchStatus
@@ -88,12 +153,31 @@ class LocalModelProvider(Protocol):
     async def assess(self, evidence: Indicators) -> ResearchOutput: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ModelHealth:
+    status: Literal["disabled", "ready", "unavailable"]
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelMetadataInfo:
+    model: str | None
+    runtime: str | None
+    supports_embeddings: bool
+
+
 class ModelUnavailable(Exception):
     """The optional local inference service did not produce a valid response."""
 
 
 class NoneModelProvider:
     model: str | None = None
+
+    async def health(self) -> "ModelHealth":
+        return ModelHealth(status="disabled", detail="No local model configured")
+
+    async def metadata(self) -> "ModelMetadataInfo":
+        return ModelMetadataInfo(model=None, runtime=None, supports_embeddings=False)
 
     async def assess(self, evidence: Indicators) -> ResearchOutput:
         raise ModelUnavailable("No local model configured")

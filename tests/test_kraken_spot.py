@@ -297,7 +297,7 @@ async def test_durable_submission_recovers_after_cancellation(tmp_path: Path) ->
         now + timedelta(hours=1),
     )
     assert store.update_candidate_stage(candidate, PromotionStage.LIVE_CANARY, now)
-    strategy = {
+    strategy: dict[str, Any] = {
         "candidate_id": candidate.candidate_id,
         "strategy_version": candidate.version,
     }
@@ -830,6 +830,20 @@ def test_canary_cli_submit_and_fail_closed(
             "--data-dir",
             str(tmp_path),
         ],
+    )
+    monkeypatch.setattr(
+        launcher, "blocking_limitations", lambda _path: ["KL-001: no venue evidence"]
+    )
+    with pytest.raises(SystemExit) as blocked:
+        launcher.main()
+    assert blocked.value.code == 1
+    assert "KL-001" in capsys.readouterr().err
+    assert store.list_open_spot_orders("kraken") == []
+
+    monkeypatch.setattr(
+        launcher,
+        "require_runtime_live_policy",
+        lambda _store: RiskPolicy(live_mode_enabled=True),
     )
     launcher.main()
     out = json.loads(capsys.readouterr().out)

@@ -26,6 +26,7 @@ hcs-trader = "hcs_trader.__main__:main"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.15",
     "mypy",
     "pytest",
     "pytest-cov",

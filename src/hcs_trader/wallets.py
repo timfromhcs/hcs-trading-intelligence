@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -17,6 +18,29 @@ from hcs_trader.domain.wallet import (
     SolanaBalance,
     TransactionObservation,
     WalletBalance,
+)
+from hcs_trader.domain.wallet_port import (
+    BroadcastResult,
+    ChainBalance,
+    ChainHealth,
+    SignedTransaction,
+    SimulationResult,
+    TransferOrSwapIntent,
+    UnsignedTransaction,
+    WalletAddress,
+    WalletOperationUnsupported,
+    WalletRole,
+)
+from hcs_trader.evm_swap import (
+    SELECTOR_BALANCE_OF,
+    SELECTOR_DECIMALS,
+    allowlist_for_chain,
+)
+from hcs_trader.jupiter_swap import ALLOWED_SOLANA_MINTS
+from hcs_trader.wallet_addresses import (
+    has_offline_profile,
+    validate_evm_address,
+    validate_utxo_address,
 )
 
 ETH = AssetId.parse("eip155:1/native:ETH")
@@ -51,8 +75,19 @@ class WalletUnavailable(Exception):
 class _RpcResponse(BaseModel):
     jsonrpc: Literal["1.0", "2.0"] | None = None
     id: str
-    result: object
+    result: object = None
     error: object | None = None
+
+
+_NOT_FOUND = object()
+# Bitcoin-family RPC_INVALID_ADDRESS_OR_KEY: no such mempool/blockchain tx.
+_RPC_NOT_FOUND_CODE = -5
+UTXO_FINAL_CONFIRMATIONS = 6
+SOLANA_TOKEN_DECIMALS = {
+    "So11111111111111111111111111111111111111112": 9,
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": 6,
+}
 
 
 class _FinalizedBlock(BaseModel):
@@ -97,6 +132,40 @@ class _UtxoChain(BaseModel):
 
 class _ValidatedAddress(BaseModel):
     isvalid: bool
+
+
+class _UtxoRawTransaction(BaseModel):
+    txid: str
+    confirmations: int | None = Field(default=None, ge=0)
+    blockhash: str | None = None
+
+
+class _UtxoBlockHeader(BaseModel):
+    hash: str
+    height: int = Field(ge=0)
+    confirmations: int
+
+
+class _TokenAmount(BaseModel):
+    amount: str
+    decimals: int = Field(ge=0, le=36)
+
+
+class _ParsedTokenInfo(BaseModel):
+    mint: str
+    tokenAmount: _TokenAmount  # noqa: N815 - RPC field name
+
+
+class _ParsedTokenData(BaseModel):
+    info: _ParsedTokenInfo
+
+
+class _ParsedTokenAccountData(BaseModel):
+    parsed: _ParsedTokenData
+
+
+class _TokenAccountValue(BaseModel):
+    account: dict[str, object]
 
 
 class _UtxoScan(BaseModel):
@@ -215,6 +284,7 @@ class LocalWalletRpc:
         *,
         timeout: int = 5,
         version: Literal["1.0", "2.0"] = "2.0",
+        not_found_ok: bool = False,
     ) -> object:
         request_id = uuid4().hex
         try:
@@ -253,6 +323,18 @@ class LocalWalletRpc:
         valid_version = envelope.jsonrpc == version or (
             version == "1.0" and envelope.jsonrpc is None
         )
+        if (
+            not_found_ok
+            and valid_version
+            and envelope.id == request_id
+            and isinstance(envelope.error, dict)
+            and envelope.error.get("code") == _RPC_NOT_FOUND_CODE
+        ):
+            return _NOT_FOUND
+        if envelope.error is None and "result" not in envelope.model_fields_set:
+            raise WalletUnavailable(
+                "Local wallet node returned an invalid RPC envelope"
+            )
         if not valid_version or envelope.id != request_id or envelope.error is not None:
             raise WalletUnavailable(
                 "Local wallet node returned an invalid RPC envelope"
@@ -416,34 +498,247 @@ class LocalWalletRpc:
             slot=status.slot,
         )
 
+    async def ethereum_token_balance(
+        self, address: str, token: str, *, network: str = "mainnet"
+    ) -> WalletBalance:
+        """ERC-20 balance of an allowlisted token at the finalized block."""
+        if not _ADDRESS.fullmatch(address):
+            raise ValueError("Expected a lowercase 20-byte Ethereum hex address")
+        asset = await self._ethereum_asset(network)
+        chain_id, _ = ETHEREUM_NETWORKS[network]
+        registered = allowlist_for_chain(chain_id).token(token)
+        if registered is None:
+            raise ValueError("Token is not on the audited allowlist for this chain")
+        try:
+            block = _FinalizedBlock.model_validate(
+                await self._request("eth_getBlockByNumber", ["finalized", False]),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable(
+                "Local node did not return a finalized block"
+            ) from None
+        height = _quantity(block.number)
+        if not _HASH.fullmatch(block.hash):
+            raise WalletUnavailable("Invalid finalized block hash")
+        pinned: dict[str, object] = {"blockHash": block.hash, "requireCanonical": True}
+        decimals = _call_word(
+            await self._request(
+                "eth_call",
+                [
+                    {"to": registered.address, "data": "0x" + SELECTOR_DECIMALS.hex()},
+                    pinned,
+                ],
+            )
+        )
+        if decimals != registered.decimals:
+            raise WalletUnavailable("Token decimals do not match the allowlist entry")
+        calldata = "0x" + SELECTOR_BALANCE_OF.hex() + address[2:].rjust(64, "0")
+        units = _call_word(
+            await self._request(
+                "eth_call", [{"to": registered.address, "data": calldata}, pinned]
+            )
+        )
+        token_asset = f"eip155:{chain_id}/erc20:{registered.address}"
+        del asset
+        return WalletBalance(
+            address,
+            token_asset,
+            str(units),
+            registered.decimals,
+            height,
+            block.hash,
+            datetime.now(UTC),
+        )
+
+    async def solana_token_balance(
+        self, address: str, mint: str, *, network: str = "mainnet-beta"
+    ) -> SolanaBalance:
+        """Sum of the owner's SPL token accounts for one allowlisted mint."""
+        if not _is_solana_address(address):
+            raise ValueError("Expected a 32-byte Solana base58 address")
+        if mint not in ALLOWED_SOLANA_MINTS or mint not in SOLANA_TOKEN_DECIMALS:
+            raise ValueError("Mint is not on the audited allowlist")
+        genesis, asset = await self._solana_identity(network)
+        if network != "mainnet-beta":
+            raise ValueError("SPL token reads are limited to mainnet-beta mints")
+        try:
+            response = await self._request(
+                "getTokenAccountsByOwner",
+                [
+                    address,
+                    {"mint": mint},
+                    {"encoding": "jsonParsed", "commitment": "finalized"},
+                ],
+            )
+            if not isinstance(response, dict):
+                raise ValueError("unexpected token account response")
+            context = _SlotContext.model_validate(response.get("context"), strict=True)
+            values = response.get("value")
+            if not isinstance(values, list) or len(values) > 64:
+                raise ValueError("unexpected token account list")
+            total = 0
+            for value in values:
+                entry = _TokenAccountValue.model_validate(value, strict=True)
+                data = _ParsedTokenAccountData.model_validate(
+                    entry.account.get("data"), strict=True
+                )
+                info = data.parsed.info
+                if (
+                    info.mint != mint
+                    or info.tokenAmount.decimals != SOLANA_TOKEN_DECIMALS[mint]
+                    or not info.tokenAmount.amount.isdecimal()
+                ):
+                    raise ValueError("token account does not match the request")
+                total += int(info.tokenAmount.amount)
+            if total >= 2**64:
+                raise ValueError("token balance overflow")
+        except ValueError:
+            raise WalletUnavailable("Invalid Solana token account response") from None
+        return SolanaBalance(
+            address,
+            f"{asset.network.value}/spl:{mint}",
+            str(total),
+            SOLANA_TOKEN_DECIMALS[mint],
+            context.slot,
+            genesis,
+            datetime.now(UTC),
+        )
+
+    async def utxo_transaction(
+        self, txid: str, network: UtxoNetwork
+    ) -> TransactionObservation:
+        """Mempool/confirmation/reorg state of a BTC-family transaction.
+
+        Requires a node with ``-txindex`` (or the transaction in its mempool);
+        otherwise the transaction is reported as ``unknown``.
+        """
+        if not _UTXO_HASH.fullmatch(txid):
+            raise ValueError("Expected a 32-byte transaction id")
+        txid = txid.lower()
+        version = network.rpc_version
+        identity = network.asset.network.value
+        try:
+            await self._verify_utxo_node(network)
+            payload = await self._request(
+                "getrawtransaction", [txid, True], version=version, not_found_ok=True
+            )
+            if payload is _NOT_FOUND or payload is None:
+                return TransactionObservation(
+                    identity, txid, datetime.now(UTC), "unknown"
+                )
+            raw = _UtxoRawTransaction.model_validate(payload, strict=True)
+            if raw.txid.lower() != txid:
+                raise WalletUnavailable(
+                    f"{network.name} node returned a different transaction"
+                )
+            if raw.blockhash is None:
+                if raw.confirmations not in (None, 0):
+                    raise WalletUnavailable("Mempool transaction reports confirmations")
+                return TransactionObservation(
+                    identity, txid, datetime.now(UTC), "processed", confirmations=0
+                )
+            if not _UTXO_HASH.fullmatch(raw.blockhash):
+                raise WalletUnavailable(f"Invalid {network.name} block hash")
+            header = _UtxoBlockHeader.model_validate(
+                await self._request(
+                    "getblockheader", [raw.blockhash, True], version=version
+                ),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable(
+                f"Invalid {network.name} node transaction response"
+            ) from None
+        if header.hash.lower() != raw.blockhash.lower():
+            raise WalletUnavailable(f"{network.name} block header does not match")
+        if header.confirmations < 1:
+            # The containing block is no longer on the best chain (reorg).
+            return TransactionObservation(
+                identity,
+                txid,
+                datetime.now(UTC),
+                "unknown",
+                block_number=header.height,
+                block_hash=header.hash,
+                confirmations=0,
+            )
+        confirmations = header.confirmations
+        return TransactionObservation(
+            identity,
+            txid,
+            datetime.now(UTC),
+            "finalized" if confirmations >= UTXO_FINAL_CONFIRMATIONS else "confirmed",
+            True,
+            block_number=header.height,
+            block_hash=header.hash,
+            confirmations=confirmations,
+        )
+
+    async def ethereum_finalized_height(self, network: str = "mainnet") -> int:
+        """Finalized block height after verifying the node's chain ID."""
+        await self._ethereum_asset(network)
+        try:
+            block = _FinalizedBlock.model_validate(
+                await self._request("eth_getBlockByNumber", ["finalized", False]),
+                strict=True,
+            )
+        except ValueError:
+            raise WalletUnavailable(
+                "Local node did not return a finalized block"
+            ) from None
+        return _quantity(block.number)
+
+    async def solana_finalized_slot(self, network: str = "mainnet-beta") -> int:
+        """Finalized slot after verifying the cluster genesis hash."""
+        await self._solana_identity(network)
+        slot = await self._request("getSlot", [{"commitment": "finalized"}])
+        if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0:
+            raise WalletUnavailable("Invalid finalized Solana slot")
+        return slot
+
+    async def utxo_height(self, network: UtxoNetwork) -> int:
+        """Best block height after verifying chain identity and sync state."""
+        try:
+            await self._verify_utxo_node(network)
+            count = await self._request(
+                "getblockcount", [], version=network.rpc_version
+            )
+        except ValueError:
+            raise WalletUnavailable(
+                f"Invalid {network.name} node health response"
+            ) from None
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise WalletUnavailable(f"Invalid {network.name} block count")
+        return count
+
+    async def _verify_utxo_node(self, network: UtxoNetwork) -> str:
+        """Check chain identity, sync state and genesis; return the network label."""
+        chain = _UtxoChain.model_validate(
+            await self._request("getblockchaininfo", [], version=network.rpc_version),
+            strict=True,
+        )
+        label = "mainnet" if network.chain == "main" else network.chain
+        if chain.chain != network.chain or chain.initialblockdownload:
+            raise WalletUnavailable(f"{network.name} node must report synced {label}")
+        if network.signet_challenge is not None and (
+            chain.signet_challenge != network.signet_challenge
+        ):
+            raise WalletUnavailable(
+                "Local node does not match the default Signet challenge"
+            )
+        genesis = await self._request("getblockhash", [0], version=network.rpc_version)
+        if genesis != network.genesis:
+            raise WalletUnavailable(
+                f"Local node does not match the {network.name} genesis"
+            )
+        return label
+
     async def utxo_balance(self, address: str, network: UtxoNetwork) -> WalletBalance:
         if not _UTXO_ADDRESS.fullmatch(address):
             raise ValueError(f"Expected a {network.name} address")
         try:
-            chain = _UtxoChain.model_validate(
-                await self._request(
-                    "getblockchaininfo", [], version=network.rpc_version
-                ),
-                strict=True,
-            )
-            label = "mainnet" if network.chain == "main" else network.chain
-            if chain.chain != network.chain or chain.initialblockdownload:
-                raise WalletUnavailable(
-                    f"{network.name} node must report synced {label}"
-                )
-            if network.signet_challenge is not None and (
-                chain.signet_challenge != network.signet_challenge
-            ):
-                raise WalletUnavailable(
-                    "Local node does not match the default Signet challenge"
-                )
-            genesis = await self._request(
-                "getblockhash", [0], version=network.rpc_version
-            )
-            if genesis != network.genesis:
-                raise WalletUnavailable(
-                    f"Local node does not match the {network.name} genesis"
-                )
+            label = await self._verify_utxo_node(network)
             validated = _ValidatedAddress.model_validate(
                 await self._request(
                     "validateaddress", [address], version=network.rpc_version
@@ -494,6 +789,13 @@ def _quantity(value: object) -> int:
     return int(value, 16)
 
 
+def _call_word(value: object) -> int:
+    """Parse a 32-byte eth_call return word."""
+    if not isinstance(value, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
+        raise WalletUnavailable("Invalid eth_call return word")
+    return int(value, 16)
+
+
 def _is_solana_address(address: str) -> bool:
     return _is_base58_size(address, 32)
 
@@ -508,3 +810,222 @@ def _is_base58_size(address: str, size: int) -> bool:
         decoded = decoded * 58 + _BASE58.index(char)
     leading_zero_bytes = len(address) - len(address.lstrip("1"))
     return leading_zero_bytes + (decoded.bit_length() + 7) // 8 == size
+
+
+# --- ChainWallet adapters (AGENTS.md 6.1) -----------------------------------------
+
+_SPEND_DISABLED = (
+    "Direct on-chain spending is disabled in V1; this adapter is read-only"
+)
+_UTXO_CHAIN_NAMES = {
+    "btc-balance": "bitcoin",
+    "ltc-balance": "litecoin",
+    "dgb-balance": "digibyte",
+}
+
+
+def _chain_balance(snapshot: WalletBalance | SolanaBalance) -> ChainBalance:
+    if isinstance(snapshot, WalletBalance):
+        height, reference = snapshot.block_number, snapshot.block_hash
+    else:
+        height, reference = snapshot.slot, snapshot.genesis_hash
+    return ChainBalance(
+        snapshot.address,
+        snapshot.asset,
+        snapshot.base_units,
+        snapshot.decimals,
+        height,
+        reference,
+        snapshot.observed_at,
+    )
+
+
+class _ReadOnlyChainWallet:
+    """Shared behaviour: configured addresses, and spend operations unsupported."""
+
+    network: str
+
+    def __init__(self, rpc: LocalWalletRpc, addresses: Sequence[WalletAddress]) -> None:
+        if not addresses:
+            raise ValueError("At least one address is required")
+        self._rpc = rpc
+        self._addresses = tuple(addresses)
+
+    async def get_addresses(self) -> Sequence[WalletAddress]:
+        return self._addresses
+
+    async def build_preview(self, intent: TransferOrSwapIntent) -> UnsignedTransaction:
+        raise WalletOperationUnsupported(_SPEND_DISABLED)
+
+    async def simulate(self, tx: UnsignedTransaction) -> SimulationResult:
+        raise WalletOperationUnsupported(_SPEND_DISABLED)
+
+    async def broadcast(self, signed_tx: SignedTransaction) -> BroadcastResult:
+        raise WalletOperationUnsupported(_SPEND_DISABLED)
+
+    def _health(self, height: int | None, detail: str) -> ChainHealth:
+        return ChainHealth(
+            self.network, height is not None, detail, height, datetime.now(UTC)
+        )
+
+
+def _known(observation: TransactionObservation) -> TransactionObservation | None:
+    return None if observation.finality == "unknown" else observation
+
+
+class EthereumChainWallet(_ReadOnlyChainWallet):
+    """ETH and allowlisted ERC-20 balances plus receipt status on one EVM chain."""
+
+    def __init__(
+        self,
+        rpc: LocalWalletRpc,
+        addresses: Sequence[str],
+        *,
+        network: str = "mainnet",
+        role: WalletRole = "watch_only",
+    ) -> None:
+        if network not in ETHEREUM_NETWORKS:
+            raise ValueError("Unsupported Ethereum network")
+        self._network_name = network
+        self._chain_id = ETHEREUM_NETWORKS[network][0]
+        self.network = f"eip155:{self._chain_id}"
+        super().__init__(
+            rpc,
+            [
+                WalletAddress(validate_evm_address(a).normalized, self.network, role)
+                for a in addresses
+            ],
+        )
+
+    async def get_balances(self) -> Sequence[ChainBalance]:
+        balances: list[ChainBalance] = []
+        tokens = allowlist_for_chain(self._chain_id).tokens
+        for wallet in self._addresses:
+            balances.append(
+                _chain_balance(
+                    await self._rpc.ethereum_balance(
+                        wallet.address, network=self._network_name
+                    )
+                )
+            )
+            for token in tokens:
+                balances.append(
+                    _chain_balance(
+                        await self._rpc.ethereum_token_balance(
+                            wallet.address, token.address, network=self._network_name
+                        )
+                    )
+                )
+        return balances
+
+    async def get_transaction(self, tx_id: str) -> TransactionObservation | None:
+        return _known(
+            await self._rpc.ethereum_transaction(tx_id, network=self._network_name)
+        )
+
+    async def health(self) -> ChainHealth:
+        try:
+            height = await self._rpc.ethereum_finalized_height(self._network_name)
+        except WalletUnavailable as error:
+            return self._health(None, str(error))
+        return self._health(height, f"finalized block {height}")
+
+
+class SolanaChainWallet(_ReadOnlyChainWallet):
+    """SOL and allowlisted SPL (USDC/USDT) balances plus signature status."""
+
+    def __init__(
+        self,
+        rpc: LocalWalletRpc,
+        addresses: Sequence[str],
+        *,
+        network: str = "mainnet-beta",
+        role: WalletRole = "watch_only",
+    ) -> None:
+        if network not in SOLANA_NETWORKS:
+            raise ValueError("Unsupported Solana network")
+        for address in addresses:
+            if not _is_solana_address(address):
+                raise ValueError("Expected a 32-byte Solana base58 address")
+        self._network_name = network
+        self.network = SOLANA_NETWORKS[network][1].network.value
+        super().__init__(rpc, [WalletAddress(a, self.network, role) for a in addresses])
+
+    async def get_balances(self) -> Sequence[ChainBalance]:
+        balances: list[ChainBalance] = []
+        spl_mints = sorted(
+            m for m in ALLOWED_SOLANA_MINTS if not m.startswith("So1111")
+        )
+        for wallet in self._addresses:
+            balances.append(
+                _chain_balance(
+                    await self._rpc.solana_balance(
+                        wallet.address, network=self._network_name
+                    )
+                )
+            )
+            if self._network_name != "mainnet-beta":
+                continue
+            for mint in spl_mints:
+                balances.append(
+                    _chain_balance(
+                        await self._rpc.solana_token_balance(
+                            wallet.address, mint, network=self._network_name
+                        )
+                    )
+                )
+        return balances
+
+    async def get_transaction(self, tx_id: str) -> TransactionObservation | None:
+        return _known(
+            await self._rpc.solana_transaction(tx_id, network=self._network_name)
+        )
+
+    async def health(self) -> ChainHealth:
+        try:
+            slot = await self._rpc.solana_finalized_slot(self._network_name)
+        except WalletUnavailable as error:
+            return self._health(None, str(error))
+        return self._health(slot, f"finalized slot {slot}")
+
+
+class UtxoChainWallet(_ReadOnlyChainWallet):
+    """BTC, LTC or DGB address balances and transaction status via a local node."""
+
+    def __init__(
+        self,
+        rpc: LocalWalletRpc,
+        command: str,
+        addresses: Sequence[str],
+        *,
+        profile: str = "mainnet",
+        role: WalletRole = "watch_only",
+    ) -> None:
+        networks = UTXO_NETWORK_PROFILES.get(command)
+        if networks is None or profile not in networks:
+            raise ValueError("Unsupported UTXO network")
+        self._utxo = networks[profile]
+        chain = _UTXO_CHAIN_NAMES[command]
+        self.network = self._utxo.asset.network.value
+        for address in addresses:
+            if has_offline_profile(chain, profile):
+                validate_utxo_address(chain, address, profile)
+            elif not _UTXO_ADDRESS.fullmatch(address):
+                raise ValueError(f"Expected a {self._utxo.name} address")
+        super().__init__(rpc, [WalletAddress(a, self.network, role) for a in addresses])
+
+    async def get_balances(self) -> Sequence[ChainBalance]:
+        return [
+            _chain_balance(await self._rpc.utxo_balance(a.address, self._utxo))
+            for a in self._addresses
+        ]
+
+    async def get_transaction(self, tx_id: str) -> TransactionObservation | None:
+        return _known(await self._rpc.utxo_transaction(tx_id, self._utxo))
+
+    async def health(self) -> ChainHealth:
+        try:
+            height = await self._rpc.utxo_height(self._utxo)
+        except WalletUnavailable as error:
+            return self._health(None, str(error))
+        return self._health(height, f"best block {height}")

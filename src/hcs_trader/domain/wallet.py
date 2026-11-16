@@ -40,3 +40,4 @@ class TransactionObservation:
     block_number: int | None = None
     block_hash: str | None = None
     slot: int | None = None
+    confirmations: int | None = None

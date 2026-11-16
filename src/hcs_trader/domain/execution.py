@@ -1,5 +1,6 @@
 """Domain types for spot order execution, state lifecycle, and venue mapping."""
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -101,3 +102,27 @@ class SpotOrder:
             average_price=average_price or self.average_price,
             fee=fee or self.fee,
         )
+
+
+def spot_order_plan_hash(order: SpotOrder) -> str:
+    """Canonical SHA-256 over the economically relevant order fields.
+
+    Excludes lifecycle state, timestamps and the risk decision id so the hash
+    computed before risk evaluation stays stable through the state machine,
+    while any change to venue, market, side, type, size, price or the client
+    order id produces a different hash.
+    """
+    limit = "none" if order.limit_price is None else str(order.limit_price.normalize())
+    payload = "|".join(
+        (
+            "spot-plan-v1",
+            order.venue,
+            order.market,
+            order.side.value,
+            order.order_type.value,
+            str(order.quantity.normalize()),
+            limit,
+            order.client_order_id,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

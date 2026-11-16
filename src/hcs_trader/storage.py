@@ -1,13 +1,17 @@
 """Versioned local SQLite storage for audit events and quote history."""
 
+import hashlib
 import json
+import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from pydantic import TypeAdapter
@@ -31,16 +35,49 @@ from hcs_trader.domain.paper import (
     PaperRejected,
     book_fill,
 )
+from hcs_trader.domain.signing import ApprovedRiskDecision, SignedPlanConflict
 from hcs_trader.domain.wallet import WalletSnapshot
 from hcs_trader.local_research import ResearchHistory, ResearchRun, ResearchRunStats
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
-from hcs_trader.risk import RiskRejected
+from hcs_trader.risk import RiskEvaluation, RiskRejected
 
-_SCHEMA_VERSION = 17
+_SCHEMA_VERSION = 18
 _PAPER_FILL = TypeAdapter(PaperFill)
 _RESEARCH_RUN = TypeAdapter(ResearchRun)
 _RESEARCH_STATS = TypeAdapter(ResearchRunStats)
 WALLET_SNAPSHOT = TypeAdapter(WalletSnapshot)
+
+
+class PersistenceUnavailable(sqlite3.OperationalError):
+    """The local database cannot be trusted or used (locked, corrupt, read-only).
+
+    Execution must treat this as a hard NO_TRADE condition.
+    """
+
+
+class KillSwitchCause(StrEnum):
+    """Typed reasons for tripping the kill switch (AGENTS.md 7.2)."""
+
+    MANUAL = "MANUAL"
+    STALE_FEED = "STALE_FEED"
+    RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    VENUE_UNHEALTHY = "VENUE_UNHEALTHY"
+    UNEXPECTED_CHAIN = "UNEXPECTED_CHAIN"
+    REPEATED_REJECTS = "REPEATED_REJECTS"
+    UNEXPLAINED_BALANCE_DELTA = "UNEXPLAINED_BALANCE_DELTA"
+    LOSS_LIMIT = "LOSS_LIMIT"
+    SLIPPAGE_OR_FEE_BREACH = "SLIPPAGE_OR_FEE_BREACH"
+    SUSPICIOUS_INTERACTION = "SUSPICIOUS_INTERACTION"
+    SIGNING_POLICY_FAILURE = "SIGNING_POLICY_FAILURE"
+    INJECTION_ATTEMPT = "INJECTION_ATTEMPT"
+    PERSISTENCE_FAILURE = "PERSISTENCE_FAILURE"
+
+
+class RiskOutcome(StrEnum):
+    ALLOWED = "ALLOWED"
+    REJECTED = "REJECTED"
+    NO_TRADE = "NO_TRADE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +85,123 @@ class AuditEvent:
     event_id: str
     recorded_at: str
     kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredAuditEvent:
+    """Spec 12.3 audit record; secrets are redacted before storage."""
+
+    event_id: str
+    recorded_at: str
+    kind: str
+    client_id: str | None = None
+    agent_id: str | None = None
+    tool_name: str | None = None
+    capability_scope: str | None = None
+    request_id: str | None = None
+    idempotency_key: str | None = None
+    args_hash: str | None = None
+    redacted_args: str | None = None
+    strategy_version: str | None = None
+    model_version: str | None = None
+    policy_version: str | None = None
+    risk_decision_id: str | None = None
+    simulation_hash: str | None = None
+    order_or_tx_id: str | None = None
+    outcome: str | None = None
+    app_version: str | None = None
+    commit_sha: str | None = None
+
+
+_AUDIT_FIELDS: tuple[str, ...] = (
+    "client_id",
+    "agent_id",
+    "tool_name",
+    "capability_scope",
+    "request_id",
+    "idempotency_key",
+    "args_hash",
+    "redacted_args",
+    "strategy_version",
+    "model_version",
+    "policy_version",
+    "risk_decision_id",
+    "simulation_hash",
+    "order_or_tx_id",
+    "outcome",
+    "app_version",
+    "commit_sha",
+)
+_SECRET_KEY = re.compile(
+    r"secret|passw|passphrase|private|seed|mnemonic|token|api[_-]?key|"
+    r"authorization|credential|signature|keystore|cookie",
+    re.IGNORECASE,
+)
+REDACTED = "[REDACTED]"
+
+
+def redact_arguments(value: Any) -> Any:
+    """Return a JSON-safe copy of ``value`` with secret-looking fields masked."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): REDACTED
+            if _SECRET_KEY.search(str(key))
+            else redact_arguments(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple | set | frozenset):
+        return [redact_arguments(item) for item in value]
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return str(value)
+
+
+def canonical_hash(value: Any) -> str:
+    """SHA-256 over canonical JSON of the (already redacted) value."""
+    return hashlib.sha256(
+        json.dumps(
+            redact_arguments(value), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRiskDecision:
+    decision_id: str
+    outcome: RiskOutcome
+    allowed: bool
+    reason: str | None
+    policy_version: str
+    inputs_hash: str
+    plan_hash: str | None
+    evaluated_at: datetime
+    consumed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class KillSwitchState:
+    active: bool
+    cause: KillSwitchCause | None
+    detail: str | None
+    changed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoreHealth:
+    ok: bool
+    detail: str
+    schema_version: int | None = None
+    execution_paused: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SpotFill:
+    client_order_id: str
+    fill_id: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal
+    filled_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,20 +217,38 @@ class ExecutionPause:
 
 
 class AuditStore:
-    def __init__(self, path: Path, *, read_only: bool = False) -> None:
+    def __init__(
+        self, path: Path, *, read_only: bool = False, busy_timeout: float = 5.0
+    ) -> None:
         self.path = path
         self._read_only = read_only
+        self._busy_timeout = busy_timeout
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         location = (
             self.path.resolve().as_uri() + "?mode=ro" if self._read_only else self.path
         )
-        with closing(
-            sqlite3.connect(location, timeout=5, uri=self._read_only)
-        ) as connection:
-            connection.execute("PRAGMA foreign_keys = ON")
-            yield connection
+        try:
+            with closing(
+                sqlite3.connect(
+                    location, timeout=self._busy_timeout, uri=self._read_only
+                )
+            ) as connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                yield connection
+        except PersistenceUnavailable:
+            raise
+        except sqlite3.DatabaseError as error:
+            # Locked, read-only, full, corrupt or truncated storage fails closed.
+            # Constraint violations stay ordinary errors for callers to handle.
+            if isinstance(error, sqlite3.OperationalError) or (
+                type(error) is sqlite3.DatabaseError
+            ):
+                raise PersistenceUnavailable(
+                    f"Audit storage unavailable: {error}"
+                ) from error
+            raise
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,6 +512,97 @@ class AuditStore:
                     "ALTER TABLE spot_orders ADD COLUMN canary_candidate_id TEXT "
                     "REFERENCES strategy_candidates(candidate_id)"
                 )
+            if version < 18:
+                present = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(audit_events)")
+                }
+                for column in (c for c in _AUDIT_FIELDS if c not in present):
+                    connection.execute(
+                        f"ALTER TABLE audit_events ADD COLUMN {column} TEXT"
+                    )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS risk_decisions (
+                        decision_id TEXT PRIMARY KEY NOT NULL,
+                        outcome TEXT NOT NULL
+                            CHECK (outcome IN ('ALLOWED', 'REJECTED', 'NO_TRADE')),
+                        allowed INTEGER NOT NULL CHECK (allowed IN (0, 1)),
+                        reason TEXT,
+                        policy_version TEXT NOT NULL,
+                        inputs_hash TEXT NOT NULL,
+                        plan_hash TEXT,
+                        evaluated_at TEXT NOT NULL,
+                        consumed_at TEXT,
+                        CHECK ((allowed = 1) = (outcome = 'ALLOWED'))
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS kill_switch_events (
+                        id INTEGER PRIMARY KEY,
+                        action TEXT NOT NULL CHECK (action IN ('TRIPPED', 'CLEARED')),
+                        cause TEXT NOT NULL,
+                        detail TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS signed_plans (
+                        idempotency_key TEXT PRIMARY KEY NOT NULL,
+                        plan_hash TEXT NOT NULL,
+                        risk_decision_id TEXT NOT NULL UNIQUE
+                            REFERENCES risk_decisions(decision_id),
+                        tx_hash TEXT NOT NULL,
+                        signed_at TEXT NOT NULL
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS spot_fills (
+                        client_order_id TEXT NOT NULL
+                            REFERENCES spot_orders(client_order_id),
+                        fill_id TEXT NOT NULL,
+                        quantity TEXT NOT NULL,
+                        price TEXT NOT NULL,
+                        fee TEXT NOT NULL,
+                        filled_at TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL,
+                        PRIMARY KEY (client_order_id, fill_id)
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 18")
+        self._verify_integrity()
+
+    def _verify_integrity(self) -> None:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute("PRAGMA quick_check").fetchall()
+        except sqlite3.DatabaseError as error:
+            raise PersistenceUnavailable(
+                f"Audit storage failed its integrity check: {error}"
+            ) from error
+        if rows != [("ok",)]:
+            raise PersistenceUnavailable("Audit storage failed its integrity check")
+
+    def health(self) -> StoreHealth:
+        """Non-raising store health check for status endpoints and startup."""
+        try:
+            self._verify_integrity()
+            with self._connect() as connection:
+                (version,) = connection.execute("PRAGMA user_version").fetchone()
+                paused = self._execution_pause(connection).paused
+        except sqlite3.Error as error:
+            return StoreHealth(False, f"unavailable: {error}")
+        if version != _SCHEMA_VERSION:
+            return StoreHealth(False, "schema version mismatch", version, paused)
+        return StoreHealth(True, "ok", version, paused)
 
     @contextmanager
     def research_worker_lock(self) -> Iterator[None]:
@@ -462,22 +725,426 @@ class AuditStore:
         with self._connect() as connection:
             return self._execution_pause(connection)
 
+    @staticmethod
+    def _insert_audit(
+        connection: sqlite3.Connection,
+        kind: str,
+        recorded_at: str | None = None,
+        **fields: str | None,
+    ) -> str:
+        unknown = set(fields) - set(_AUDIT_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown audit fields: {sorted(unknown)}")
+        event_id = uuid4().hex
+        names = ["event_id", "recorded_at", "kind", *fields]
+        connection.execute(
+            f"INSERT INTO audit_events ({', '.join(names)}) "  # noqa: S608
+            f"VALUES ({', '.join('?' * len(names))})",
+            (
+                event_id,
+                recorded_at or datetime.now(UTC).isoformat(),
+                kind,
+                *fields.values(),
+            ),
+        )
+        return event_id
+
+    def _apply_pause(
+        self,
+        connection: sqlite3.Connection,
+        paused: bool,
+        *,
+        cause: KillSwitchCause,
+        detail: str,
+        actor: str,
+        kind: str,
+        always_record: bool = False,
+    ) -> bool:
+        now = datetime.now(UTC).isoformat()
+        updated = connection.execute(
+            "UPDATE execution_pause SET paused = ?, changed_at = ? "
+            "WHERE id = 1 AND paused <> ?",
+            (int(paused), now, int(paused)),
+        )
+        changed = bool(updated.rowcount)
+        if changed or (always_record and paused):
+            connection.execute(
+                "INSERT INTO kill_switch_events "
+                "(action, cause, detail, actor, occurred_at) VALUES (?, ?, ?, ?, ?)",
+                ("TRIPPED" if paused else "CLEARED", cause.value, detail, actor, now),
+            )
+            self._insert_audit(
+                connection,
+                kind,
+                now,
+                outcome=cause.value,
+                client_id=actor,
+                tool_name="kill_switch",
+            )
+        return changed
+
     def set_execution_pause(self, paused: bool) -> ExecutionPause:
         with self._connect() as connection, connection:
-            now = datetime.now(UTC).isoformat()
-            updated = connection.execute(
-                "UPDATE execution_pause SET paused = ?, changed_at = ? "
-                "WHERE id = 1 AND paused <> ?",
-                (int(paused), now, int(paused)),
+            connection.execute("BEGIN IMMEDIATE")
+            self._apply_pause(
+                connection,
+                paused,
+                cause=KillSwitchCause.MANUAL,
+                detail="operator pause" if paused else "operator resume",
+                actor="operator",
+                kind="execution.paused" if paused else "execution.resumed",
             )
-            if updated.rowcount:
-                kind = "execution.paused" if paused else "execution.resumed"
-                connection.execute(
-                    "INSERT INTO audit_events (event_id, recorded_at, kind)"
-                    " VALUES (?, ?, ?)",
-                    (uuid4().hex, now, kind),
-                )
             return self._execution_pause(connection)
+
+    def trip_kill_switch(
+        self, cause: KillSwitchCause, detail: str, *, actor: str = "system"
+    ) -> KillSwitchState:
+        """Persist a typed kill-switch trip; only an operator clear releases it."""
+        if not detail.strip():
+            raise ValueError("A kill-switch trip requires a detail message")
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._apply_pause(
+                connection,
+                True,
+                cause=cause,
+                detail=detail[:500],
+                actor=actor,
+                kind="kill_switch.tripped",
+                always_record=True,
+            )
+            return self._kill_switch_state(connection)
+
+    def clear_kill_switch(self, operator: str, note: str) -> KillSwitchState:
+        """Explicit local operator clear; requires an identified operator and note."""
+        if not operator.strip() or not note.strip():
+            raise ValueError("Clearing the kill switch requires an operator and a note")
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._apply_pause(
+                connection,
+                False,
+                cause=KillSwitchCause.MANUAL,
+                detail=note[:500],
+                actor=operator.strip(),
+                kind="kill_switch.cleared",
+            )
+            return self._kill_switch_state(connection)
+
+    def _kill_switch_state(self, connection: sqlite3.Connection) -> KillSwitchState:
+        pause = self._execution_pause(connection)
+        row = connection.execute(
+            "SELECT cause, detail FROM kill_switch_events "
+            "WHERE action = 'TRIPPED' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not pause.paused:
+            return KillSwitchState(False, None, None, pause.changed_at)
+        cause = KillSwitchCause(row[0]) if row else KillSwitchCause.MANUAL
+        return KillSwitchState(True, cause, row[1] if row else None, pause.changed_at)
+
+    def kill_switch_state(self) -> KillSwitchState:
+        with self._connect() as connection:
+            return self._kill_switch_state(connection)
+
+    def kill_switch_history(self, limit: int = 50) -> list[tuple[str, str, str, str]]:
+        """Return (action, cause, actor, occurred_at), newest first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT action, cause, actor, occurred_at FROM kill_switch_events "
+                "ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [(str(a), str(c), str(o), str(t)) for a, c, o, t in rows]
+
+    def fail_safe_paused(self) -> bool:
+        """Persisted pause read that fails closed (for RiskEngine and the signer).
+
+        Any storage fault reports "paused" and, where the store is still
+        writable, persists a PERSISTENCE_FAILURE kill-switch trip.
+        """
+        try:
+            return self.execution_pause().paused
+        except sqlite3.Error as error:
+            self._best_effort_trip(f"pause state unreadable: {error}")
+            return True
+
+    def _best_effort_trip(self, detail: str) -> None:
+        if self._read_only:
+            return
+        try:
+            self.trip_kill_switch(KillSwitchCause.PERSISTENCE_FAILURE, detail)
+        except sqlite3.Error:
+            return  # Unwritable: the caller still fails closed.
+
+    # --- risk decisions ---
+
+    def record_risk_decision(
+        self,
+        evaluation: RiskEvaluation,
+        *,
+        policy_version: str,
+        inputs: Mapping[str, Any] | None = None,
+        no_trade: bool = False,
+        strategy_version: str | None = None,
+    ) -> StoredRiskDecision:
+        """Persist every risk verdict (allow, reject and NO_TRADE) exactly once."""
+        if not policy_version.strip():
+            raise ValueError("A risk decision requires a policy version")
+        if evaluation.allowed and no_trade:
+            raise ValueError("An allowed decision cannot be NO_TRADE")
+        if evaluation.allowed:
+            outcome = RiskOutcome.ALLOWED
+        elif no_trade:
+            outcome = RiskOutcome.NO_TRADE
+        else:
+            outcome = RiskOutcome.REJECTED
+        inputs_hash = canonical_hash(
+            {
+                "inputs": dict(inputs or {}),
+                "plan_hash": evaluation.plan_hash,
+                "reason": evaluation.reason,
+            }
+        )
+        evaluated_at = evaluation.evaluated_at.isoformat()
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            inserted = connection.execute(
+                "INSERT INTO risk_decisions (decision_id, outcome, allowed, reason, "
+                "policy_version, inputs_hash, plan_hash, evaluated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (decision_id) DO NOTHING",
+                (
+                    evaluation.decision_id,
+                    outcome.value,
+                    int(evaluation.allowed),
+                    evaluation.reason,
+                    policy_version,
+                    inputs_hash,
+                    evaluation.plan_hash,
+                    evaluated_at,
+                ),
+            )
+            if inserted.rowcount:
+                self._insert_audit(
+                    connection,
+                    "risk.decision.recorded",
+                    evaluated_at,
+                    risk_decision_id=evaluation.decision_id,
+                    policy_version=policy_version,
+                    strategy_version=strategy_version,
+                    outcome=outcome.value,
+                )
+            stored = self._risk_decision(connection, evaluation.decision_id)
+        if stored is None or (
+            stored.inputs_hash,
+            stored.allowed,
+            stored.plan_hash,
+        ) != (inputs_hash, evaluation.allowed, evaluation.plan_hash):
+            raise ValueError("Risk decision ID was already used for another verdict")
+        return stored
+
+    @staticmethod
+    def _risk_decision(
+        connection: sqlite3.Connection, decision_id: str
+    ) -> StoredRiskDecision | None:
+        row = connection.execute(
+            "SELECT decision_id, outcome, allowed, reason, policy_version, "
+            "inputs_hash, plan_hash, evaluated_at, consumed_at "
+            "FROM risk_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredRiskDecision(
+            decision_id=row[0],
+            outcome=RiskOutcome(row[1]),
+            allowed=bool(row[2]),
+            reason=row[3],
+            policy_version=row[4],
+            inputs_hash=row[5],
+            plan_hash=row[6],
+            evaluated_at=datetime.fromisoformat(row[7]),
+            consumed_at=datetime.fromisoformat(row[8]) if row[8] else None,
+        )
+
+    def get_risk_decision(self, decision_id: str) -> StoredRiskDecision | None:
+        with self._connect() as connection:
+            return self._risk_decision(connection, decision_id)
+
+    def list_risk_decisions(self, limit: int = 50) -> list[StoredRiskDecision]:
+        with self._connect() as connection:
+            ids = connection.execute(
+                "SELECT decision_id FROM risk_decisions "
+                "ORDER BY evaluated_at DESC, decision_id LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+            decisions = [self._risk_decision(connection, i) for (i,) in ids]
+        return [d for d in decisions if d is not None]
+
+    def approved_risk_decision(self, decision_id: str) -> ApprovedRiskDecision | None:
+        """Store-backed signer lookup; a consumed or unbound decision never allows."""
+        stored = self.get_risk_decision(decision_id)
+        if stored is None:
+            return None
+        return ApprovedRiskDecision(
+            decision_id=stored.decision_id,
+            plan_hash=stored.plan_hash or "",
+            allowed=bool(
+                stored.allowed and stored.plan_hash and stored.consumed_at is None
+            ),
+        )
+
+    # --- signed plans ---
+
+    def is_plan_signed(self, idempotency_key: str) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM signed_plans WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                is not None
+            )
+
+    def commit_signed_plan(
+        self,
+        *,
+        idempotency_key: str,
+        plan_hash: str,
+        risk_decision_id: str,
+        tx_hash: str,
+        signed_at: datetime,
+    ) -> None:
+        """Atomically consume the risk decision and record the signature."""
+        now = signed_at.isoformat()
+        try:
+            with self._connect() as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                consumed = connection.execute(
+                    "UPDATE risk_decisions SET consumed_at = ? "
+                    "WHERE decision_id = ? AND allowed = 1 AND plan_hash = ? "
+                    "AND consumed_at IS NULL",
+                    (now, risk_decision_id, plan_hash),
+                )
+                if not consumed.rowcount:
+                    raise SignedPlanConflict(
+                        "Risk decision is unknown, not approved for this plan, "
+                        "or already consumed"
+                    )
+                connection.execute(
+                    "INSERT INTO signed_plans VALUES (?, ?, ?, ?, ?)",
+                    (idempotency_key, plan_hash, risk_decision_id, tx_hash, now),
+                )
+                self._insert_audit(
+                    connection,
+                    "signer.plan.signed",
+                    now,
+                    idempotency_key=idempotency_key,
+                    risk_decision_id=risk_decision_id,
+                    order_or_tx_id=tx_hash,
+                    outcome="signed",
+                    tool_name="sign_transaction",
+                )
+        except sqlite3.IntegrityError as error:
+            raise SignedPlanConflict(
+                "Idempotency key or risk decision was already signed"
+            ) from error
+
+    # --- structured audit ---
+
+    def record_structured_audit(
+        self,
+        kind: str,
+        *,
+        arguments: Mapping[str, Any] | None = None,
+        **fields: str | None,
+    ) -> StructuredAuditEvent:
+        """Record a spec 12.3 audit event; arguments are redacted before storage."""
+        if arguments is not None:
+            fields["args_hash"] = canonical_hash(arguments)
+            fields["redacted_args"] = json.dumps(
+                redact_arguments(arguments), sort_keys=True, separators=(",", ":")
+            )
+        with self._connect() as connection, connection:
+            event_id = self._insert_audit(connection, kind, None, **fields)
+            row = connection.execute(
+                f"SELECT event_id, recorded_at, kind, {', '.join(_AUDIT_FIELDS)} "  # noqa: S608
+                "FROM audit_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return StructuredAuditEvent(*row)
+
+    def list_structured_audit(self, limit: int = 50) -> list[StructuredAuditEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT event_id, recorded_at, kind, {', '.join(_AUDIT_FIELDS)} "  # noqa: S608
+                "FROM audit_events ORDER BY rowid DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [StructuredAuditEvent(*row) for row in rows]
+
+    # --- spot fills ---
+
+    def record_spot_fill(self, fill: SpotFill) -> bool:
+        """Idempotently record one fill; a conflicting replay is an error."""
+        if (
+            not (fill.quantity.is_finite() and fill.price.is_finite())
+            or not fill.fee.is_finite()
+            or fill.quantity <= 0
+            or fill.price <= 0
+            or fill.fee < 0
+        ):
+            raise ValueError("Spot fill amounts must be finite and positive")
+        values = (
+            fill.client_order_id,
+            fill.fill_id,
+            str(fill.quantity),
+            str(fill.price),
+            str(fill.fee),
+            fill.filled_at.isoformat(),
+        )
+        with self._connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            inserted = connection.execute(
+                "INSERT INTO spot_fills VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (client_order_id, fill_id) DO NOTHING",
+                (*values, datetime.now(UTC).isoformat()),
+            )
+            if inserted.rowcount:
+                self._insert_audit(
+                    connection,
+                    "spot.fill.recorded",
+                    order_or_tx_id=fill.client_order_id,
+                    idempotency_key=fill.fill_id,
+                    outcome="recorded",
+                )
+                return True
+            existing = connection.execute(
+                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at "
+                "FROM spot_fills WHERE client_order_id = ? AND fill_id = ?",
+                values[:2],
+            ).fetchone()
+            if tuple(existing) != values:
+                raise ValueError("Fill ID was already recorded with different values")
+            return False
+
+    def spot_fills(self, client_order_id: str) -> list[SpotFill]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at "
+                "FROM spot_fills WHERE client_order_id = ? ORDER BY filled_at, fill_id",
+                (client_order_id,),
+            ).fetchall()
+        return [
+            SpotFill(
+                r[0],
+                r[1],
+                Decimal(r[2]),
+                Decimal(r[3]),
+                Decimal(r[4]),
+                datetime.fromisoformat(r[5]),
+            )
+            for r in rows
+        ]
 
     def record_paper_fill(
         self,
@@ -985,8 +1652,51 @@ class AuditStore:
         strategy_version: str,
         key_fingerprint: str,
     ) -> None:
+        """Reserve a submission; every rejection or storage fault is a NO_TRADE."""
         if order.state != OrderState.SUBMITTED:
             raise ValueError("Submission reservation requires a submitted order")
+        try:
+            self._reserve_spot_submission(
+                order,
+                max_open_orders,
+                candidate_id=candidate_id,
+                strategy_version=strategy_version,
+                key_fingerprint=key_fingerprint,
+            )
+        except PersistenceUnavailable as error:
+            self._best_effort_trip(f"submission reservation failed: {error}")
+            raise RiskRejected(
+                "Persistence unavailable: execution blocked (NO_TRADE)"
+            ) from error
+        except RiskRejected as rejection:
+            self._audit_rejection(order, strategy_version, str(rejection))
+            raise
+
+    def _audit_rejection(
+        self, order: SpotOrder, strategy_version: str, reason: str
+    ) -> None:
+        try:
+            self.record_structured_audit(
+                "spot.submission.rejected",
+                arguments={"reason": reason, "market": order.market},
+                strategy_version=strategy_version,
+                risk_decision_id=order.risk_decision_id,
+                order_or_tx_id=order.client_order_id,
+                idempotency_key=order.client_order_id,
+                outcome="NO_TRADE",
+            )
+        except sqlite3.Error:
+            return  # The rejection itself still stands.
+
+    def _reserve_spot_submission(
+        self,
+        order: SpotOrder,
+        max_open_orders: int,
+        *,
+        candidate_id: str,
+        strategy_version: str,
+        key_fingerprint: str,
+    ) -> None:
         with self._connect() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             if self._execution_pause(connection).paused:
@@ -1050,10 +1760,15 @@ class AuditStore:
                     candidate_id,
                 ),
             )
-            connection.execute(
-                "INSERT INTO audit_events (event_id, recorded_at, kind) "
-                "VALUES (?, ?, ?)",
-                (uuid4().hex, order.updated_at.isoformat(), "spot.submission.reserved"),
+            self._insert_audit(
+                connection,
+                "spot.submission.reserved",
+                order.updated_at.isoformat(),
+                strategy_version=strategy_version,
+                risk_decision_id=order.risk_decision_id,
+                order_or_tx_id=order.client_order_id,
+                idempotency_key=order.client_order_id,
+                outcome="reserved",
             )
 
     def apply_spot_observation(self, before: SpotOrder, after: SpotOrder) -> bool:
@@ -1087,14 +1802,14 @@ class AuditStore:
                 ),
             )
             if result.rowcount:
-                connection.execute(
-                    "INSERT INTO audit_events (event_id, recorded_at, kind) "
-                    "VALUES (?, ?, ?)",
-                    (
-                        uuid4().hex,
-                        after.updated_at.isoformat(),
-                        f"spot.order.{after.state.value.lower()}",
-                    ),
+                self._insert_audit(
+                    connection,
+                    f"spot.order.{after.state.value.lower()}",
+                    after.updated_at.isoformat(),
+                    risk_decision_id=after.risk_decision_id,
+                    order_or_tx_id=after.client_order_id,
+                    idempotency_key=after.client_order_id,
+                    outcome=after.state.value,
                 )
             return result.rowcount == 1
 

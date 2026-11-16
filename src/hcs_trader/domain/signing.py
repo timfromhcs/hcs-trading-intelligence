@@ -26,6 +26,10 @@ class KeystoreError(SignerError):
     """Keystore encryption, decryption or access failed."""
 
 
+class SignedPlanConflict(SignerPolicyViolation):
+    """The idempotency key or risk decision was already consumed by a signature."""
+
+
 class SigningUnsupported(SignerError):
     """No chain-valid signing implementation exists for the requested namespace."""
 

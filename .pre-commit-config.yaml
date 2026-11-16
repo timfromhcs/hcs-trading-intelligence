@@ -1,0 +1,34 @@
+# Local hooks only: they run the project's own locked tools, so no third-party
+# hook repositories (and no extra supply-chain surface) are introduced.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --locked ruff check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format --check
+        entry: uv run --locked ruff format --check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        entry: uv run --locked mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: lockfile-current
+        name: uv.lock is current
+        entry: uv lock --check
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+      - id: no-large-files
+        name: block files over 1 MiB
+        entry: python -c "import os,sys;bad=[f for f in sys.argv[1:] if os.path.getsize(f)>1048576];print('\n'.join(bad));sys.exit(bool(bad))"
+        language: system
+        exclude: ^(uv\.lock|frontend/package-lock\.json|docs/.*\.png)$

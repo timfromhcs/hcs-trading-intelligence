@@ -59,6 +59,20 @@ from hcs_trader.kraken_spot import (
     KrakenOrderValidation,
     KrakenSpotAdapter,
 )
+from hcs_trader.live_readiness import (
+    HardLimits,
+    LiveEnableRefused,
+    active_live_policy,
+    blocking_limitations,
+    enable_confirmation_phrase,
+    enable_live,
+    evaluate_checklist,
+    limits_from_mapping,
+    limits_history,
+    live_state,
+    load_context,
+    revoke_live,
+)
 from hcs_trader.local_research import (
     LlamaCppProvider,
     NoneModelProvider,
@@ -349,6 +363,7 @@ async def submit_canary_order(
     quantity: Decimal,
     limit_price: Decimal,
 ) -> SpotOrder:
+    policy = require_runtime_live_policy(store)
     key, secret = read_kraken_credentials(credentials_file)
     cand = store.get_strategy_candidate(candidate_id)
     if cand is None:
@@ -361,7 +376,10 @@ async def submit_canary_order(
     async with httpx2.AsyncClient(trust_env=False) as client:
         adapter = KrakenSpotAdapter(key, secret, client, validate_only=False)
         execution = KrakenSpotExecution(
-            store, adapter, RiskEngine(RiskPolicy(live_mode_enabled=True))
+            store,
+            adapter,
+            RiskEngine(policy),
+            live_policy=lambda: require_runtime_live_policy(store),
         )
         quote_provider = KrakenQuoteProvider(client)
         try:
@@ -470,12 +488,15 @@ async def serve(
         recovery = None
         spot_exec = None
         if kraken_live_credentials is not None:
+            store.initialize()
+            policy = require_runtime_live_policy(store)
             key, secret = read_kraken_credentials(kraken_live_credentials)
             live_adapter = KrakenSpotAdapter(key, secret, client, validate_only=False)
             spot_exec = KrakenSpotExecution(
                 store,
                 live_adapter,
-                RiskEngine(RiskPolicy(live_mode_enabled=True)),
+                RiskEngine(policy),
+                live_policy=lambda: require_runtime_live_policy(store),
             )
             recovery = spot_exec.reconcile_startup
         elif kraken_reconcile_credentials is not None:
@@ -513,6 +534,100 @@ async def serve(
                     )
         else:
             await server.serve()
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+KNOWN_LIMITATIONS = _REPO_ROOT / "docs" / "KNOWN_LIMITATIONS.md"
+
+
+def require_runtime_live_policy(store: AuditStore) -> RiskPolicy:
+    if blockers := blocking_limitations(KNOWN_LIMITATIONS):
+        raise RiskRejected("LIVE blocked by known limitations: " + "; ".join(blockers))
+    policy = active_live_policy(store)
+    if policy is None:
+        raise RiskRejected("LIVE requires an active operator enablement")
+    return policy
+
+
+_LIVE_LIMIT_ARGUMENTS = (
+    "max_hot_wallet_usd",
+    "hot_fraction_of_portfolio",
+    "min_notional_usd",
+    "max_notional_usd",
+    "risk_fraction",
+    "max_daily_loss_fraction",
+    "max_drawdown_fraction",
+    "max_positions",
+    "max_spread_bps",
+    "max_slippage_bps",
+)
+
+
+def live_command(arguments: argparse.Namespace) -> int:
+    """Operator LIVE ceremony and readiness commands; returns the exit code."""
+    store = local_store()
+    store.initialize()
+    if arguments.command == "live-status":
+        state = live_state(store)
+        print(
+            json.dumps(
+                {
+                    "mode": state.mode,
+                    "reason": state.reason,
+                    "policy_version": state.policy_version,
+                    "limits": state.limits.to_payload() if state.limits else None,
+                    "blockers": blocking_limitations(KNOWN_LIMITATIONS),
+                    "history": limits_history(store)[:20],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if arguments.command == "live-revoke":
+        print(f"Mode is now {revoke_live(store, operator=arguments.operator).mode}.")
+        return 0
+    raw: dict[str, object] = {
+        "venue": arguments.venue,
+        "market": arguments.market,
+        "cold_reserve_separate_custody": arguments.cold_reserve_separate_custody,
+    }
+    for name in _LIVE_LIMIT_ARGUMENTS:
+        raw[name] = getattr(arguments, name)
+    try:
+        if any(value is None for value in raw.values()):
+            raise ValueError("every hard limit must be set explicitly")
+        if not sys.stdin.isatty():
+            raise ValueError("The LIVE ceremony requires a local interactive terminal")
+        limits: HardLimits = limits_from_mapping(
+            {k: v if isinstance(v, bool | int) else str(v) for k, v in raw.items()}
+        )
+        print(json.dumps(limits.to_payload(), indent=2), file=sys.stderr)
+        print(
+            "Real money can be lost. These limits become the enforced LIVE policy "
+            "and can be revoked with live-revoke.",
+            file=sys.stderr,
+        )
+        phrase = enable_confirmation_phrase(limits)
+        state = enable_live(
+            store,
+            limits,
+            operator=arguments.operator,
+            confirmation=input(f"Type '{phrase}' to enable LIVE: "),
+            limitations_path=KNOWN_LIMITATIONS,
+        )
+    except (LiveEnableRefused, ValueError) as error:
+        print(f"Remaining in PAPER: {error}", file=sys.stderr)
+        return 1
+    print(f"Mode is now {state.mode} (policy {state.policy_version}).")
+    return 0
+
+
+def release_check_command(arguments: argparse.Namespace) -> int:
+    report = evaluate_checklist(
+        load_context(arguments.root, arguments.gates_report, arguments.dist)
+    )
+    print(json.dumps(report.to_json(), indent=2))
+    return 0 if report.v1_allowed else 1
 
 
 def main() -> None:
@@ -578,6 +693,30 @@ def main() -> None:
     commands.add_parser("pause-execution", help="Persist the local execution pause")
     commands.add_parser("resume-execution", help="Clear the local execution pause")
     commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
+    commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
+    revoke_parser = commands.add_parser(
+        "live-revoke", help="Return to PAPER and record the revocation"
+    )
+    revoke_parser.add_argument("--operator", required=True)
+    enable_parser = commands.add_parser(
+        "live-enable", help="Interactive ceremony: set hard limits, enable LIVE"
+    )
+    enable_parser.add_argument("--operator", required=True)
+    enable_parser.add_argument("--venue", default="kraken")
+    enable_parser.add_argument("--market", default="BTC/USD")
+    enable_parser.add_argument("--cold-reserve-separate-custody", action="store_true")
+    for name in _LIVE_LIMIT_ARGUMENTS:
+        enable_parser.add_argument(
+            f"--{name.replace('_', '-')}",
+            dest=name,
+            type=int if name == "max_positions" else str,
+        )
+    check_parser = commands.add_parser(
+        "release-check", help="Evaluate the V1 section 18 checklist from evidence"
+    )
+    check_parser.add_argument("--root", type=Path, default=_REPO_ROOT)
+    check_parser.add_argument("--gates-report", type=Path)
+    check_parser.add_argument("--dist", type=Path)
     kraken_parser = commands.add_parser(
         "kraken-validate", help="Validate a BTC/USD limit order without submitting it"
     )
@@ -756,7 +895,7 @@ def main() -> None:
                     kraken_live_credentials=arguments.kraken_live_credentials,
                 )
             )
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RiskRejected) as error:
             parser.exit(1, f"{error}\n")
     elif arguments.command == "import-candles":
         try:
@@ -804,6 +943,20 @@ def main() -> None:
         store.initialize()
         store.set_execution_pause(paused)
         print("Execution paused." if paused else "Execution pause cleared.")
+    elif arguments.command in {"live-status", "live-enable", "live-revoke"}:
+        try:
+            code = live_command(arguments)
+        except (OSError, sqlite3.Error) as error:
+            parser.exit(1, f"{error}\n")
+        if code:
+            parser.exit(code)
+    elif arguments.command == "release-check":
+        try:
+            code = release_check_command(arguments)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        if code:
+            parser.exit(code)
     elif arguments.command == "mcp":
         create_mcp_server(local_store().path).run(transport="stdio")
     elif arguments.command in {"spot-canary-allow", "spot-canary-revoke"}:

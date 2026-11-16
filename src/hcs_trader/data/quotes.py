@@ -106,13 +106,14 @@ class QuoteService:
             else:
                 self._issue = "unavailable"
         else:
-            if self._record_quote is not None:
-                self._next_refresh = self._elapsed() + delay
-                self._issue = "storage_unavailable"
-                await asyncio.to_thread(self._record_quote, candidate)
-            self._issue = None
             self._failure_count = 0
             self._quote = candidate
+            self._issue = None
+            if self._record_quote is not None:
+                try:
+                    await asyncio.to_thread(self._record_quote, candidate)
+                except Exception:  # noqa: BLE001 - storage failure degrades, never crashes
+                    self._issue = "storage_unavailable"
         self._next_refresh = self._elapsed() + delay
 
     def _quality(self, quote: Quote) -> DataQuality:

@@ -264,6 +264,45 @@ class JupiterSwapAdapter:
             if program_id == ASSOCIATED_TOKEN_PROGRAM_ID:
                 self._check_associated_token_instruction(idx, inst, signer)
 
+    def inspect_message_bytes(
+        self,
+        raw_message: bytes,
+        *,
+        signer: str,
+        max_swap_lamports: int = 0,
+        max_priority_fee_lamports: int = 1_000_000,
+    ) -> "DecodedSolanaMessage":
+        """Decode serialized message bytes and assert every instruction.
+
+        ``max_swap_lamports`` bounds any system Transfer (SOL wrapping) and is
+        zero by default, so a plan that does not spend SOL permits none.
+        """
+        return _inspect_message(
+            self,
+            decode_solana_message(raw_message),
+            signer=signer,
+            max_swap_lamports=max_swap_lamports,
+            max_priority_fee_lamports=max_priority_fee_lamports,
+        )
+
+    def inspect_transaction_bytes(
+        self,
+        raw_transaction: bytes,
+        *,
+        signer: str,
+        max_swap_lamports: int = 0,
+        max_priority_fee_lamports: int = 1_000_000,
+    ) -> "DecodedSolanaMessage":
+        """Like :meth:`inspect_message_bytes` for a full serialized transaction."""
+        _, message = decode_solana_transaction(raw_transaction)
+        return _inspect_message(
+            self,
+            message,
+            signer=signer,
+            max_swap_lamports=max_swap_lamports,
+            max_priority_fee_lamports=max_priority_fee_lamports,
+        )
+
     def _check_associated_token_instruction(
         self, idx: int, inst: dict[str, Any], signer: str | None
     ) -> None:
@@ -320,3 +359,260 @@ class JupiterSwapAdapter:
                 f"Instruction at index {idx}: associated token program uses "
                 f"unapproved token program '{token_program}'"
             )
+
+
+# --- Real transaction-byte decoding (W3) ----------------------------------------
+
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_MAX_MESSAGE_BYTES = 1232  # Solana packet limit for a serialized transaction
+_COMPUTE_BUDGET_SET_LIMIT = 2
+_COMPUTE_BUDGET_SET_PRICE = 3
+_TOKEN_SYNC_NATIVE = 17
+_TOKEN_CLOSE_ACCOUNT = 9
+_SYSTEM_TRANSFER = 2
+MAX_COMPUTE_UNIT_LIMIT = 1_400_000
+
+
+def base58_encode(data: bytes) -> str:
+    """Bitcoin-alphabet base58 (no checksum), as used for Solana keys."""
+    number = int.from_bytes(data, "big")
+    out = ""
+    while number:
+        number, rem = divmod(number, 58)
+        out = _B58_ALPHABET[rem] + out
+    leading = len(data) - len(data.lstrip(b"\x00"))
+    return "1" * leading + out
+
+
+def base58_decode(text: str) -> bytes:
+    number = 0
+    for char in text:
+        index = _B58_ALPHABET.find(char)
+        if index < 0:
+            raise JupiterRouteError(f"Invalid base58 character '{char}'")
+        number = number * 58 + index
+    leading = len(text) - len(text.lstrip("1"))
+    body = number.to_bytes((number.bit_length() + 7) // 8, "big")
+    return b"\x00" * leading + body
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedSolanaInstruction:
+    program_id: str
+    accounts: tuple[str, ...]
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedSolanaMessage:
+    version: str  # "legacy" or "v0"
+    required_signatures: int
+    account_keys: tuple[str, ...]
+    recent_blockhash: str
+    instructions: tuple[DecodedSolanaInstruction, ...]
+
+
+class _Reader:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.pos = 0
+
+    def take(self, count: int) -> bytes:
+        if count < 0 or self.pos + count > len(self._data):
+            raise JupiterRouteError("Solana message is truncated")
+        chunk = self._data[self.pos : self.pos + count]
+        self.pos += count
+        return chunk
+
+    def byte(self) -> int:
+        return self.take(1)[0]
+
+    def shortvec(self) -> int:
+        value = 0
+        for shift in (0, 7, 14):
+            current = self.byte()
+            value |= (current & 0x7F) << shift
+            if not current & 0x80:
+                if shift and current == 0:
+                    raise JupiterRouteError("Non-canonical shortvec length")
+                if value > 0xFFFF:
+                    raise JupiterRouteError("Shortvec length out of range")
+                return value
+        raise JupiterRouteError("Shortvec length too long")
+
+    def finished(self) -> bool:
+        return self.pos == len(self._data)
+
+
+def decode_solana_message(raw: bytes) -> DecodedSolanaMessage:
+    """Decode a serialized legacy or v0 message; fail closed on anything unusual.
+
+    v0 messages with address-table lookups are rejected because the looked-up
+    accounts cannot be resolved offline and would hide program ids.
+    """
+    if not raw or len(raw) > _MAX_MESSAGE_BYTES:
+        raise JupiterRouteError("Solana message is empty or exceeds the packet limit")
+    reader = _Reader(raw)
+    first = raw[0]
+    version = "legacy"
+    if first & 0x80:
+        if first != 0x80:
+            raise JupiterRouteError(f"Unsupported message version {first & 0x7F}")
+        reader.byte()
+        version = "v0"
+    required = reader.byte()
+    readonly_signed = reader.byte()
+    readonly_unsigned = reader.byte()
+    key_count = reader.shortvec()
+    keys = tuple(base58_encode(reader.take(32)) for _ in range(key_count))
+    if (
+        required < 1
+        or readonly_signed >= required
+        or required > key_count
+        or readonly_unsigned > key_count - required
+    ):
+        raise JupiterRouteError("Inconsistent Solana message header")
+    blockhash = base58_encode(reader.take(32))
+    instructions = []
+    for _ in range(reader.shortvec()):
+        program_index = reader.byte()
+        account_indexes = reader.take(reader.shortvec())
+        data = reader.take(reader.shortvec())
+        if program_index >= key_count or program_index < required:
+            raise JupiterRouteError("Instruction program index is invalid")
+        if any(index >= key_count for index in account_indexes):
+            raise JupiterRouteError("Instruction references an unresolved account")
+        instructions.append(
+            DecodedSolanaInstruction(
+                keys[program_index], tuple(keys[i] for i in account_indexes), data
+            )
+        )
+    if version == "v0":
+        if reader.shortvec() != 0:
+            raise JupiterRouteError("Address table lookups are not permitted")
+    if not reader.finished():
+        raise JupiterRouteError("Trailing bytes after Solana message")
+    if not instructions:
+        raise JupiterRouteError("Transaction payload contains no instructions")
+    return DecodedSolanaMessage(version, required, keys, blockhash, tuple(instructions))
+
+
+def decode_solana_transaction(raw: bytes) -> tuple[int, DecodedSolanaMessage]:
+    """Split a serialized transaction into signature count and decoded message."""
+    reader = _Reader(raw)
+    count = reader.shortvec()
+    reader.take(64 * count)
+    message = decode_solana_message(raw[reader.pos :])
+    if count != message.required_signatures:
+        raise JupiterRouteError("Signature count does not match the message header")
+    return count, message
+
+
+def _inspect_message_instruction(
+    idx: int,
+    inst: DecodedSolanaInstruction,
+    signer: str,
+    max_swap_lamports: int,
+) -> int:
+    """Per-program byte-level checks; returns the priority-price (µlamports/CU)."""
+    price = 0
+    if inst.program_id == COMPUTE_BUDGET_PROGRAM_ID:
+        kind = inst.data[:1]
+        if kind == bytes([_COMPUTE_BUDGET_SET_LIMIT]) and len(inst.data) == 5:
+            limit = int.from_bytes(inst.data[1:], "little")
+            if not 0 < limit <= MAX_COMPUTE_UNIT_LIMIT:
+                raise JupiterRouteError(
+                    f"Instruction at index {idx}: compute unit limit {limit} invalid"
+                )
+        elif kind == bytes([_COMPUTE_BUDGET_SET_PRICE]) and len(inst.data) == 9:
+            price = int.from_bytes(inst.data[1:], "little")
+        else:
+            raise JupiterRouteError(
+                f"Instruction at index {idx}: only SetComputeUnitLimit and "
+                "SetComputeUnitPrice are allowed"
+            )
+    elif inst.program_id == SYSTEM_PROGRAM_ID:
+        if (
+            len(inst.data) != 12
+            or int.from_bytes(inst.data[:4], "little") != _SYSTEM_TRANSFER
+        ):
+            raise JupiterRouteError(
+                f"Instruction at index {idx}: only system Transfer is allowed"
+            )
+        lamports = int.from_bytes(inst.data[4:], "little")
+        if not inst.accounts or inst.accounts[0] != signer:
+            raise JupiterRouteError(
+                f"Instruction at index {idx}: system transfer source must be the signer"
+            )
+        if lamports > max_swap_lamports:
+            raise JupiterRouteError(
+                f"Instruction at index {idx}: system transfer of {lamports} "
+                f"lamports exceeds the permitted {max_swap_lamports}"
+            )
+    elif inst.program_id == SPL_TOKEN_PROGRAM_ID:
+        kind = inst.data[:1]
+        if kind == bytes([_TOKEN_SYNC_NATIVE]) and len(inst.data) == 1:
+            pass
+        elif kind == bytes([_TOKEN_CLOSE_ACCOUNT]) and len(inst.data) == 1:
+            if len(inst.accounts) < 3 or inst.accounts[1] != signer:
+                raise JupiterRouteError(
+                    f"Instruction at index {idx}: CloseAccount destination "
+                    "must be the signer"
+                )
+            if inst.accounts[2] != signer:
+                raise JupiterRouteError(
+                    f"Instruction at index {idx}: CloseAccount owner must be the signer"
+                )
+        else:
+            raise JupiterRouteError(
+                f"Instruction at index {idx}: top-level token instruction "
+                f"0x{inst.data[:1].hex() or '??'} is not allowed"
+            )
+    elif inst.program_id == JUPITER_V6_PROGRAM_ID and signer not in inst.accounts:
+        raise JupiterRouteError(
+            f"Instruction at index {idx}: Jupiter instruction omits the signer"
+        )
+    return price
+
+
+def _inspect_message(
+    adapter: "JupiterSwapAdapter",
+    message: DecodedSolanaMessage,
+    *,
+    signer: str,
+    max_swap_lamports: int,
+    max_priority_fee_lamports: int,
+) -> DecodedSolanaMessage:
+    if message.required_signatures != 1 or message.account_keys[0] != signer:
+        raise JupiterRouteError(
+            "The signer must be the fee payer and the only required signature"
+        )
+    payload = {
+        "instructions": [
+            {
+                "programId": inst.program_id,
+                "accounts": [{"pubkey": key} for key in inst.accounts],
+                "data": base64.b64encode(inst.data).decode("ascii"),
+            }
+            for inst in message.instructions
+        ]
+    }
+    adapter.inspect_swap_instructions(payload, signer=signer)
+    if not any(i.program_id == JUPITER_V6_PROGRAM_ID for i in message.instructions):
+        raise JupiterRouteError("Transaction does not invoke the Jupiter program")
+    price = 0
+    limit = MAX_COMPUTE_UNIT_LIMIT
+    for idx, inst in enumerate(message.instructions):
+        found_price = _inspect_message_instruction(idx, inst, signer, max_swap_lamports)
+        price = max(price, found_price)
+        if inst.program_id == COMPUTE_BUDGET_PROGRAM_ID and inst.data[:1] == bytes(
+            [_COMPUTE_BUDGET_SET_LIMIT]
+        ):
+            limit = int.from_bytes(inst.data[1:], "little")
+    priority_fee = price * limit // 1_000_000
+    if priority_fee > max_priority_fee_lamports:
+        raise JupiterRouteError(
+            f"Priority fee {priority_fee} lamports exceeds the cap "
+            f"{max_priority_fee_lamports}"
+        )
+    return message

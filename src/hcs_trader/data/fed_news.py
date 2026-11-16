@@ -10,6 +10,7 @@ import httpx2
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import fromstring
 
+from hcs_trader.data.provider import SourceRateLimited, parse_retry_after
 from hcs_trader.domain.news import NewsItem
 
 FEED_URL = "https://www.federalreserve.gov/feeds/press_monetary.xml"
@@ -24,12 +25,24 @@ class NewsUnavailable(Exception):
     """The feed could not supply a usable batch."""
 
 
+class NewsRateLimited(NewsUnavailable, SourceRateLimited):
+    """The feed answered 429/503; ``retry_after`` carries the requested pause."""
+
+    def __init__(self, retry_after: float | None) -> None:
+        super().__init__("Federal Reserve feed is rate limited")
+        self.retry_after = retry_after
+
+
 async def fetch_fed_news(client: httpx2.AsyncClient) -> list[NewsItem]:
     try:
         async with (
             asyncio.timeout(5),
             client.stream("GET", FEED_URL, follow_redirects=False) as response,
         ):
+            if response.status_code in (429, 503):
+                raise NewsRateLimited(
+                    parse_retry_after(response.headers.get("retry-after"))
+                )
             response.raise_for_status()
             payload = bytearray()
             async for chunk in response.aiter_bytes():

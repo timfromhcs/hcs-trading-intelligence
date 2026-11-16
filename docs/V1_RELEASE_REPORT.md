@@ -1,5 +1,15 @@
 # V1 release assessment
 
+## Integration checkout · 2026-11-16
+
+The integration checkout combines the 16 local commits beyond `7093314` with the implementation from the separate Claude worktree. Its release artifacts retain version `0.2.0`. Local Windows verification includes a native desktop build, a single-file EXE, wheel and source installs, the PAPER API, and a packaged MCP stdio request denied by the default capability policy.
+
+The runtime now gates Kraken submission on the persisted LIVE operator policy and the limitations register. Authenticated Kraken rehearsal evidence, authoritative portfolio and reconciliation inputs for production submission, and chain-valid signing for on-chain execution remain open. The fixture tests exercise submission and rejection behavior with synthetic credentials.
+
+The draft workflow now has a SHA-pinned provenance attestation step. The generated bundle, native macOS and Linux artifacts, upgrade and crash-recovery checks, SAST results and platform signing evidence must still be verified on the candidate. See the [ordered roadmap](ROADMAP.md#integration-status--2026-11-16) and [limitations register](KNOWN_LIMITATIONS.md).
+
+## Earlier baseline · 2026-11-15
+
 Audit date 2026-11-15. Baseline `origin/main` at `7093314`. The [implementation plan](ROADMAP.md) tracks the work required by [AGENTS.md](../AGENTS.md#18-v100-definition-of-done).
 
 ## Verified evidence

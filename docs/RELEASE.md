@@ -17,3 +17,18 @@ CI builds and smoke-tests the native folder on Windows, macOS and Linux and uplo
 Windows also supports a single EXE. After verifying the one-folder build, run the same three Python build, smoke-test and checksum commands with `--onefile`. The executable and checksum are under `dist/desktop-single`. Windows CI uploads these files separately.
 
 The artifacts are development builds. Signing, notarization and production release verification remain separate milestones.
+
+## Release pipeline
+
+Tag a commit on `main` as `vX.Y.Z` (or `vX.Y.Z-rc.N`, which is marked pre-release). `.github/workflows/release.yml` then:
+
+1. re-runs every gate in `ci.yml` (lint, types, tests, security scans, native desktop builds) on the tagged commit,
+2. checks that the tag equals the `pyproject.toml` version and is reachable from `main`,
+3. builds the wheel and sdist, a CycloneDX SBOM (`scripts/generate_sbom.py`) and smoke-tests both distributions in clean environments, including a Unicode and space data path, the OpenAPI schema and an MCP stdio tool listing,
+4. writes `SHA256SUMS` and rejects any wheel or sdist that contains databases, keystores, model files, `.env` files or private-key content (`scripts/verify_release.py`),
+5. attests the artifacts, attaches the Sigstore bundle and updates the checksums,
+6. creates a **draft** GitHub Release. Review it and publish it by hand.
+
+Verify downloads with `sha256sum --check SHA256SUMS` and verify a built artifact with `gh attestation verify ARTIFACT --repo timfromhcs/hcs-trading-intelligence`. [GitHub artifact attestation documentation](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+
+Pull request checks validate both lockfiles, audit dependencies and check for unreviewed strong-copyleft packages. `pre-commit install` enables the local hooks from `.pre-commit-config.yaml`.

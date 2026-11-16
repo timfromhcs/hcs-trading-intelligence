@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import urllib.parse
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -32,6 +33,86 @@ from hcs_trader.storage import AuditStore
 # Synthetic test credentials
 _API_KEY = "test-api-key-12345"
 _API_SECRET = base64.b64encode(b"01234567890123456789012345678901").decode("ascii")
+
+
+@pytest.mark.parametrize("mismatch", [None, "unknown", "volume", "leverage", "fee"])
+def test_kraken_check_orders_compares_full_open_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mismatch: str | None,
+) -> None:
+    store = AuditStore(tmp_path / "audit.sqlite")
+    store.initialize()
+    order = replace(
+        _sample_order(
+            state=OrderState.PARTIALLY_FILLED, venue_order_id="fixture-venue"
+        ),
+        filled_quantity=Decimal("0.005"),
+        average_price=Decimal("50000"),
+        fee=Decimal("0.17"),
+    )
+    store.save_spot_order(order)
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        assert request.method == "POST"
+        assert request.headers["API-Sign"]
+        return httpx2.Response(
+            200,
+            json={
+                "error": [],
+                "result": {
+                    "open": {
+                        "unknown-venue" if mismatch == "unknown" else "fixture-venue": {
+                            "cl_ord_id": order.client_order_id,
+                            "status": "open",
+                            "vol": "0.01",
+                            "vol_exec": "0.007" if mismatch == "volume" else "0.005",
+                            "cost": "250",
+                            "fee": "0.18" if mismatch == "fee" else "0.17",
+                            "descr": {
+                                "pair": "XBTUSD",
+                                "type": "buy",
+                                "ordertype": "limit",
+                                "price": "50000.00",
+                                "leverage": "2:1" if mismatch == "leverage" else "none",
+                            },
+                        },
+                    }
+                },
+            },
+        )
+
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(
+        httpx2,
+        "AsyncClient",
+        lambda **kw: client_class(**kw, transport=httpx2.MockTransport(handler)),
+    )
+    keys = tmp_path / "fixture.json"
+    keys.write_text(json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hcs-trader",
+            "kraken-check-orders",
+            "--credentials-file",
+            str(keys),
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    if mismatch is None:
+        launcher.main()
+        assert json.loads(capsys.readouterr().out) == {"matched_open_orders": 1}
+    else:
+        with pytest.raises(SystemExit) as error:
+            launcher.main()
+        assert error.value.code == 1
+    assert calls == ["/0/private/OpenOrders"]
+    assert store.list_open_spot_orders("kraken") == [order]
 
 
 def test_kraken_balances_cli_only_reads_cash_balances(

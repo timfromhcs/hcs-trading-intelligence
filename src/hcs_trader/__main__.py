@@ -364,6 +364,19 @@ async def read_kraken_balances(credentials_file: Path) -> KrakenSpotBalances:
         return await adapter.read_spot_balances()
 
 
+async def check_kraken_orders(credentials_file: Path, store: AuditStore) -> int:
+    key, secret = read_kraken_credentials(credentials_file)
+    expected = store.list_open_spot_orders("kraken")
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        await adapter.verify_open_orders(expected)
+    if store.list_open_spot_orders("kraken") != expected:
+        raise KrakenExecutionError(
+            "Local Kraken order ledger changed during verification"
+        )
+    return len(expected)
+
+
 async def submit_canary_order(
     store: AuditStore,
     credentials_file: Path,
@@ -734,6 +747,12 @@ def main() -> None:
         "kraken-balances", help="Read BTC/USD cash balances and spot order holds"
     )
     balances_parser.add_argument("--credentials-file", type=Path, required=True)
+    orders_parser = commands.add_parser(
+        "kraken-check-orders",
+        help="Compare Kraken open orders with the local order ledger",
+    )
+    orders_parser.add_argument("--credentials-file", type=Path, required=True)
+    orders_parser.add_argument("--data-dir", type=Path)
     allow_canary = commands.add_parser(
         "spot-canary-allow",
         help="Locally authorize one Kraken BTC/USD canary candidate",
@@ -1215,6 +1234,23 @@ def main() -> None:
             return
         except (sqlite3.Error, ValueError) as error:
             parser.exit(1, f"{error}\n")
+    elif arguments.command == "kraken-check-orders":
+        path = (
+            local_store().path
+            if arguments.data_dir is None
+            else arguments.data_dir / "audit.sqlite"
+        )
+        try:
+            count = asyncio.run(
+                check_kraken_orders(
+                    arguments.credentials_file, AuditStore(path, read_only=True)
+                )
+            )
+        except (KrakenExecutionError, sqlite3.Error, OSError, ValueError):
+            parser.exit(
+                1, "Kraken open orders could not be verified against the local ledger\n"
+            )
+        print(json.dumps({"matched_open_orders": count}))
     elif arguments.command == "kraken-balances":
         try:
             cash_snapshot = asyncio.run(

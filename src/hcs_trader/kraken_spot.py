@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import time
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -287,6 +288,67 @@ class KrakenSpotAdapter:
         result = await self._post_private("QueryOrders", {"txid": venue_order_id})
         info = result.get(venue_order_id, {})
         return dict(info) if isinstance(info, dict) else {}
+
+    async def verify_open_orders(self, expected: Sequence[SpotOrder]) -> None:
+        """Compare the authenticated account's open orders with the local ledger."""
+        local = {order.venue_order_id: order for order in expected}
+        if (
+            None in local
+            or len(local) != len(expected)
+            or any(
+                order.state
+                not in {OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED}
+                or order.venue != "kraken"
+                or order.market != "BTC/USD"
+                or order.order_type != SpotOrderType.LIMIT
+                for order in expected
+            )
+        ):
+            raise KrakenExecutionError("Local Kraken orders require reconciliation")
+        result = await self._post_private("OpenOrders", {})
+        remote = result.get("open")
+        if not isinstance(remote, dict) or result.get("cursor"):
+            raise KrakenExecutionError("Incomplete Kraken open order snapshot")
+        if remote.keys() != local.keys():
+            raise KrakenExecutionError(
+                "Kraken open order identities differ from the ledger"
+            )
+        for venue_id, order in local.items():
+            if not self._matches_open_order(order, remote[venue_id]):
+                raise KrakenExecutionError(
+                    "Kraken open order record differs from the ledger"
+                )
+
+    @staticmethod
+    def _matches_open_order(order: SpotOrder, entry: object) -> bool:
+        if not isinstance(entry, dict) or entry.get("status") not in (
+            "open",
+            "pending",
+        ):
+            return False
+        description = entry.get("descr")
+        if not isinstance(description, dict) or (
+            entry.get("cl_ord_id") != order.client_order_id
+            or description.get("pair") not in ("XBTUSD", "XXBTZUSD", "XBT/USD")
+            or description.get("type") != order.side.value
+            or description.get("ordertype") != "limit"
+            or description.get("leverage") != "none"
+        ):
+            return False
+        try:
+            filled = _balance_amount(entry.get("vol_exec"))
+            cost = _balance_amount(entry.get("cost"))
+            fee = _balance_amount(entry.get("fee"))
+            return (
+                _balance_amount(entry.get("vol")) == order.quantity
+                and filled == (order.filled_quantity or 0)
+                and (cost / filled if filled else None) == order.average_price
+                and (filled > 0 or cost == 0)
+                and fee == (order.fee or 0)
+                and _balance_amount(description.get("price")) == order.limit_price
+            )
+        except KrakenExecutionError:
+            return False
 
     async def reconcile_order(self, order: SpotOrder, at: datetime) -> SpotOrder:
         """Reconcile an ambiguous or submitted order against venue state."""

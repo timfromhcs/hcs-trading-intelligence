@@ -22,6 +22,8 @@ The artifacts are development builds. Signing, notarization and production relea
 
 Push a candidate commit to a `release/**` branch to run the automated cross-platform build, smoke tests and security checks before tagging. The draft-release workflow runs on version tags.
 
+The native CI matrix installs the checksum-pinned v0.2.0 wheel in a temporary environment, sets an execution pause, then installs the candidate wheel against the same data directory. It checks the persisted pause and its audit record after starting the candidate. A development rebuild can share the baseline version, so the test forces the candidate wheel to be reinstalled. Update the pinned release and digest when changing the upgrade baseline.
+
 Tag a commit on `main` as `vX.Y.Z` (or `vX.Y.Z-rc.N`, which is marked pre-release). `.github/workflows/release.yml` then:
 
 1. re-runs every gate in `ci.yml` (lint, types, tests, security scans, native desktop builds) on the tagged commit,

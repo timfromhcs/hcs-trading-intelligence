@@ -51,7 +51,17 @@ jobs:
       - run: uv run --locked mypy
       - run: uv run --locked pytest
       - run: uv build
-      - run: uv run --locked python scripts/smoke_wheel.py
+      - name: Verify fresh Python installs and upgrade from v0.2.0
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_WHEEL: dist/upgrade-baseline/hcs_trader-0.2.0-py3-none-any.whl
+          BASELINE_SHA256: d6b542608970900f0e39db47b7a53d8fb143b16bc2f9d3b80b9e112f3886cbef
+        run: |
+          gh release download v0.2.0 --repo timfromhcs/hcs-trading-intelligence \
+            --pattern "${BASELINE_WHEEL##*/}" --dir dist/upgrade-baseline
+          uv run --locked python -c 'import hashlib, sys; f = open(sys.argv[1], "rb"); sys.exit(hashlib.file_digest(f, "sha256").hexdigest() != sys.argv[2])' "$BASELINE_WHEEL" "$BASELINE_SHA256"
+          uv run --locked python scripts/smoke_wheel.py --upgrade-from "$BASELINE_WHEEL"
       - name: Fail on strong-copyleft licenses
         run: uv run --locked python scripts/license_inventory.py --check > license-inventory.json
       - run: uv run --locked python scripts/generate_sbom.py --output sbom-${{ matrix.os }}.cdx.json

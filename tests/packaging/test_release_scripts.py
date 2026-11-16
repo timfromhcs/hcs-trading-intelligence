@@ -6,6 +6,7 @@ from zipfile import ZipFile
 import generate_sbom
 import license_inventory
 import pytest
+import smoke_desktop
 import verify_release
 from collect_release import collect
 
@@ -17,6 +18,36 @@ from hcs_trader.live_readiness import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_windows_onefile_cleanup_retries_locked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persistent: bool
+) -> None:
+    attempts: list[int] = []
+
+    class ExtractionDirectory:
+        name = str(tmp_path)
+
+        def cleanup(self) -> None:
+            attempts.append(1)
+            if persistent or len(attempts) == 1:
+                raise PermissionError("DLL still mapped")
+
+    times = iter((0, 1, 11))
+    monkeypatch.setattr(
+        smoke_desktop, "TemporaryDirectory", lambda **_: ExtractionDirectory()
+    )
+    monkeypatch.setattr(smoke_desktop, "monotonic", lambda: next(times))
+    monkeypatch.setattr(smoke_desktop, "sleep", lambda _: None)
+    if persistent:
+        with pytest.raises(PermissionError, match="DLL still mapped"):  # noqa: PT012
+            with smoke_desktop._temporary_root(wait_for_extracted_files=True):
+                pass
+    else:
+        with smoke_desktop._temporary_root(wait_for_extracted_files=True) as root:
+            assert root == tmp_path
+    assert len(attempts) == 2
 
 
 def test_native_release_evidence_uses_smoke_tested_uploads(

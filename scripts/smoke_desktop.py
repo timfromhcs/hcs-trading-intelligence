@@ -6,12 +6,32 @@ import os
 import re
 import shutil
 import subprocess  # noqa: S404
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.client import HTTPConnection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 
 _NAME = "HCS-Trading-Intelligence"
+
+
+@contextmanager
+def _temporary_root(*, wait_for_extracted_files: bool) -> Iterator[Path]:
+    temporary = TemporaryDirectory(prefix="hcs-desktop-")
+    try:
+        yield Path(temporary.name)
+    finally:
+        deadline = monotonic() + 10
+        while True:
+            try:
+                temporary.cleanup()
+                break
+            except PermissionError:
+                # Windows may release the child's DLL mappings after taskkill returns.
+                if not wait_for_extracted_files or monotonic() >= deadline:
+                    raise
+                sleep(0.25)
 
 
 def _read(path: str) -> bytes:
@@ -74,8 +94,7 @@ def main() -> None:
     layout = Path("dist") / ("desktop-single" if args.onefile else "desktop")
     program_dir = layout if args.onefile else layout / _NAME
     executable = (program_dir / (_NAME + suffix)).resolve()
-    with TemporaryDirectory(prefix="hcs-desktop-") as temporary:
-        root = Path(temporary)
+    with _temporary_root(wait_for_extracted_files=args.onefile) as root:
         data = root / "Données héhé 数据" / "app data"
         log = root / "desktop.log"
         with log.open("wb") as output:

@@ -28,7 +28,7 @@ from hcs_trader.kraken_spot import KrakenExecutionError, KrakenSpotAdapter
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
 from hcs_trader.spot_execution import KrakenSpotExecution
-from hcs_trader.storage import AuditStore
+from hcs_trader.storage import AuditStore, SpotFill
 
 # Synthetic test credentials
 _API_KEY = "test-api-key-12345"
@@ -177,12 +177,32 @@ async def test_incomplete_cash_valuation_is_rejected(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("fault", [None, "duplicate", "gap", "balance", "cursor"])
+@pytest.mark.parametrize(
+    "fault",
+    [None, "duplicate", "gap", "balance", "cursor", "missing-local", "local-fee"],
+)
 async def test_cash_ledger_paginates_and_checks_ending_balances(
+    tmp_path: Path,
     fault: str | None,
 ) -> None:
     calls: list[str] = []
     query_ends: list[str] = []
+    store = AuditStore(tmp_path / "audit.sqlite")
+    store.initialize()
+    order = _sample_order()
+    store.save_spot_order(order)
+    if fault != "missing-local":
+        store.record_spot_fill(
+            SpotFill(
+                order.client_order_id,
+                "kraken-trade",
+                Decimal("0.002"),
+                Decimal("50000"),
+                Decimal("0.6" if fault == "local-fee" else "0.50"),
+                datetime.now(UTC),
+            )
+        )
+    expected = store.spot_cash_trades("kraken")
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         name = request.url.path.rsplit("/", 1)[1]
@@ -202,6 +222,7 @@ async def test_cash_ledger_paginates_and_checks_ending_balances(
                 result = {
                     "ledger": {
                         "trade-usd": {
+                            "refid": "kraken-trade",
                             "time": 30,
                             "asset": "ZUSD",
                             "type": "trade",
@@ -210,6 +231,7 @@ async def test_cash_ledger_paginates_and_checks_ending_balances(
                             "balance": "899.50",
                         },
                         "trade-btc": {
+                            "refid": "kraken-trade",
                             "time": 30,
                             "asset": "XXBT",
                             "type": "trade",
@@ -240,7 +262,7 @@ async def test_cash_ledger_paginates_and_checks_ending_balances(
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         adapter = KrakenSpotAdapter(_API_KEY, _API_SECRET, client, validate_only=True)
         if fault is None:
-            snapshot = await adapter.verify_cash_ledger()
+            snapshot = await adapter.verify_cash_ledger(expected)
             assert snapshot.btc.total == Decimal("0.002")
             assert snapshot.usd.total == Decimal("899.50")
         else:
@@ -249,14 +271,16 @@ async def test_cash_ledger_paginates_and_checks_ending_balances(
                 "gap": "reconcile from zero",
                 "balance": "differs from current balances",
                 "cursor": "did not advance",
+                "missing-local": "differs from the local fill ledger",
+                "local-fee": "differs from the local fill ledger",
             }
             with pytest.raises(KrakenExecutionError, match=reasons[fault]):
-                await adapter.verify_cash_ledger()
+                await adapter.verify_cash_ledger(expected)
 
     assert len(query_ends) == 2 and query_ends[0] == query_ends[1]
     assert calls == (
         ["Ledgers", "Ledgers", "BalanceEx"]
-        if fault in (None, "balance")
+        if fault in (None, "balance", "missing-local", "local-fee")
         else ["Ledgers", "Ledgers"]
     )
 

@@ -19,6 +19,7 @@ from pydantic import TypeAdapter
 from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.execution import (
     SpotCanaryApproval,
+    SpotCashTrade,
     SpotOrder,
     SpotOrderType,
     SpotSide,
@@ -1145,6 +1146,24 @@ class AuditStore:
             )
             for r in rows
         ]
+
+    def spot_cash_trades(self, venue: str) -> dict[str, SpotCashTrade]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee "
+                "FROM spot_fills f JOIN spot_orders o USING (client_order_id) "
+                "WHERE o.venue = ?",
+                (venue,),
+            ).fetchall()
+        trades: dict[str, SpotCashTrade] = {}
+        for fill_id, market, side, quantity, price, fee in rows:
+            if market != "BTC/USD" or not fill_id or fill_id in trades:
+                raise ValueError("Unsupported or duplicate local spot fill")
+            btc = Decimal(quantity)
+            if SpotSide(side) is SpotSide.SELL:
+                btc = -btc
+            trades[fill_id] = SpotCashTrade(btc, -btc * Decimal(price), Decimal(fee))
+        return trades
 
     def record_paper_fill(
         self,

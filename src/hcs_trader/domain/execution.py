@@ -23,6 +23,15 @@ class SpotOrderType(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class SpotCashTrade:
+    """Local BTC/USD cash deltas keyed externally by the venue execution ID."""
+
+    btc: Decimal
+    usd: Decimal
+    usd_fee: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class SpotCanaryApproval:
     candidate_id: str
     candidate_version: str

@@ -358,14 +358,21 @@ async def validate_kraken_order(
 
 
 async def read_kraken_balances(
-    credentials_file: Path, *, verify_venue_ledger: bool = False
+    credentials_file: Path,
+    *,
+    verify_venue_ledger: bool = False,
+    fill_store: AuditStore | None = None,
 ) -> KrakenSpotBalances:
     key, secret = read_kraken_credentials(credentials_file)
+    expected = fill_store.spot_cash_trades("kraken") if fill_store is not None else None
     async with httpx2.AsyncClient(trust_env=False) as client:
         adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
-        if verify_venue_ledger:
-            return await adapter.verify_cash_ledger()
-        return await adapter.read_spot_balances()
+        if not verify_venue_ledger and fill_store is None:
+            return await adapter.read_spot_balances()
+        snapshot = await adapter.verify_cash_ledger(expected)
+    if fill_store is not None and fill_store.spot_cash_trades("kraken") != expected:
+        raise KrakenExecutionError("Local fill ledger changed during verification")
+    return snapshot
 
 
 async def check_kraken_orders(credentials_file: Path, store: AuditStore) -> int:
@@ -751,6 +758,12 @@ def main() -> None:
         "kraken-balances", help="Read BTC/USD cash balances and spot order holds"
     )
     balances_parser.add_argument("--credentials-file", type=Path, required=True)
+    balances_parser.add_argument(
+        "--verify-local-fills",
+        action="store_true",
+        help="Match Kraken ledger trade entries with recorded local BTC/USD fills",
+    )
+    balances_parser.add_argument("--data-dir", type=Path)
     balances_parser.add_argument(
         "--verify-venue-ledger",
         action="store_true",
@@ -1261,14 +1274,23 @@ def main() -> None:
             )
         print(json.dumps({"matched_open_orders": count}))
     elif arguments.command == "kraken-balances":
+        fill_store = None
+        if arguments.verify_local_fills:
+            path = (
+                local_store().path
+                if arguments.data_dir is None
+                else arguments.data_dir / "audit.sqlite"
+            )
+            fill_store = AuditStore(path, read_only=True)
         try:
             cash_snapshot = asyncio.run(
                 read_kraken_balances(
                     arguments.credentials_file,
                     verify_venue_ledger=arguments.verify_venue_ledger,
+                    fill_store=fill_store,
                 )
             )
-        except KrakenExecutionError:
+        except (KrakenExecutionError, sqlite3.Error):
             parser.exit(1, "Kraken BTC/USD cash balances could not be verified\n")
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")

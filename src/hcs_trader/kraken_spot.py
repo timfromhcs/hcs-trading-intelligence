@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import time
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -15,7 +15,7 @@ from typing import Any
 import httpx2
 
 from hcs_trader.data.kraken import KrakenQuoteProvider
-from hcs_trader.domain.execution import SpotOrder, SpotOrderType
+from hcs_trader.domain.execution import SpotCashTrade, SpotOrder, SpotOrderType
 from hcs_trader.domain.lifecycle import OrderState
 
 KRAKEN_PAIR_MAP = {
@@ -70,6 +70,7 @@ class _LedgerEntry:
     amount: Decimal
     fee: Decimal
     balance: Decimal
+    trade_id: str | None
 
 
 def _balance_amount(value: object, *, signed: bool = False) -> Decimal:
@@ -89,12 +90,16 @@ def _parse_cash_entry(row: dict[str, Any]) -> _LedgerEntry:
     asset = _CASH_ASSETS.get(code) if isinstance(code, str) else None
     if asset is None or row.get("type") not in ("deposit", "withdrawal", "trade"):
         raise KrakenExecutionError("Unsupported event in Kraken BTC/USD cash ledger")
+    trade_id = row.get("refid") if row.get("type") == "trade" else None
+    if row.get("type") == "trade" and (not isinstance(trade_id, str) or not trade_id):
+        raise KrakenExecutionError("Kraken trade ledger entry has no execution ID")
     return _LedgerEntry(
         _balance_amount(row.get("time")),
         asset,
         _balance_amount(row.get("amount"), signed=True),
         _balance_amount(row.get("fee")),
         _balance_amount(row.get("balance")),
+        trade_id,
     )
 
 
@@ -223,7 +228,9 @@ class KrakenSpotAdapter:
             balances.get("BTC", empty), balances.get("USD", empty), observed_at
         )
 
-    async def verify_cash_ledger(self) -> KrakenSpotBalances:
+    async def verify_cash_ledger(
+        self, expected_trades: Mapping[str, SpotCashTrade] | None = None
+    ) -> KrakenSpotBalances:
         """Replay Kraken cash history from zero and compare current totals."""
         end = int(time.time())
         entries: dict[str, _LedgerEntry] = {}
@@ -278,6 +285,27 @@ class KrakenSpotAdapter:
             raise KrakenExecutionError(
                 "Kraken cash ledger differs from current balances"
             )
+        if expected_trades is not None:
+            expected = {
+                (trade_id, asset): amounts
+                for trade_id, trade in expected_trades.items()
+                for asset, amounts in (
+                    ("BTC", (trade.btc, Decimal(0))),
+                    ("USD", (trade.usd, trade.usd_fee)),
+                )
+            }
+            for entry in entries.values():
+                if entry.trade_id is None:
+                    continue
+                key = (entry.trade_id, entry.asset)
+                if expected.pop(key, None) != (entry.amount, entry.fee):
+                    raise KrakenExecutionError(
+                        "Kraken trade differs from the local fill ledger"
+                    )
+            if expected:
+                raise KrakenExecutionError(
+                    "Local fills are missing from Kraken cash history"
+                )
         return snapshot
 
     def _order_fields(self, order: SpotOrder) -> dict[str, str]:

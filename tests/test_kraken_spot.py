@@ -23,7 +23,7 @@ from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
-from hcs_trader.kraken_spot import KrakenSpotAdapter
+from hcs_trader.kraken_spot import KrakenExecutionError, KrakenSpotAdapter
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
 from hcs_trader.spot_execution import KrakenSpotExecution
@@ -32,6 +32,67 @@ from hcs_trader.storage import AuditStore
 # Synthetic test credentials
 _API_KEY = "test-api-key-12345"
 _API_SECRET = base64.b64encode(b"01234567890123456789012345678901").decode("ascii")
+
+
+def test_kraken_balances_cli_only_reads_cash_balances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        assert request.method == "POST"
+        assert request.headers["API-Key"] == _API_KEY
+        assert request.headers["API-Sign"]
+        return httpx2.Response(
+            200,
+            content=(
+                '{"error":[],"result":{"XXBT":{"balance":0.1234567890123456789,'
+                '"hold_trade":"0.1"},"ZUSD":{"balance":"1500.17","hold_trade":"1100"}}}'
+            ),
+        )
+
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(
+        httpx2,
+        "AsyncClient",
+        lambda **kw: client_class(**kw, transport=httpx2.MockTransport(handler)),
+    )
+    keys = tmp_path / "fixture.json"
+    keys.write_text(json.dumps({"api_key": _API_KEY, "api_secret": _API_SECRET}))
+    monkeypatch.setattr(
+        "sys.argv", ["hcs-trader", "kraken-balances", "--credentials-file", str(keys)]
+    )
+    launcher.main()
+
+    assert calls == ["/0/private/BalanceEx"]
+    output = json.loads(capsys.readouterr().out)
+    assert output["balances"]["BTC"]["available"] == "0.0234567890123456789"
+    assert output["balances"]["USD"]["available"] == "400.17"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("rows", "reason"),
+    [
+        ({"ZUSD": {"balance": "1", "credit": "1"}}, "unsupported credit"),
+        ({"XXBT": {"balance": "1", "hold_trade": "2"}}, "exceeds cash balance"),
+        ({"ETH": {"balance": "1"}}, "unsupported assets"),
+        ({"XXBT": {"balance": "1"}, "XBT": {"balance": "1"}}, "Duplicate"),
+        ({"XXBT": {"balance": "NaN"}}, "Invalid Kraken balance"),
+        ({"ZUSD": {"balance": False}}, "Invalid Kraken balance"),
+    ],
+)
+async def test_incomplete_cash_valuation_is_rejected(
+    rows: dict[str, Any], reason: str
+) -> None:
+    response = {"error": [], "result": rows}
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda _: httpx2.Response(200, json=response))
+    ) as client:
+        adapter = KrakenSpotAdapter(_API_KEY, _API_SECRET, client)
+        with pytest.raises(KrakenExecutionError, match=reason):
+            await adapter.read_spot_balances()
 
 
 def _sample_order(

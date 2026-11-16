@@ -7,7 +7,7 @@ import hmac
 import time
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -22,6 +22,7 @@ KRAKEN_PAIR_MAP = {
     "LTC/USD": "XLTCZUSD",
     "ETH/USD": "XETHZUSD",
 }
+_CASH_ASSETS = {"XXBT": "BTC", "XBT": "BTC", "ZUSD": "USD", "USD": "USD"}
 
 
 class KrakenExecutionError(Exception):
@@ -42,6 +43,35 @@ class KrakenOrderValidation:
     market: str
     validated_at: datetime
     validated: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class KrakenCashBalance:
+    total: Decimal
+    held: Decimal
+
+    @property
+    def available(self) -> Decimal:
+        return self.total - self.held
+
+
+@dataclass(frozen=True, slots=True)
+class KrakenSpotBalances:
+    btc: KrakenCashBalance
+    usd: KrakenCashBalance
+    observed_at: datetime
+
+
+def _balance_amount(value: object) -> Decimal:
+    try:
+        if not isinstance(value, (str, int, Decimal)) or isinstance(value, bool):
+            raise ValueError
+        amount = Decimal(value)
+    except (InvalidOperation, ValueError):
+        raise KrakenExecutionError("Invalid Kraken balance amount") from None
+    if not amount.is_finite() or amount < 0:
+        raise KrakenExecutionError("Invalid Kraken balance amount")
+    return amount
 
 
 class KrakenSpotAdapter:
@@ -117,7 +147,7 @@ class KrakenSpotAdapter:
             )
 
         try:
-            payload = response.json()
+            payload = response.json(parse_float=Decimal)
         except Exception as err:
             raise KrakenAmbiguousExecutionError(
                 f"Unparseable response from Kraken on {endpoint}: {err}"
@@ -137,6 +167,37 @@ class KrakenSpotAdapter:
         if not isinstance(result, dict):
             raise KrakenAmbiguousExecutionError("Invalid Kraken result")
         return result
+
+    async def read_spot_balances(self) -> KrakenSpotBalances:
+        """Read cash balances for the dedicated BTC/USD spot account."""
+        result = await self._post_private("BalanceEx", {})
+        observed_at = datetime.now(UTC)
+        balances: dict[str, KrakenCashBalance] = {}
+        for code, row in result.items():
+            if not isinstance(row, dict) or "balance" not in row:
+                raise KrakenExecutionError("Malformed Kraken balance row")
+            total = _balance_amount(row["balance"])
+            held = _balance_amount(row.get("hold_trade", 0))
+            if _balance_amount(row.get("credit", 0)) or _balance_amount(
+                row.get("credit_used", 0)
+            ):
+                raise KrakenExecutionError("Kraken account uses unsupported credit")
+            if held > total:
+                raise KrakenExecutionError("Kraken trade hold exceeds cash balance")
+            asset = _CASH_ASSETS.get(code)
+            if asset is None:
+                if total:
+                    raise KrakenExecutionError(
+                        "Kraken account holds unsupported assets"
+                    )
+                continue
+            if asset in balances:
+                raise KrakenExecutionError("Duplicate Kraken cash asset")
+            balances[asset] = KrakenCashBalance(total, held)
+        empty = KrakenCashBalance(Decimal(0), Decimal(0))
+        return KrakenSpotBalances(
+            balances.get("BTC", empty), balances.get("USD", empty), observed_at
+        )
 
     def _order_fields(self, order: SpotOrder) -> dict[str, str]:
         if order.venue != "kraken" or order.state != OrderState.PREVIEWED:

@@ -59,6 +59,7 @@ from hcs_trader.kraken_spot import (
     KrakenExecutionError,
     KrakenOrderValidation,
     KrakenSpotAdapter,
+    KrakenSpotBalances,
 )
 from hcs_trader.live_readiness import (
     HardLimits,
@@ -354,6 +355,13 @@ async def validate_kraken_order(
     async with httpx2.AsyncClient(trust_env=False) as client:
         adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
         return await adapter.validate_spot_order(order, at)
+
+
+async def read_kraken_balances(credentials_file: Path) -> KrakenSpotBalances:
+    key, secret = read_kraken_credentials(credentials_file)
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        return await adapter.read_spot_balances()
 
 
 async def submit_canary_order(
@@ -722,6 +730,10 @@ def main() -> None:
     kraken_parser.add_argument("--side", choices=list(SpotSide), required=True)
     kraken_parser.add_argument("--quantity", required=True)
     kraken_parser.add_argument("--limit-price", required=True)
+    balances_parser = commands.add_parser(
+        "kraken-balances", help="Read BTC/USD cash balances and spot order holds"
+    )
+    balances_parser.add_argument("--credentials-file", type=Path, required=True)
     allow_canary = commands.add_parser(
         "spot-canary-allow",
         help="Locally authorize one Kraken BTC/USD canary candidate",
@@ -1203,6 +1215,34 @@ def main() -> None:
             return
         except (sqlite3.Error, ValueError) as error:
             parser.exit(1, f"{error}\n")
+    elif arguments.command == "kraken-balances":
+        try:
+            cash_snapshot = asyncio.run(
+                read_kraken_balances(arguments.credentials_file)
+            )
+        except KrakenExecutionError:
+            parser.exit(1, "Kraken BTC/USD cash balances could not be verified\n")
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        balances = {
+            asset: {
+                "total": str(balance.total),
+                "held": str(balance.held),
+                "available": str(balance.available),
+            }
+            for asset, balance in (
+                ("BTC", cash_snapshot.btc),
+                ("USD", cash_snapshot.usd),
+            )
+        }
+        print(
+            json.dumps(
+                {
+                    "observed_at": cash_snapshot.observed_at.isoformat(),
+                    "balances": balances,
+                }
+            )
+        )
     elif arguments.command == "kraken-validate":
         try:
             validation = asyncio.run(

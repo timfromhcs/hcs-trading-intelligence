@@ -10,10 +10,12 @@ everything else stays ``unevidenced``.
 
 import json
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
+from hashlib import file_digest
 from pathlib import Path
 from typing import Any
 
@@ -401,33 +403,86 @@ def _chk_no_unresolved(ctx: Context) -> tuple[bool, str]:
     return True, "register parses and lists no untested security-critical branch"
 
 
-def _chk_checksums(ctx: Context) -> tuple[bool, str]:
-    if ctx.dist is None:
-        return False, "no release directory supplied"
-    import hashlib  # noqa: PLC0415
+_RELEASE_REPOSITORY = "timfromhcs/hcs-trading-intelligence"
+_PROVENANCE_BUNDLE = "build-provenance.sigstore.json"
 
-    sums = ctx.dist / "SHA256SUMS"
-    if not sums.is_file():
-        return False, "SHA256SUMS missing"
-    listed = {}
+
+def _verified_release_files(directory: Path) -> set[str]:
+    sums = directory / "SHA256SUMS"
+    listed: set[str] = set()
     for line in sums.read_text(encoding="ascii").splitlines():
         digest, _, name = line.partition("  ")
-        listed[name] = digest
-    for name, digest in listed.items():
-        target = ctx.dist / name
         if (
-            not target.is_file()
-            or hashlib.sha256(target.read_bytes()).hexdigest() != digest
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", name)
+            or name in listed
         ):
-            return False, f"{name} missing or mismatched"
-    sbom = any(p.name.lower().startswith("sbom") for p in ctx.dist.iterdir())
-    prov = any(
-        p.name.endswith((".intoto.jsonl", ".sigstore", ".sigstore.json"))
-        for p in ctx.dist.iterdir()
+            raise ValueError("Invalid or duplicate SHA256SUMS entry")
+        target = directory / name
+        if target.is_symlink() or not target.is_file():
+            raise ValueError(f"Missing or invalid release file: {name}")
+        with target.open("rb") as file:
+            if file_digest(file, "sha256").hexdigest() != digest:
+                raise ValueError(f"Checksum mismatch: {name}")
+        listed.add(name)
+    expected = {
+        path.name
+        for path in directory.iterdir()
+        if path.is_file()
+        and path.name != sums.name
+        and not path.name.endswith(".sha256")
+    }
+    if not listed or listed != expected:
+        raise ValueError("SHA256SUMS must cover every release file")
+    return listed
+
+
+def _chk_checksums(ctx: Context) -> tuple[bool, str]:
+    if ctx.dist is None or not ctx.head_sha:
+        return False, "release directory and source commit are required"
+    files = _verified_release_files(ctx.dist)
+    if not {"sbom.cdx.json", _PROVENANCE_BUNDLE} <= files:
+        return False, "checksums verify; SBOM or provenance bundle is missing"
+    sbom = json.loads((ctx.dist / "sbom.cdx.json").read_text(encoding="utf-8"))
+    if (
+        not isinstance(sbom, dict)
+        or sbom.get("bomFormat") != "CycloneDX"
+        or not isinstance(sbom.get("components"), list)
+        or not sbom["components"]
+    ):
+        return False, "expected a CycloneDX SBOM with components"
+    gh = shutil.which("gh")
+    if gh is None:
+        return False, "GitHub CLI provenance verification unavailable"
+    for name in sorted(files - {_PROVENANCE_BUNDLE}):
+        try:
+            result = subprocess.run(  # noqa: S603
+                [
+                    gh,
+                    "attestation",
+                    "verify",
+                    str((ctx.dist / name).resolve()),
+                    "--bundle",
+                    str((ctx.dist / _PROVENANCE_BUNDLE).resolve()),
+                    "--repo",
+                    _RELEASE_REPOSITORY,
+                    "--signer-workflow",
+                    f"{_RELEASE_REPOSITORY}/.github/workflows/release.yml",
+                    "--source-digest",
+                    ctx.head_sha,
+                ],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False, "GitHub CLI provenance verification unavailable"
+        if result.returncode != 0:
+            return False, f"Provenance verification failed: {name}"
+    return (
+        True,
+        "complete checksums, CycloneDX inventory and verified release provenance",
     )
-    if not (sbom and prov):
-        return False, f"checksums verify but sbom={sbom}, provenance={prov}"
-    return True, "checksums verify; sbom and provenance files present"
 
 
 def _dist_has(ctx: Context, pattern: str) -> tuple[bool, str]:

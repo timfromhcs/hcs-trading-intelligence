@@ -253,6 +253,67 @@ def test_checklist_requires_gates_for_the_current_commit() -> None:
     assert status(Context(root=REPO, gates=gates, head_sha=sha), "R-02") == UNEVIDENCED
 
 
+def test_release_provenance_rejects_incomplete_or_unverified_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hashlib import sha256
+    from subprocess import CompletedProcess
+
+    bundle = tmp_path / "build-provenance.sigstore.json"
+    sbom = tmp_path / "sbom.cdx.json"
+    artifact = tmp_path / "hcs-trader.whl"
+    bundle.write_text("{}", encoding="utf-8")
+    sbom.write_text(
+        '{"bomFormat":"CycloneDX","components":[{"name":"fixture"}]}', encoding="utf-8"
+    )
+    artifact.write_bytes(b"artifact fixture")
+    checksum = tmp_path / "SHA256SUMS"
+    sha = "a" * 40
+
+    def write_manifest(*paths: Path) -> None:
+        checksum.write_text(
+            "".join(f"{sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in paths),
+            encoding="ascii",
+        )
+
+    def provenance_status() -> str:
+        report = evaluate_checklist(Context(root=REPO, dist=tmp_path, head_sha=sha))
+        return next(item.status for item in report.items if item.item_id == "D-05")
+
+    write_manifest()
+    assert provenance_status() == UNEVIDENCED
+    write_manifest(artifact, bundle)
+    assert provenance_status() == UNEVIDENCED
+    write_manifest(artifact, bundle, sbom, sbom)
+    assert provenance_status() == UNEVIDENCED
+    write_manifest(artifact, bundle, sbom)
+
+    calls: list[list[str]] = []
+    verified = False
+
+    def gh_run(args: list[str], **_options: object) -> CompletedProcess[bytes]:
+        calls.append(args)
+        return CompletedProcess(args, 0 if verified else 1)
+
+    gh = str(tmp_path / "gh")
+    monkeypatch.setattr("hcs_trader.live_readiness.shutil.which", lambda _name: gh)
+    monkeypatch.setattr("hcs_trader.live_readiness.subprocess.run", gh_run)
+    assert provenance_status() == UNEVIDENCED
+    verified = True
+    calls.clear()
+    assert provenance_status() == EVIDENCED
+    assert {Path(call[3]).name for call in calls} == {artifact.name, sbom.name}
+    for call in calls:
+        assert call[:3] == [gh, "attestation", "verify"]
+        assert call[call.index("--source-digest") + 1] == sha
+        assert call[call.index("--signer-workflow") + 1].endswith(
+            "/.github/workflows/release.yml"
+        )
+
+    artifact.write_bytes(b"modified")
+    assert provenance_status() == UNEVIDENCED
+
+
 def test_claim_scan_flags_marketing(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("A risk-free, guaranteed profit bot", "utf-8")
     assert len(scan_claims(tmp_path)) == 2

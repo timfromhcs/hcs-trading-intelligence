@@ -32,3 +32,5 @@ Tag a commit on `main` as `vX.Y.Z` (or `vX.Y.Z-rc.N`, which is marked pre-releas
 Verify downloads with `sha256sum --check SHA256SUMS` and verify a built artifact with `gh attestation verify ARTIFACT --repo timfromhcs/hcs-trading-intelligence`. [GitHub artifact attestation documentation](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
 
 Pull request checks validate both lockfiles, audit dependencies and check for unreviewed strong-copyleft packages. `pre-commit install` enables the local hooks from `.pre-commit-config.yaml`.
+
+Run `hcs-trader release-check --dist PATH --gates-report REPORT` from the matching candidate checkout. The provenance check requires the GitHub CLI, complete checksums, a CycloneDX SBOM and the Sigstore bundle produced by the draft workflow. It verifies each attested file against the repository, release workflow and checkout commit.

@@ -29,6 +29,7 @@ class SpotCashTrade:
     btc: Decimal
     usd: Decimal
     usd_fee: Decimal
+    btc_fee: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class SpotFill:
     price: Decimal
     fee: Decimal
     filled_at: datetime
+    cash_booking: SpotCashTrade | None = None
 
 
 @dataclass(frozen=True, slots=True)

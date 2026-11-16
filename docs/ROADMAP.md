@@ -1,5 +1,22 @@
 # Implementation plan
 
+## Free-route plan · 2026-11-16 (supersedes the integration status below where they differ)
+
+Every gap is closed with free tooling and no real funds. What cannot be closed by an agent is listed as operator-only and stays a documented limitation. Evidence from a testnet proves adapter and reconciliation code paths, never mainnet or Kraken-specific semantics.
+
+| Gap | Free route | Operator-only remainder |
+|---|---|---|
+| KL-001 venue evidence | Venue-agnostic `ExchangeAdapter` port; Binance Spot Testnet adapter (thin httpx, Ed25519, `newClientOrderId`, query-before-retry, `userDataStream.subscribe`); rehearsal suite marked `rehearsal`, skipped without keys; recorded-fixture replays in CI; Kraken `AddOrder validate=true` probe, local and opt-in only | Create testnet keys (GitHub login); any real Kraken matching/fill evidence needs an operator-approved canary |
+| KL-002 EVM | `eth-account` signer rebuilds EIP-1559 tx, decodes calldata with `eth-abi`, signs only allowlisted Sepolia SwapRouter02 `exactInputSingle` and exact-amount `approve`; offline known-vector and fuzz tests; anvil fork as optional layer | Sepolia faucet ETH, RPC key, independent security review |
+| KL-002 Solana | `solders` offline signer plus Jupiter-shaped v0 message fixtures; local validator / simulate for chain validity; Jupiter stays preview-only | Mainnet canary, Jupiter key |
+| KL-002 BTC/LTC/DGB | Node-as-signer: PSBT via `walletcreatefundedpsbt`, re-validate with `decodepsbt` against the plan hash, then `walletprocesspsbt`; key never enters Python; regtest only; capability matrix says `regtest-verified` | Mainnet spend stays disabled |
+| KL-003 cross-OS | Free GitHub-hosted runners: onedir and onefile, wheels, sdist, upgrade from v0.2.0 wheel, kill-switch crash test, attestations, CycloneDX SBOM | Public repo, Apple Developer ID, SignPath application |
+| Data | Keyless WS primary, quota tracker and attribution per provider | Free keys (CoinGecko Demo, FRED) |
+| Single file | One `hcs-trader` binary: `serve`, `mcp-stdio`, `selftest`; `.mcpb` bundle for Claude Desktop; frozen-exe stdio smoke test in CI | PyPI Trusted Publishing |
+
+Execution order: (1) venue port plus Binance testnet adapter, (2) EVM signer, (3) Solana offline signer, (4) UTXO node-as-signer on regtest, (5) release pipeline, `selftest`, `.mcpb`, (6) full gates, build exe and wheel, smoke, (7) update limitations register with evidence and re-run `release-check`. `v1.0.0` stays blocked until the operator-only items are done; the deliverable is a verified `v1.0.0-rc`.
+
+
 ## Integration status · 2026-11-16
 
 GitHub `main` is at `7093314`. The local reviewed baseline `5dd4705` is 16 commits ahead. PR #1 remains the only PR and is merged. The Claude worktree branch points to the same local commit and contains 48 modified tracked files and 82 untracked files. The integration branch brings that work into one checkout for testing.

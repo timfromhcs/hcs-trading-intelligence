@@ -43,7 +43,8 @@ from hcs_trader.local_research import ResearchHistory, ResearchRun, ResearchRunS
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEvaluation, RiskRejected
 
-_SCHEMA_VERSION = 18
+_SCHEMA_VERSION = 19
+_SPOT_CASH_TRADE = TypeAdapter(SpotCashTrade)
 _PAPER_FILL = TypeAdapter(PaperFill)
 _RESEARCH_RUN = TypeAdapter(ResearchRun)
 _RESEARCH_STATS = TypeAdapter(ResearchRunStats)
@@ -570,6 +571,11 @@ class AuditStore:
                     """
                 )
                 connection.execute("PRAGMA user_version = 18")
+            if version < 19:
+                columns = connection.execute("PRAGMA table_info(spot_fills)").fetchall()
+                if not any(column[1] == "cash_booking" for column in columns):
+                    connection.execute("ALTER TABLE spot_fills ADD COLUMN cash_booking TEXT")
+                connection.execute("PRAGMA user_version = 19")
         self._verify_integrity()
 
     def _verify_integrity(self) -> None:
@@ -1116,10 +1122,15 @@ class AuditStore:
             str(fill.fee),
             fill.filled_at.isoformat(),
         )
+        booking = (
+            _SPOT_CASH_TRADE.dump_json(fill.cash_booking).decode()
+            if fill.cash_booking is not None
+            else None
+        )
         inserted = connection.execute(
-            "INSERT INTO spot_fills VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO spot_fills VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (client_order_id, fill_id) DO NOTHING",
-            (*values, datetime.now(UTC).isoformat()),
+            (*values, datetime.now(UTC).isoformat(), booking),
         )
         if inserted.rowcount:
             self._insert_audit(
@@ -1131,18 +1142,32 @@ class AuditStore:
             )
             return True
         existing = connection.execute(
-            "SELECT client_order_id, fill_id, quantity, price, fee, filled_at "
+            "SELECT client_order_id, fill_id, quantity, price, fee, filled_at, cash_booking "
             "FROM spot_fills WHERE client_order_id = ? AND fill_id = ?",
             values[:2],
         ).fetchone()
-        if tuple(existing) != values:
+        if tuple(existing[:6]) != values:
             raise ValueError("Fill ID was already recorded with different values")
+        if fill.cash_booking is not None and existing[6] is None:
+            connection.execute(
+                "UPDATE spot_fills SET cash_booking = ? WHERE client_order_id = ? AND fill_id = ?",
+                (booking, *values[:2]),
+            )
+            self._insert_audit(
+                connection, "spot.fill.cash-booking.verified",
+                order_or_tx_id=fill.client_order_id, idempotency_key=fill.fill_id,
+                outcome="recorded",
+            )
+        elif fill.cash_booking is not None and (
+            _SPOT_CASH_TRADE.validate_json(existing[6]) != fill.cash_booking
+        ):
+            raise ValueError("Fill ID was already recorded with a different cash booking")
         return False
 
     def spot_fills(self, client_order_id: str) -> list[SpotFill]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at "
+                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at, cash_booking "
                 "FROM spot_fills WHERE client_order_id = ? ORDER BY filled_at, fill_id",
                 (client_order_id,),
             ).fetchall()
@@ -1154,6 +1179,7 @@ class AuditStore:
                 Decimal(r[3]),
                 Decimal(r[4]),
                 datetime.fromisoformat(r[5]),
+                _SPOT_CASH_TRADE.validate_json(r[6]) if r[6] is not None else None,
             )
             for r in rows
         ]
@@ -1161,19 +1187,23 @@ class AuditStore:
     def spot_cash_trades(self, venue: str) -> dict[str, SpotCashTrade]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee "
+                "SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee, f.cash_booking "
                 "FROM spot_fills f JOIN spot_orders o USING (client_order_id) "
                 "WHERE o.venue = ?",
                 (venue,),
             ).fetchall()
         trades: dict[str, SpotCashTrade] = {}
-        for fill_id, market, side, quantity, price, fee in rows:
+        for fill_id, market, side, quantity, price, fee, booking in rows:
             if market != "BTC/USD" or not fill_id or fill_id in trades:
                 raise ValueError("Unsupported or duplicate local spot fill")
             btc = Decimal(quantity)
             if SpotSide(side) is SpotSide.SELL:
                 btc = -btc
-            trades[fill_id] = SpotCashTrade(btc, -btc * Decimal(price), Decimal(fee))
+            trades[fill_id] = (
+                _SPOT_CASH_TRADE.validate_json(booking)
+                if booking is not None
+                else SpotCashTrade(btc, -btc * Decimal(price), Decimal(fee))
+            )
         return trades
 
     def record_paper_fill(

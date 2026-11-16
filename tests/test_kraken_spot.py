@@ -176,6 +176,91 @@ async def test_incomplete_cash_valuation_is_rejected(
             await adapter.read_spot_balances()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("fault", [None, "duplicate", "gap", "balance", "cursor"])
+async def test_cash_ledger_paginates_and_checks_ending_balances(
+    fault: str | None,
+) -> None:
+    calls: list[str] = []
+    query_ends: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        name = request.url.path.rsplit("/", 1)[1]
+        calls.append(name)
+        form = urllib.parse.parse_qs(request.content.decode())
+        result: dict[str, Any]
+        if name == "BalanceEx":
+            result = {
+                "ZUSD": {"balance": "899" if fault == "balance" else "899.50"},
+                "XXBT": {"balance": "0.002"},
+            }
+        else:
+            assert name == "Ledgers"
+            assert form["with_cursor"] == ["true"]
+            query_ends.append(form["end"][0])
+            if "cursor" not in form:
+                result = {
+                    "ledger": {
+                        "trade-usd": {
+                            "time": 30,
+                            "asset": "ZUSD",
+                            "type": "trade",
+                            "amount": "-100",
+                            "fee": "0.50",
+                            "balance": "899.50",
+                        },
+                        "trade-btc": {
+                            "time": 30,
+                            "asset": "XXBT",
+                            "type": "trade",
+                            "amount": "0.002",
+                            "fee": "0",
+                            "balance": "0.002",
+                        },
+                    },
+                    "cursor": {"next": "next-page"},
+                }
+            else:
+                assert form["cursor"] == ["next-page"]
+                result = {
+                    "ledger": {
+                        "trade-usd" if fault == "duplicate" else "deposit": {
+                            "time": 20,
+                            "asset": "ZUSD",
+                            "type": "deposit",
+                            "amount": "900" if fault == "gap" else "1000",
+                            "fee": "0",
+                            "balance": "1000",
+                        }
+                    },
+                    "cursor": {"next": "next-page"} if fault == "cursor" else {},
+                }
+        return httpx2.Response(200, json={"error": [], "result": result})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        adapter = KrakenSpotAdapter(_API_KEY, _API_SECRET, client, validate_only=True)
+        if fault is None:
+            snapshot = await adapter.verify_cash_ledger()
+            assert snapshot.btc.total == Decimal("0.002")
+            assert snapshot.usd.total == Decimal("899.50")
+        else:
+            reasons = {
+                "duplicate": "Duplicate",
+                "gap": "reconcile from zero",
+                "balance": "differs from current balances",
+                "cursor": "did not advance",
+            }
+            with pytest.raises(KrakenExecutionError, match=reasons[fault]):
+                await adapter.verify_cash_ledger()
+
+    assert len(query_ends) == 2 and query_ends[0] == query_ends[1]
+    assert calls == (
+        ["Ledgers", "Ledgers", "BalanceEx"]
+        if fault in (None, "balance")
+        else ["Ledgers", "Ledgers"]
+    )
+
+
 def _sample_order(
     client_id: str = "cl-ord-001",
     quantity: str = "0.01",

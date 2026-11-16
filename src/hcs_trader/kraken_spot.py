@@ -63,16 +63,39 @@ class KrakenSpotBalances:
     observed_at: datetime
 
 
-def _balance_amount(value: object) -> Decimal:
+@dataclass(frozen=True, slots=True)
+class _LedgerEntry:
+    at: Decimal
+    asset: str
+    amount: Decimal
+    fee: Decimal
+    balance: Decimal
+
+
+def _balance_amount(value: object, *, signed: bool = False) -> Decimal:
     try:
         if not isinstance(value, (str, int, Decimal)) or isinstance(value, bool):
             raise ValueError
         amount = Decimal(value)
     except (InvalidOperation, ValueError):
         raise KrakenExecutionError("Invalid Kraken balance amount") from None
-    if not amount.is_finite() or amount < 0:
+    if not amount.is_finite() or (not signed and amount < 0):
         raise KrakenExecutionError("Invalid Kraken balance amount")
     return amount
+
+
+def _parse_cash_entry(row: dict[str, Any]) -> _LedgerEntry:
+    code = row.get("asset")
+    asset = _CASH_ASSETS.get(code) if isinstance(code, str) else None
+    if asset is None or row.get("type") not in ("deposit", "withdrawal", "trade"):
+        raise KrakenExecutionError("Unsupported event in Kraken BTC/USD cash ledger")
+    return _LedgerEntry(
+        _balance_amount(row.get("time")),
+        asset,
+        _balance_amount(row.get("amount"), signed=True),
+        _balance_amount(row.get("fee")),
+        _balance_amount(row.get("balance")),
+    )
 
 
 class KrakenSpotAdapter:
@@ -199,6 +222,63 @@ class KrakenSpotAdapter:
         return KrakenSpotBalances(
             balances.get("BTC", empty), balances.get("USD", empty), observed_at
         )
+
+    async def verify_cash_ledger(self) -> KrakenSpotBalances:
+        """Replay Kraken cash history from zero and compare current totals."""
+        end = int(time.time())
+        entries: dict[str, _LedgerEntry] = {}
+        params: dict[str, str | int] = {"with_cursor": "true", "end": end}
+        seen_cursors: set[str] = set()
+        for _ in range(20):
+            result = await self._post_private("Ledgers", params)
+            page = result.get("ledger")
+            cursor = result.get("cursor")
+            if not isinstance(page, dict) or (
+                cursor is not None and not isinstance(cursor, dict)
+            ):
+                raise KrakenExecutionError("Malformed Kraken ledger page")
+            for entry_id, row in page.items():
+                if not entry_id or entry_id in entries or not isinstance(row, dict):
+                    raise KrakenExecutionError(
+                        "Duplicate or malformed Kraken ledger entry"
+                    )
+                entry = _parse_cash_entry(row)
+                prior = next(reversed(entries.values()), None)
+                if entry.at > end or (prior is not None and entry.at > prior.at):
+                    raise KrakenExecutionError(
+                        "Kraken ledger entries are out of chronological order"
+                    )
+                entries[entry_id] = entry
+            next_cursor = cursor.get("next") if cursor else None
+            if next_cursor is None:
+                break
+            if (
+                not page
+                or not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                raise KrakenExecutionError("Kraken ledger pagination did not advance")
+            seen_cursors.add(next_cursor)
+            params["cursor"] = next_cursor
+        else:
+            raise KrakenExecutionError(
+                "Kraken cash ledger exceeds the verification page limit"
+            )
+
+        totals = {"BTC": Decimal(0), "USD": Decimal(0)}
+        for entry in reversed(entries.values()):
+            if totals[entry.asset] + entry.amount - entry.fee != entry.balance:
+                raise KrakenExecutionError(
+                    "Kraken cash ledger does not reconcile from zero"
+                )
+            totals[entry.asset] = entry.balance
+        snapshot = await self.read_spot_balances()
+        if (snapshot.btc.total, snapshot.usd.total) != (totals["BTC"], totals["USD"]):
+            raise KrakenExecutionError(
+                "Kraken cash ledger differs from current balances"
+            )
+        return snapshot
 
     def _order_fields(self, order: SpotOrder) -> dict[str, str]:
         if order.venue != "kraken" or order.state != OrderState.PREVIEWED:

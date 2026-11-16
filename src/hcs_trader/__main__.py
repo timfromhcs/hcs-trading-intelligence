@@ -357,10 +357,14 @@ async def validate_kraken_order(
         return await adapter.validate_spot_order(order, at)
 
 
-async def read_kraken_balances(credentials_file: Path) -> KrakenSpotBalances:
+async def read_kraken_balances(
+    credentials_file: Path, *, verify_venue_ledger: bool = False
+) -> KrakenSpotBalances:
     key, secret = read_kraken_credentials(credentials_file)
     async with httpx2.AsyncClient(trust_env=False) as client:
         adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        if verify_venue_ledger:
+            return await adapter.verify_cash_ledger()
         return await adapter.read_spot_balances()
 
 
@@ -747,6 +751,11 @@ def main() -> None:
         "kraken-balances", help="Read BTC/USD cash balances and spot order holds"
     )
     balances_parser.add_argument("--credentials-file", type=Path, required=True)
+    balances_parser.add_argument(
+        "--verify-venue-ledger",
+        action="store_true",
+        help="Replay Kraken ledger entries and compare them to current cash balances",
+    )
     orders_parser = commands.add_parser(
         "kraken-check-orders",
         help="Compare Kraken open orders with the local order ledger",
@@ -1254,7 +1263,10 @@ def main() -> None:
     elif arguments.command == "kraken-balances":
         try:
             cash_snapshot = asyncio.run(
-                read_kraken_balances(arguments.credentials_file)
+                read_kraken_balances(
+                    arguments.credentials_file,
+                    verify_venue_ledger=arguments.verify_venue_ledger,
+                )
             )
         except KrakenExecutionError:
             parser.exit(1, "Kraken BTC/USD cash balances could not be verified\n")

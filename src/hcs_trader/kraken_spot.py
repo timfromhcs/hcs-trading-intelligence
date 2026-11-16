@@ -22,8 +22,14 @@ from hcs_trader.domain.execution import (
     SpotFill,
     SpotOrder,
     SpotOrderType,
+    SpotSide,
 )
 from hcs_trader.domain.lifecycle import OrderState
+from hcs_trader.spot_port import (
+    SpotAmbiguousExecutionError,
+    SpotExecutionError,
+    SpotOrderRejected,
+)
 
 KRAKEN_PAIR_MAP = {
     "BTC/USD": "XXBTZUSD",
@@ -33,15 +39,15 @@ KRAKEN_PAIR_MAP = {
 _CASH_ASSETS = {"XXBT": "BTC", "XBT": "BTC", "ZUSD": "USD", "USD": "USD"}
 
 
-class KrakenExecutionError(Exception):
+class KrakenExecutionError(SpotExecutionError):
     """Base error for Kraken trading operations."""
 
 
-class KrakenOrderRejected(KrakenExecutionError):
+class KrakenOrderRejected(KrakenExecutionError, SpotOrderRejected):
     """The exchange rejected the proposed spot order."""
 
 
-class KrakenAmbiguousExecutionError(KrakenExecutionError):
+class KrakenAmbiguousExecutionError(KrakenExecutionError, SpotAmbiguousExecutionError):
     """Response timed out or failed with unknown state; reconciliation required."""
 
 
@@ -626,3 +632,49 @@ class KrakenSpotAdapter:
                 ):
                     matches[order_id] = entry
         return next(iter(matches.items())) if len(matches) == 1 else (None, {})
+
+
+async def kraken_validate_probe(
+    api_key: str,
+    api_secret: str,
+    http_client: httpx2.AsyncClient,
+    *,
+    base_url: str = "https://api.kraken.com",
+    market: str = "BTC/USD",
+    quantity: Decimal = Decimal("0.0001"),
+    limit_price: Decimal = Decimal("1000.00"),
+    at: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate-only AddOrder probe: Kraken checks the order but never places it.
+
+    The adapter is always constructed with validate_only=True, so this function
+    cannot create a real order. Opt-in only; never called from CI.
+    """
+    now = at or datetime.now(UTC)
+    probe = SpotOrder(
+        client_order_id=f"hcs-validate-{int(now.timestamp())}",
+        order_id="validate-probe",
+        venue="kraken",
+        market=market,
+        side=SpotSide.BUY,
+        order_type=SpotOrderType.LIMIT,
+        quantity=quantity,
+        limit_price=limit_price,
+        state=OrderState.PREVIEWED,
+        risk_decision_id="validate-probe",
+        created_at=now,
+        updated_at=now,
+    )
+    adapter = KrakenSpotAdapter(
+        api_key, api_secret, http_client, base_url, validate_only=True
+    )
+    data = {**adapter._order_fields(probe), "validate": "true"}
+    try:
+        result = await adapter._post_private("AddOrder", data)
+    except KrakenOrderRejected as error:
+        return {"accepted": False, "detail": str(error), "order_placed": False}
+    return {
+        "accepted": True,
+        "detail": dict(result.get("descr", {})),
+        "order_placed": bool(result.get("txid")),
+    }

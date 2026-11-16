@@ -98,3 +98,25 @@ Schema version 12 introduces the `spot_orders` table storing:
 - `state`: Current lifecycle state (`PREVIEWED`, `SUBMITTED`, `ACKNOWLEDGED`, `FILLED`, `REJECTED`, `CANCELLED`, `RECONCILIATION_REQUIRED`).
 - `risk_decision_id`: Audit correlation identifier.
 - Timestamps and execution results (`venue_order_id`, `filled_quantity`, `average_price`, `fee`).
+
+## Venue-agnostic spot port and Binance testnet adapter (KL-001 track)
+
+`hcs_trader.spot_port` defines `SpotExchangePort` (submit, cancel, reconcile) and shared error bases (`SpotOrderRejected`, `SpotAmbiguousExecutionError`). `KrakenSpotAdapter` and `BinanceSpotTestnetAdapter` both satisfy it; the port has no withdrawal or transfer method.
+
+`BinanceSpotTestnetAdapter` (`binance_testnet.py`) talks to the Binance Spot Test Network over httpx REST:
+- **Testnet-only by construction:** `BinanceTestnetProfile` accepts only `https://testnet.binance.vision/api` and `https://api1.testnet.binance.vision/api`. Mainnet, look-alike hosts, userinfo, ports and other paths raise `BinanceMainnetForbidden`. Redirects are never followed.
+- **Endpoint allowlist:** only `/v3/time`, `exchangeInfo`, `ticker/price`, `account`, `order` (GET/POST/DELETE), `openOrders`, `myTrades`.
+- **Signing:** HMAC-SHA256 hex (`HmacSha256Signer`) or Ed25519 base64 (`Ed25519Signer`) over the exact query string, `X-MBX-APIKEY` header, `recvWindow` 5000, fresh timestamp and signature on every attempt.
+- **Idempotency:** `newClientOrderId` = the order's client id. A timeout, 5xx, `-1007`, 429/418 or duplicate-client-id (`-2010 Duplicate order sent`) on submit returns `RECONCILIATION_REQUIRED`; nothing is resent. `reconcile_order` queries by `origClientOrderId` (`-2013` means unknown to the venue: it maps to `REJECTED` only from `SUBMITTED`, or from `RECONCILIATION_REQUIRED` when the caller passes `never_acknowledged=True` as `submit_and_reconcile` does; otherwise the order stays `RECONCILIATION_REQUIRED`). A malformed 200 or `-1006` on submit also yields `RECONCILIATION_REQUIRED`. `submit_and_reconcile` does submit then query.
+- **Rate limits:** read calls back off on 429 (honouring `Retry-After`, capped at 30 s, bounded retries); 418 is never retried; order submit/cancel are never auto-retried.
+- **Fills and fees:** `myTrades` supplies fills; fee is summed in quote units (base-asset commission converted at fill price; third-party fee assets leave `fee` unset).
+
+CI tests use `httpx2.MockTransport` with response-shape fixtures in `tests/fixtures/binance_testnet/` (no network, no keys).
+
+### Rehearsal and probes (opt-in, never in CI)
+
+- `hcs-trader rehearsal-binance [--market BTC/USDT] [--output PATH]` needs `HCS_BINANCE_TESTNET_KEY` and `HCS_BINANCE_TESTNET_SECRET` (testnet keys from https://testnet.binance.vision/). It rests one far-from-market LIMIT BUY, checks open orders and query-by-client-id, replays the same client id (must not create a second order), cancels, reads trades/balances and writes redacted evidence JSON (default under the user data dir, `evidence/`). Exit code 1 if any step fails.
+- `pytest tests/rehearsal -m rehearsal --no-cov` runs the same flow; it skips unless the env vars are set.
+- `hcs-trader kraken-validate-probe --confirm-validate-only` sends one authenticated `AddOrder` with `validate=true` (Kraken checks but never places it) using `HCS_KRAKEN_KEY` / `HCS_KRAKEN_SECRET`.
+
+Known limits: the rehearsal has not been run against the live testnet in this environment (no keys); Binance testnet balances and order books are periodically reset by Binance; an order-not-found result immediately after a timeout could in theory race an in-flight order, so operators should re-query before manual action.

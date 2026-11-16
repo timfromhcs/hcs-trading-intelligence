@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import sys
 import warnings
@@ -26,6 +27,8 @@ from platformdirs import user_data_path
 from pydantic import TypeAdapter
 
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
+from hcs_trader.binance_rehearsal import run_rehearsal
+from hcs_trader.binance_testnet import BinanceSpotTestnetAdapter, HmacSha256Signer
 from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.fred import fetch_fred_cpi
@@ -60,6 +63,7 @@ from hcs_trader.kraken_spot import (
     KrakenOrderValidation,
     KrakenSpotAdapter,
     KrakenSpotBalances,
+    kraken_validate_probe,
 )
 from hcs_trader.live_readiness import (
     HardLimits,
@@ -113,6 +117,43 @@ def local_store() -> AuditStore:
     return AuditStore(
         user_data_path("HCS Trading Intelligence", "HCS.media") / "audit.sqlite"
     )
+
+
+def _require_env(*names: str) -> list[str]:
+    values = [os.environ.get(name, "") for name in names]
+    missing = [n for n, v in zip(names, values, strict=True) if not v]
+    if missing:
+        raise ValueError(f"Missing environment variable(s): {', '.join(missing)}")
+    return values
+
+
+async def rehearse_binance(market: str, output: Path | None) -> Path:
+    """Run the testnet rehearsal and write a redacted evidence JSON file."""
+    key, secret = _require_env("HCS_BINANCE_TESTNET_KEY", "HCS_BINANCE_TESTNET_SECRET")
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
+    logging.getLogger("httpcore2").setLevel(logging.WARNING)
+    async with httpx2.AsyncClient(trust_env=False, follow_redirects=False) as client:
+        adapter = BinanceSpotTestnetAdapter(key, HmacSha256Signer(secret), client)
+        evidence = await run_rehearsal(
+            adapter, market=market, secrets_to_hide=[key, secret]
+        )
+    target = output or (
+        user_data_path("HCS Trading Intelligence", "HCS.media")
+        / "evidence"
+        / f"binance-testnet-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.json"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+    if not evidence["passed"]:
+        raise ValueError(f"Rehearsal did not pass; evidence written to {target}")
+    return target
+
+
+async def probe_kraken_validate() -> dict[str, object]:
+    """One validate=true AddOrder request. Kraken never places the order."""
+    key, secret = _require_env("HCS_KRAKEN_KEY", "HCS_KRAKEN_SECRET")
+    async with httpx2.AsyncClient(trust_env=False, follow_redirects=False) as client:
+        return await kraken_validate_probe(key, secret, client)
 
 
 async def import_candles(interval: int) -> int:
@@ -947,6 +988,21 @@ def main() -> None:
         node_parser.add_argument(
             "--save", action="store_true", help="Save the observed balance locally"
         )
+    rehearsal_parser = commands.add_parser(
+        "rehearsal-binance",
+        help="Run the Binance Spot TESTNET rehearsal (needs testnet API keys in env)",
+    )
+    rehearsal_parser.add_argument("--market", default="BTC/USDT")
+    rehearsal_parser.add_argument("--output", type=Path)
+    probe_parser = commands.add_parser(
+        "kraken-validate-probe",
+        help="Opt-in Kraken AddOrder validate=true probe (places no order)",
+    )
+    probe_parser.add_argument(
+        "--confirm-validate-only",
+        action="store_true",
+        help="Required: acknowledge this sends one authenticated validate-only call",
+    )
     tx_parser = commands.add_parser(
         "tx-status", help="Read a transaction status from a local node"
     )
@@ -1448,6 +1504,20 @@ def main() -> None:
         except (OSError, WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(WALLET_SNAPSHOT.dump_json(snapshot).decode("utf-8"))
+    elif arguments.command == "rehearsal-binance":
+        try:
+            written = asyncio.run(rehearse_binance(arguments.market, arguments.output))
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Rehearsal passed; evidence written to {written}")
+    elif arguments.command == "kraken-validate-probe":
+        if not arguments.confirm_validate_only:
+            parser.exit(2, "Pass --confirm-validate-only to run the probe\n")
+        try:
+            probe = asyncio.run(probe_kraken_validate())
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(json.dumps(probe, sort_keys=True))
     elif arguments.command == "tx-status":
         try:
             observation = asyncio.run(

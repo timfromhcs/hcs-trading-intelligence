@@ -574,7 +574,9 @@ class AuditStore:
             if version < 19:
                 columns = connection.execute("PRAGMA table_info(spot_fills)").fetchall()
                 if not any(column[1] == "cash_booking" for column in columns):
-                    connection.execute("ALTER TABLE spot_fills ADD COLUMN cash_booking TEXT")
+                    connection.execute(
+                        "ALTER TABLE spot_fills ADD COLUMN cash_booking TEXT"
+                    )
                 connection.execute("PRAGMA user_version = 19")
         self._verify_integrity()
 
@@ -1142,7 +1144,8 @@ class AuditStore:
             )
             return True
         existing = connection.execute(
-            "SELECT client_order_id, fill_id, quantity, price, fee, filled_at, cash_booking "
+            "SELECT client_order_id, fill_id, quantity, price, fee, filled_at, "
+            "cash_booking "
             "FROM spot_fills WHERE client_order_id = ? AND fill_id = ?",
             values[:2],
         ).fetchone()
@@ -1150,24 +1153,30 @@ class AuditStore:
             raise ValueError("Fill ID was already recorded with different values")
         if fill.cash_booking is not None and existing[6] is None:
             connection.execute(
-                "UPDATE spot_fills SET cash_booking = ? WHERE client_order_id = ? AND fill_id = ?",
+                "UPDATE spot_fills SET cash_booking = ? "
+                "WHERE client_order_id = ? AND fill_id = ?",
                 (booking, *values[:2]),
             )
             self._insert_audit(
-                connection, "spot.fill.cash-booking.verified",
-                order_or_tx_id=fill.client_order_id, idempotency_key=fill.fill_id,
+                connection,
+                "spot.fill.cash-booking.verified",
+                order_or_tx_id=fill.client_order_id,
+                idempotency_key=fill.fill_id,
                 outcome="recorded",
             )
         elif fill.cash_booking is not None and (
             _SPOT_CASH_TRADE.validate_json(existing[6]) != fill.cash_booking
         ):
-            raise ValueError("Fill ID was already recorded with a different cash booking")
+            raise ValueError(
+                "Fill ID was already recorded with a different cash booking"
+            )
         return False
 
     def spot_fills(self, client_order_id: str) -> list[SpotFill]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at, cash_booking "
+                "SELECT client_order_id, fill_id, quantity, price, fee, filled_at, "
+                "cash_booking "
                 "FROM spot_fills WHERE client_order_id = ? ORDER BY filled_at, fill_id",
                 (client_order_id,),
             ).fetchall()
@@ -1187,7 +1196,8 @@ class AuditStore:
     def spot_cash_trades(self, venue: str) -> dict[str, SpotCashTrade]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee, f.cash_booking "
+                "SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee, "
+                "f.cash_booking "
                 "FROM spot_fills f JOIN spot_orders o USING (client_order_id) "
                 "WHERE o.venue = ?",
                 (venue,),

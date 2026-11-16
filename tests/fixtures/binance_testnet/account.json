@@ -1,0 +1,32 @@
+{
+  "makerCommission": 15,
+  "takerCommission": 15,
+  "buyerCommission": 0,
+  "sellerCommission": 0,
+  "canTrade": true,
+  "canWithdraw": false,
+  "canDeposit": true,
+  "brokered": false,
+  "updateTime": 123456789,
+  "accountType": "SPOT",
+  "balances": [
+    {
+      "asset": "BTC",
+      "free": "1.00000000",
+      "locked": "0.00000000"
+    },
+    {
+      "asset": "USDT",
+      "free": "10000.00000000",
+      "locked": "250.50000000"
+    },
+    {
+      "asset": "BNB",
+      "free": "0.00000000",
+      "locked": "0.00000000"
+    }
+  ],
+  "permissions": [
+    "SPOT"
+  ]
+}

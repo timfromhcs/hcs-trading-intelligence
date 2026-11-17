@@ -1,0 +1,80 @@
+# Local REST API
+
+The service binds to `127.0.0.1:8765` only. The schema is at `/openapi.json`. Requests must carry an accepted loopback `Host` header, and state-changing requests (`POST`) must come from a matching local origin, which blocks cross-site requests from other browser tabs. There is no remote access mode. The API has no generic key export, seed export, arbitrary transfer, arbitrary signing, withdrawal or risk-limit mutation endpoint, and none may be added.
+
+Money and prices are returned as decimal strings. Times are UTC. Endpoints that read stored data work with provider access disabled and return the original observation times.
+
+## Implemented endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/health` | Liveness |
+| GET | `/api/v1/system/status` | Mode, network flag and service status |
+| GET | `/api/v1/system/config` | Non-secret configuration |
+| GET | `/api/v1/system/capabilities` | Capability flags (see README) |
+| GET | `/api/v1/risk/status` | Persisted kill switch and pause state |
+| POST | `/api/v1/risk/pause` | Set the durable execution pause |
+| POST | `/api/v1/risk/resume` | Clear the pause (local operator action) |
+| POST | `/api/v1/system/pause` | Alias of `/api/v1/risk/pause` (brief naming) |
+| POST | `/api/v1/system/resume` | Alias of `/api/v1/risk/resume` (brief naming; local operator action) |
+| GET | `/api/v1/risk/policy` | Read-only risk policy summary |
+| GET | `/api/v1/system/chains` | Per-chain capability matrix derived from the signer report |
+| GET | `/api/v1/market/quotes` | Live BTC/USD book when public data is enabled, otherwise 503 |
+| GET | `/api/v1/market/quotes/history` | Stored quotes, `limit` up to 500 |
+| GET | `/api/v1/market/candles` | Stored candles, `interval`, `limit` |
+| GET | `/api/v1/market/candles.csv` | Same candles as CSV |
+| GET | `/api/v1/market/indicators` | Offline indicators over the latest contiguous candles |
+| POST | `/api/v1/backtests` | Run the SMA research simulation and store a report |
+| POST | `/api/v1/backtests/walk-forward` | Expanding-window evaluation |
+| GET | `/api/v1/backtests/{report_id}` | Retrieve a stored report with integrity check |
+| GET | `/api/v1/news/events` | Stored official release metadata |
+| GET | `/api/v1/macro/series` | Stored macro observations, optional `source` |
+| GET | `/api/v1/portfolio/summary` | Simulated portfolio summary |
+| GET | `/api/v1/paper/account` | Simulated balances |
+| GET | `/api/v1/paper/fills` | Simulated fills |
+| POST | `/api/v1/orders/paper` | Simulated BTC/USD order (needs `--paper-market-data`) |
+| GET | `/api/v1/wallets` | Stored read-only wallet snapshots |
+| GET | `/api/v1/market/assets` | Asset registry |
+| GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote |
+| GET | `/api/v1/news/search` | Search stored news titles and sources, `q` and `limit` |
+| GET | `/api/v1/portfolio/positions` | Simulated positions |
+| GET | `/api/v1/wallets/{wallet_id}/balances` | Stored balance snapshots for one public address |
+| GET | `/api/v1/wallets/{wallet_id}/transactions` | Reports that no history is stored locally |
+| GET | `/api/v1/strategies` | Strategy candidates (alias view of the candidate list) |
+| GET | `/api/v1/strategies/{strategy_id}/metrics` | Latest shadow-run metrics for a candidate |
+| POST | `/api/v1/orders/preview` | Side-effect-free paper order preview using the submission rules |
+| GET | `/api/v1/orders/{order_id}` | One spot order or paper fill by identifier |
+| POST | `/api/v1/orders/live` | Alias of `/api/v1/orders/spot`; same gates and risk path |
+| GET | `/api/v1/orders/spot` | Spot order list and lifecycle states |
+| GET | `/api/v1/orders/spot/{client_order_id}` | One spot order |
+| POST | `/api/v1/orders/spot` | Bounded live spot canary submission, fail-closed, needs live credentials and an authorization |
+| GET | `/api/v1/research/runs` | Local research run history and statistics |
+| GET | `/api/v1/audit/events` | Append-only audit events |
+| GET | `/api/v1/skills` | Registered agent skills |
+| GET | `/api/v1/strategies/candidates` | Strategy candidates and ladder stages |
+| POST | `/api/v1/strategies/candidates` | Register a candidate with saved evidence |
+| POST | `/api/v1/strategies/candidates/{candidate_id}/promote` | Evaluate gates and promote |
+| GET | `/api/v1/strategies/candidates/{candidate_id}/shadow-run` | Latest shadow replay |
+| POST | `/api/v1/strategies/candidates/{candidate_id}/shadow-run` | Run a shadow replay |
+| GET | `/api/v1/strategies/candidates/{candidate_id}/shadow-runs` | Shadow run history |
+| GET | `/api/v1/strategies/candidates/{candidate_id}/canary-approval` | Canary authorization state |
+
+Live order submission passes the same deterministic risk engine as every other path and is off by default.
+
+## Planned endpoints
+
+These come from the product brief and do not exist yet. Calling them returns 404.
+
+| Path | Purpose |
+|---|---|
+| `/api/v1/system/sources` | Data source registry with quotas, terms and attribution |
+
+The brief's pause and resume names (`/api/v1/system/pause`, `/api/v1/system/resume`) and `/api/v1/orders/live` are implemented as aliases of the original paths. Both REST and MCP call the same application service in `src/hcs_trader/application/`. See [ADR 0008](ADR/0008-rest-path-deviation.md).
+
+## Errors
+
+Errors use FastAPI's JSON `detail`. Typical codes: 403 foreign origin, 404 unknown resource, 422 invalid parameter, 503 provider disabled or storage unavailable. Messages do not contain secrets or internal paths.
+
+## Auth scopes
+
+The REST API relies on loopback binding and origin checks. Per-client scopes and tokens exist only for MCP, where tiers are enforced at tool execution (see [MCP](MCP.md)). Streamable HTTP and remote access are not supported.

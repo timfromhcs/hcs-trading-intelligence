@@ -26,6 +26,75 @@ class KeystoreError(SignerError):
     """Keystore encryption, decryption or access failed."""
 
 
+class SignedPlanConflict(SignerPolicyViolation):
+    """The idempotency key or risk decision was already consumed by a signature."""
+
+
+class SigningUnsupported(SignerError):
+    """No chain-valid signing implementation exists for the requested namespace."""
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedRiskDecision:
+    """Read-only view of a persisted risk decision the signer must bind to."""
+
+    decision_id: str
+    plan_hash: str
+    allowed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SigningCapability:
+    """Honest description of what the signer can produce for a chain namespace."""
+
+    namespace: str
+    chain_valid: bool
+    requires_test_only_flag: bool
+    note: str
+
+
+_SIGNING_CAPABILITIES: dict[str, SigningCapability] = {
+    "eip155": SigningCapability(
+        namespace="eip155",
+        chain_valid=True,
+        requires_test_only_flag=False,
+        note=(
+            "Chain-valid EIP-1559 (type 0x02) signing for allowlisted Sepolia "
+            "ERC-20 approve and SwapRouter02 exactInputSingle plans, with "
+            "independent RLP/ABI decoding before key access. Mainnet is disabled "
+            "unless an operator supplies routers and tokens explicitly."
+        ),
+    ),
+    "bip122": SigningCapability(
+        namespace="bip122",
+        chain_valid=False,
+        requires_test_only_flag=True,
+        note=(
+            "Placeholder only: SECP256K1 ECDSA over SHA-256 of a JSON test "
+            "envelope. Not Bitcoin/Litecoin/DigiByte sighash or PSBT signing; "
+            "output is not a broadcastable transaction."
+        ),
+    ),
+    "solana": SigningCapability(
+        namespace="solana",
+        chain_valid=True,
+        requires_test_only_flag=False,
+        note=(
+            "Chain-valid legacy/v0 message signing via sign_solana_transaction "
+            "with independent message decoding, a program allowlist, a sole "
+            "signer/fee payer and fee caps. Jupiter route data is opaque and "
+            "Jupiter mode is off unless the signer's policy enables it. Not yet "
+            "verified on a live cluster."
+        ),
+    ),
+}
+
+
+def signing_capabilities() -> dict[str, SigningCapability]:
+    """Return the per-namespace signing capability report (a fresh copy)."""
+    return dict(_SIGNING_CAPABILITIES)
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedTransactionPlan:
     canonical_chain_id: str
@@ -39,6 +108,7 @@ class ValidatedTransactionPlan:
     destination_id: str
     max_slippage_bps: int
     max_network_fee_base_units: int
+    # EVM: wei per gas (compared with maxPriorityFeePerGas), not a total.
     max_priority_fee_base_units: int
     idempotency_key: str
     risk_decision_id: str

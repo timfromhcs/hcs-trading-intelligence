@@ -1,0 +1,39 @@
+{
+  "manifest_version": "0.3",
+  "name": "hcs-trading-intelligence",
+  "display_name": "HCS Trading Intelligence (read-only)",
+  "version": "0.2.0",
+  "description": "Local read-only research data, indicators, paper portfolio and risk status for HCS Trading Intelligence.",
+  "long_description": "Runs the HCS Trading Intelligence MCP server over stdio from a single self-contained binary. Only read-only research tools are exposed: no order placement, signing, withdrawal or wallet-secret access. All data stays in the local application data directory. This is research software, not investment advice, and it never guarantees profit.",
+  "author": {
+    "name": "HCS.media",
+    "url": "https://github.com/timfromhcs/hcs-trading-intelligence"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/timfromhcs/hcs-trading-intelligence.git"
+  },
+  "homepage": "https://github.com/timfromhcs/hcs-trading-intelligence",
+  "documentation": "https://github.com/timfromhcs/hcs-trading-intelligence/blob/main/docs/MCP.md",
+  "support": "https://github.com/timfromhcs/hcs-trading-intelligence/issues",
+  "license": "Apache-2.0",
+  "keywords": ["trading", "research", "crypto", "paper-trading", "local-first"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/HCS-Trading-Intelligence",
+    "mcp_config": {
+      "command": "${__dirname}/server/HCS-Trading-Intelligence",
+      "args": ["mcp-stdio"],
+      "env": {},
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/HCS-Trading-Intelligence.exe"
+        }
+      }
+    }
+  },
+  "tools_generated": false,
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

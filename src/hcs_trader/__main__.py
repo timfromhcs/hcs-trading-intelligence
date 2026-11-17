@@ -2,15 +2,23 @@
 
 import argparse
 import asyncio
+import json
 import logging
+import os
 import sqlite3
+import sys
 import warnings
 import webbrowser
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from functools import partial
 from getpass import GetPassWarning, getpass
 from importlib.metadata import version
 from pathlib import Path
+from time import monotonic_ns
+from uuid import uuid4
 
 import httpx2
 import uvicorn
@@ -18,6 +26,8 @@ from platformdirs import user_data_path
 from pydantic import TypeAdapter
 
 from hcs_trader.api import LOCAL_PORT, LOOPBACK_HOST, Status, create_app
+from hcs_trader.binance_rehearsal import run_rehearsal
+from hcs_trader.binance_testnet import BinanceSpotTestnetAdapter, HmacSha256Signer
 from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.fred import fetch_fred_cpi
@@ -29,6 +39,10 @@ from hcs_trader.data.kraken import (
 )
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.lifecycle import OrderState
+from hcs_trader.domain.market_data import DataQuality
+from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.domain.wallet import (
     SolanaBalance,
     TransactionObservation,
@@ -42,18 +56,56 @@ from hcs_trader.holdout import (
     freeze_candidate,
     score_holdout,
 )
-from hcs_trader.indicators import calculate_indicators
+from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.kraken_spot import (
+    KrakenExecutionError,
+    KrakenOrderValidation,
+    KrakenSpotAdapter,
+    KrakenSpotBalances,
+    kraken_key_fingerprint,
+    kraken_validate_probe,
+)
+from hcs_trader.live_readiness import (
+    HardLimits,
+    LiveEnableRefused,
+    active_live_policy,
+    blocking_limitations,
+    enable_confirmation_phrase,
+    enable_live,
+    evaluate_checklist,
+    limits_from_mapping,
+    limits_history,
+    live_state,
+    load_context,
+    revoke_live,
+)
 from hcs_trader.local_research import (
     LlamaCppProvider,
     NoneModelProvider,
+    ResearchHistory,
     ResearchReport,
+    ResearchRun,
     research_report,
 )
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
+from hcs_trader.promotion import (
+    CandidateNotFound,
+    PromotionRejected,
+    PromotionStage,
+    execute_shadow_run,
+    list_shadow_runs_for_candidate,
+    promote_strategy_candidate,
+    watch_shadow,
+)
+from hcs_trader.risk import RiskEngine, RiskPolicy, RiskRejected
+from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import WALLET_SNAPSHOT, AuditStore
 from hcs_trader.walk_forward import WalkForwardConfig
 from hcs_trader.wallets import (
+    ETHEREUM_NETWORKS,
+    SOLANA_NETWORKS,
+    UTXO_NETWORK_PROFILES,
     UTXO_NETWORKS,
     LocalWalletRpc,
     UtxoNetwork,
@@ -65,6 +117,43 @@ def local_store() -> AuditStore:
     return AuditStore(
         user_data_path("HCS Trading Intelligence", "HCS.media") / "audit.sqlite"
     )
+
+
+def _require_env(*names: str) -> list[str]:
+    values = [os.environ.get(name, "") for name in names]
+    missing = [n for n, v in zip(names, values, strict=True) if not v]
+    if missing:
+        raise ValueError(f"Missing environment variable(s): {', '.join(missing)}")
+    return values
+
+
+async def rehearse_binance(market: str, output: Path | None) -> Path:
+    """Run the testnet rehearsal and write a redacted evidence JSON file."""
+    key, secret = _require_env("HCS_BINANCE_TESTNET_KEY", "HCS_BINANCE_TESTNET_SECRET")
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
+    logging.getLogger("httpcore2").setLevel(logging.WARNING)
+    async with httpx2.AsyncClient(trust_env=False, follow_redirects=False) as client:
+        adapter = BinanceSpotTestnetAdapter(key, HmacSha256Signer(secret), client)
+        evidence = await run_rehearsal(
+            adapter, market=market, secrets_to_hide=[key, secret]
+        )
+    target = output or (
+        user_data_path("HCS Trading Intelligence", "HCS.media")
+        / "evidence"
+        / f"binance-testnet-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.json"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+    if not evidence["passed"]:
+        raise ValueError(f"Rehearsal did not pass; evidence written to {target}")
+    return target
+
+
+async def probe_kraken_validate() -> dict[str, object]:
+    """One validate=true AddOrder request. Kraken never places the order."""
+    key, secret = _require_env("HCS_KRAKEN_KEY", "HCS_KRAKEN_SECRET")
+    async with httpx2.AsyncClient(trust_env=False, follow_redirects=False) as client:
+        return await kraken_validate_probe(key, secret, client)
 
 
 async def import_candles(interval: int) -> int:
@@ -110,7 +199,11 @@ def _read_fred_key() -> str:
             ) from None
 
 
-def freeze_research(commitment: str, interval: int, config_path: Path | None) -> None:
+def freeze_research(
+    commitment: str, interval: int, config_path: Path | None, limit: int = 1000
+) -> None:
+    if not 1 <= limit <= 1000:
+        raise ValueError("Development candle limit must be between 1 and 1000")
     config = WalkForwardConfig()
     if config_path is not None:
         with config_path.open("rb") as handle:
@@ -120,7 +213,7 @@ def freeze_research(commitment: str, interval: int, config_path: Path | None) ->
         config = TypeAdapter(WalkForwardConfig).validate_json(model)
     store = local_store()
     store.initialize()
-    development = store.candle_history(BTC_USD, SOURCE, interval, limit=1000)
+    development = store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
     candidate = freeze_candidate(development, config, commitment)
     payload = CANDIDATE_JSON.dump_json(candidate).decode("utf-8")
     store.freeze_holdout(commitment, payload)
@@ -149,16 +242,82 @@ async def market_research(
     alias: str | None,
     token_file: Path | None,
     manifest_path: Path | None,
+    *,
+    use_tools: bool = False,
+    schedule: tuple[int, int] | None = None,
 ) -> ResearchReport:
+    if use_tools and (manifest_path is None or token_file is None):
+        raise ValueError("Research tools require a local model manifest and token file")
+    started_at = datetime.now(UTC)
+    started = monotonic_ns()
     store = local_store()
     store.initialize()
     evidence = calculate_indicators(
         store.candle_history(BTC_USD, SOURCE, interval, limit=720)
     )
     if alias is None and token_file is None and manifest_path is None:
-        return await research_report(evidence, NoneModelProvider())
-    if token_file is None or manifest_path is None:
-        raise ValueError("A local model manifest and token file are required together")
+        report = await research_report(evidence, NoneModelProvider())
+    else:
+        if token_file is None or manifest_path is None:
+            raise ValueError(
+                "A local model manifest and token file are required together"
+            )
+        report = await _configured_research(
+            evidence, port, alias, token_file, manifest_path, use_tools=use_tools
+        )
+    next_schedule = None
+    if schedule is not None:
+        every_seconds, failures = schedule
+        failures = min(failures + 1, 5) if report.status == "unavailable" else 0
+        delay = min(every_seconds * 2**failures, 86400)
+        next_schedule = (datetime.now(UTC) + timedelta(seconds=delay), failures)
+    store.record_research_run(
+        ResearchRun(
+            run_id=uuid4().hex,
+            started_at=started_at,
+            duration_ms=(monotonic_ns() - started) // 1_000_000,
+            interval_minutes=interval,
+            status=report.status,
+            model=report.model,
+            model_sha256=report.verified_artifact.sha256
+            if report.verified_artifact
+            else None,
+            prompt_version=report.prompt_version,
+            evidence=report.evidence,
+        ),
+        schedule=next_schedule,
+    )
+    return report
+
+
+async def watch_research(
+    store: AuditStore, run: Callable[[int], Awaitable[ResearchReport]]
+) -> None:
+    store.initialize()
+    with store.research_worker_lock():
+        while True:
+            next_run_at, failures = store.research_schedule()
+            if next_run_at is not None:
+                remaining = (next_run_at - datetime.now(UTC)).total_seconds()
+                if remaining > 0:
+                    await asyncio.sleep(min(remaining, 60))
+                    continue
+            report = await run(failures)
+            print(
+                TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"),
+                flush=True,
+            )
+
+
+async def _configured_research(
+    evidence: Indicators,
+    port: int,
+    alias: str | None,
+    token_file: Path,
+    manifest_path: Path,
+    *,
+    use_tools: bool,
+) -> ResearchReport:
     metadata = verify_model_manifest(manifest_path)
     if alias is not None and alias != metadata.alias:
         raise ValueError("Requested model alias does not match the manifest")
@@ -168,32 +327,208 @@ async def market_research(
         raise ValueError("Local model token file must contain one token")
     async with httpx2.AsyncClient(trust_env=False) as client:
         report = await research_report(
-            evidence, LlamaCppProvider(client, port, metadata.alias, token)
+            evidence,
+            LlamaCppProvider(client, port, metadata.alias, token, use_tools=use_tools),
         )
-    return replace(report, verified_artifact=metadata)
+    return replace(
+        report,
+        verified_artifact=metadata,
+        prompt_version="market-research-tools-1"
+        if use_tools
+        else report.prompt_version,
+    )
 
 
-async def ethereum_balance(address: str, port: int) -> WalletBalance:
+def read_kraken_credentials(credentials_file: Path) -> tuple[str, str]:
+    with credentials_file.open("rb") as handle:
+        content = handle.read(4097)
+    if len(content) > 4096:
+        raise ValueError("Credential file exceeds the supported size")
+    try:
+        credentials = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("Expected a JSON credential object") from None
+    if not isinstance(credentials, dict):
+        raise ValueError("Expected a JSON credential object")
+    key, secret = credentials.get("api_key"), credentials.get("api_secret")
+    if (
+        not isinstance(key, str)
+        or not isinstance(secret, str)
+        or not key
+        or not secret
+        or any(char.isspace() for char in key + secret)
+    ):
+        raise ValueError("Expected api_key and api_secret strings in credential file")
+    return key, secret
+
+
+async def validate_kraken_order(
+    credentials_file: Path, side: SpotSide, quantity: Decimal, price: Decimal
+) -> KrakenOrderValidation:
+    if (
+        not quantity.is_finite()
+        or not price.is_finite()
+        or not Decimal("0.00000001") <= quantity <= 100
+        or not Decimal("0.01") <= price <= 10_000_000
+        or quantity != round(quantity, 8)
+        or price != round(price, 2)
+        or not 10 <= quantity * price <= 1000
+    ):
+        raise ValueError(
+            "Use a BTC/USD limit order of 10–1000 USD with exact precision"
+        )
+    key, secret = read_kraken_credentials(credentials_file)
+    at = datetime.now(UTC)
+    order = SpotOrder(
+        client_order_id=uuid4().hex,
+        order_id=uuid4().hex,
+        venue="kraken",
+        market="BTC/USD",
+        side=side,
+        order_type=SpotOrderType.LIMIT,
+        quantity=quantity,
+        limit_price=price,
+        state=OrderState.PREVIEWED,
+        risk_decision_id="validation-only",
+        created_at=at,
+        updated_at=at,
+    )
     async with httpx2.AsyncClient(trust_env=False) as client:
-        return await LocalWalletRpc(client, port).ethereum_balance(address)
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        return await adapter.validate_spot_order(order, at)
 
 
-async def solana_balance(address: str, port: int) -> SolanaBalance:
+async def read_kraken_balances(
+    credentials_file: Path,
+    *,
+    verify_venue_ledger: bool = False,
+    fill_store: AuditStore | None = None,
+) -> KrakenSpotBalances:
+    key, secret = read_kraken_credentials(credentials_file)
+    expected = fill_store.spot_cash_trades("kraken") if fill_store is not None else None
     async with httpx2.AsyncClient(trust_env=False) as client:
-        return await LocalWalletRpc(client, port).solana_balance(address)
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        if not verify_venue_ledger and fill_store is None:
+            return await adapter.read_spot_balances()
+        snapshot = await adapter.verify_cash_ledger(expected)
+    if fill_store is not None and fill_store.spot_cash_trades("kraken") != expected:
+        raise KrakenExecutionError("Local fill ledger changed during verification")
+    return snapshot
+
+
+async def check_kraken_orders(credentials_file: Path, store: AuditStore) -> int:
+    key, secret = read_kraken_credentials(credentials_file)
+    expected = store.list_open_spot_orders("kraken")
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        await adapter.verify_open_orders(expected)
+    if store.list_open_spot_orders("kraken") != expected:
+        raise KrakenExecutionError(
+            "Local Kraken order ledger changed during verification"
+        )
+    return len(expected)
+
+
+async def sync_kraken_fills(
+    credentials_file: Path, store: AuditStore, client_order_id: str
+) -> int:
+    order = store.get_spot_order(client_order_id)
+    if order is None:
+        raise KrakenExecutionError("Local Kraken order was not found")
+    key, secret = read_kraken_credentials(credentials_file)
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=True)
+        fills = await adapter.read_reconciled_fills(order)
+    return store.import_spot_fills(order, fills)
+
+
+async def submit_canary_order(
+    store: AuditStore,
+    credentials_file: Path,
+    candidate_id: str,
+    side: SpotSide,
+    quantity: Decimal,
+    limit_price: Decimal,
+) -> SpotOrder:
+    policy = require_runtime_live_policy(store)
+    key, secret = read_kraken_credentials(credentials_file)
+    cand = store.get_strategy_candidate(candidate_id)
+    if cand is None:
+        raise CandidateNotFound(f"Candidate '{candidate_id}' does not exist")
+    if cand.stage != PromotionStage.LIVE_CANARY:
+        raise RiskRejected(
+            f"Candidate '{candidate_id}' is in stage "
+            f"'{cand.stage.value}', not 'LIVE_CANARY'"
+        )
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        adapter = KrakenSpotAdapter(key, secret, client, validate_only=False)
+        execution = KrakenSpotExecution(
+            store,
+            adapter,
+            RiskEngine(policy),
+            live_policy=lambda: require_runtime_live_policy(store),
+        )
+        quotes = QuoteService(
+            KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+        )
+        snap = await quotes.snapshot()
+        if snap.quality is not DataQuality.FRESH or snap.quote is None:
+            raise RiskRejected("Spot execution requires a fresh market quote")
+
+        now = datetime.now(UTC)
+        order = SpotOrder(
+            client_order_id=uuid4().hex,
+            order_id=uuid4().hex,
+            venue="kraken",
+            market="BTC/USD",
+            side=side,
+            order_type=SpotOrderType.LIMIT,
+            quantity=quantity,
+            limit_price=limit_price,
+            state=OrderState.PREVIEWED,
+            risk_decision_id="none",
+            created_at=now,
+            updated_at=now,
+        )
+        return await execution.submit(
+            order,
+            snap.quote,
+            candidate_id=candidate_id,
+            strategy_version=cand.version,
+        )
+
+
+async def ethereum_balance(
+    address: str, port: int, network: str = "mainnet"
+) -> WalletBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).ethereum_balance(
+            address, network=network
+        )
+
+
+async def solana_balance(
+    address: str, port: int, network: str = "mainnet-beta"
+) -> SolanaBalance:
+    async with httpx2.AsyncClient(trust_env=False) as client:
+        return await LocalWalletRpc(client, port).solana_balance(
+            address, network=network
+        )
 
 
 async def transaction_status(
     chain: str, identifier: str, port: int | None
 ) -> TransactionObservation:
     async with httpx2.AsyncClient(trust_env=False) as client:
-        if chain == "eth":
+        if chain in {"eth", "eth-sepolia"}:
+            network = "sepolia" if chain == "eth-sepolia" else "mainnet"
             return await LocalWalletRpc(
                 client, 8545 if port is None else port
-            ).ethereum_transaction(identifier)
+            ).ethereum_transaction(identifier, network=network)
+        network = "devnet" if chain == "sol-devnet" else "mainnet-beta"
         return await LocalWalletRpc(
             client, 8899 if port is None else port
-        ).solana_transaction(identifier)
+        ).solana_transaction(identifier, network=network)
 
 
 async def utxo_balance(
@@ -222,6 +557,8 @@ async def serve(
     *,
     data_dir: Path | None = None,
     open_browser: bool = False,
+    kraken_reconcile_credentials: Path | None = None,
+    kraken_live_credentials: Path | None = None,
 ) -> None:
     store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -229,14 +566,38 @@ async def serve(
             QuoteService(
                 KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
             )
-            if market_data or paper_mode
+            if market_data or paper_mode or kraken_live_credentials is not None
             else None
         )
+        recovery = None
+        spot_exec = None
+        if kraken_live_credentials is not None:
+            store.initialize()
+            policy = require_runtime_live_policy(store)
+            key, secret = read_kraken_credentials(kraken_live_credentials)
+            live_adapter = KrakenSpotAdapter(key, secret, client, validate_only=False)
+            spot_exec = KrakenSpotExecution(
+                store,
+                live_adapter,
+                RiskEngine(policy),
+                live_policy=lambda: require_runtime_live_policy(store),
+            )
+            recovery = spot_exec.reconcile_startup
+        elif kraken_reconcile_credentials is not None:
+            key, secret = read_kraken_credentials(kraken_reconcile_credentials)
+            execution = KrakenSpotExecution(
+                store,
+                KrakenSpotAdapter(key, secret, client, validate_only=True),
+                RiskEngine(RiskPolicy()),
+            )
+            recovery = execution.reconcile_startup
         app = create_app(
             store,
             Path(__file__).with_name("ui_assets"),
             quote_service=quotes,
             paper_mode=paper_mode,
+            kraken_reconciliation=recovery,
+            spot_execution=spot_exec,
         )
         config = uvicorn.Config(
             app,
@@ -259,6 +620,100 @@ async def serve(
             await server.serve()
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+KNOWN_LIMITATIONS = _REPO_ROOT / "docs" / "KNOWN_LIMITATIONS.md"
+
+
+def require_runtime_live_policy(store: AuditStore) -> RiskPolicy:
+    if blockers := blocking_limitations(KNOWN_LIMITATIONS):
+        raise RiskRejected("LIVE blocked by known limitations: " + "; ".join(blockers))
+    policy = active_live_policy(store)
+    if policy is None:
+        raise RiskRejected("LIVE requires an active operator enablement")
+    return policy
+
+
+_LIVE_LIMIT_ARGUMENTS = (
+    "max_hot_wallet_usd",
+    "hot_fraction_of_portfolio",
+    "min_notional_usd",
+    "max_notional_usd",
+    "risk_fraction",
+    "max_daily_loss_fraction",
+    "max_drawdown_fraction",
+    "max_positions",
+    "max_spread_bps",
+    "max_slippage_bps",
+)
+
+
+def live_command(arguments: argparse.Namespace) -> int:
+    """Operator LIVE ceremony and readiness commands; returns the exit code."""
+    store = local_store()
+    store.initialize()
+    if arguments.command == "live-status":
+        state = live_state(store)
+        print(
+            json.dumps(
+                {
+                    "mode": state.mode,
+                    "reason": state.reason,
+                    "policy_version": state.policy_version,
+                    "limits": state.limits.to_payload() if state.limits else None,
+                    "blockers": blocking_limitations(KNOWN_LIMITATIONS),
+                    "history": limits_history(store)[:20],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if arguments.command == "live-revoke":
+        print(f"Mode is now {revoke_live(store, operator=arguments.operator).mode}.")
+        return 0
+    raw: dict[str, object] = {
+        "venue": arguments.venue,
+        "market": arguments.market,
+        "cold_reserve_separate_custody": arguments.cold_reserve_separate_custody,
+    }
+    for name in _LIVE_LIMIT_ARGUMENTS:
+        raw[name] = getattr(arguments, name)
+    try:
+        if any(value is None for value in raw.values()):
+            raise ValueError("every hard limit must be set explicitly")
+        if not sys.stdin.isatty():
+            raise ValueError("The LIVE ceremony requires a local interactive terminal")
+        limits: HardLimits = limits_from_mapping(
+            {k: v if isinstance(v, bool | int) else str(v) for k, v in raw.items()}
+        )
+        print(json.dumps(limits.to_payload(), indent=2), file=sys.stderr)
+        print(
+            "Real money can be lost. These limits become the enforced LIVE policy "
+            "and can be revoked with live-revoke.",
+            file=sys.stderr,
+        )
+        phrase = enable_confirmation_phrase(limits)
+        state = enable_live(
+            store,
+            limits,
+            operator=arguments.operator,
+            confirmation=input(f"Type '{phrase}' to enable LIVE: "),
+            limitations_path=KNOWN_LIMITATIONS,
+        )
+    except (LiveEnableRefused, ValueError) as error:
+        print(f"Remaining in PAPER: {error}", file=sys.stderr)
+        return 1
+    print(f"Mode is now {state.mode} (policy {state.policy_version}).")
+    return 0
+
+
+def release_check_command(arguments: argparse.Namespace) -> int:
+    report = evaluate_checklist(
+        load_context(arguments.root, arguments.gates_report, arguments.dist)
+    )
+    print(json.dumps(report.to_json(), indent=2))
+    return 0 if report.v1_allowed else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="HCS Trading Intelligence")
     parser.add_argument("--version", action="version", version=version("hcs-trader"))
@@ -277,6 +732,16 @@ def main() -> None:
     )
     serve_parser.add_argument(
         "--open-browser", action="store_true", help="Open the dashboard"
+    )
+    serve_parser.add_argument(
+        "--kraken-reconcile-credentials",
+        type=Path,
+        help="Opt in to read-only Kraken order recovery on startup",
+    )
+    serve_parser.add_argument(
+        "--kraken-live-credentials",
+        type=Path,
+        help="Opt in to live bounded canary spot execution using Kraken credentials",
     )
     network_mode.add_argument(
         "--paper-market-data",
@@ -303,6 +768,7 @@ def main() -> None:
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
     )
     freeze_parser.add_argument("--config", type=Path)
+    freeze_parser.add_argument("--limit", type=int, default=1000)
     score_parser = commands.add_parser(
         "score-holdout", help="Score a frozen candidate using the committed dataset"
     )
@@ -310,10 +776,168 @@ def main() -> None:
     score_parser.add_argument("file", type=Path)
     commands.add_parser("pause-execution", help="Persist the local execution pause")
     commands.add_parser("resume-execution", help="Clear the local execution pause")
-    commands.add_parser("mcp", help="Run the read-only local MCP server on stdio")
-    research_parser = commands.add_parser(
-        "research-brief", help="Read an offline research brief"
+    for mcp_name in ("mcp", "mcp-stdio"):
+        mcp_parser = commands.add_parser(
+            mcp_name, help="Run the read-only local MCP server on stdio"
+        )
+        mcp_parser.add_argument(
+            "--data-dir", type=Path, help="Use a separate local data directory"
+        )
+    selftest_parser = commands.add_parser(
+        "selftest", help="Run the offline installation self-test"
     )
+    selftest_parser.add_argument("--trip-and-die", type=Path, help=argparse.SUPPRESS)
+    commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
+    revoke_parser = commands.add_parser(
+        "live-revoke", help="Return to PAPER and record the revocation"
+    )
+    revoke_parser.add_argument("--operator", required=True)
+    enable_parser = commands.add_parser(
+        "live-enable", help="Interactive ceremony: set hard limits, enable LIVE"
+    )
+    enable_parser.add_argument("--operator", required=True)
+    enable_parser.add_argument("--venue", default="kraken")
+    enable_parser.add_argument("--market", default="BTC/USD")
+    enable_parser.add_argument("--cold-reserve-separate-custody", action="store_true")
+    for name in _LIVE_LIMIT_ARGUMENTS:
+        enable_parser.add_argument(
+            f"--{name.replace('_', '-')}",
+            dest=name,
+            type=int if name == "max_positions" else str,
+        )
+    check_parser = commands.add_parser(
+        "release-check", help="Evaluate the V1 section 18 checklist from evidence"
+    )
+    check_parser.add_argument("--root", type=Path, default=_REPO_ROOT)
+    check_parser.add_argument("--gates-report", type=Path)
+    check_parser.add_argument("--dist", type=Path)
+    kraken_parser = commands.add_parser(
+        "kraken-validate", help="Validate a BTC/USD limit order without submitting it"
+    )
+    kraken_parser.add_argument("--credentials-file", type=Path, required=True)
+    kraken_parser.add_argument("--side", choices=list(SpotSide), required=True)
+    kraken_parser.add_argument("--quantity", required=True)
+    kraken_parser.add_argument("--limit-price", required=True)
+    balances_parser = commands.add_parser(
+        "kraken-balances", help="Read BTC/USD cash balances and spot order holds"
+    )
+    balances_parser.add_argument("--credentials-file", type=Path, required=True)
+    balances_parser.add_argument(
+        "--verify-local-fills",
+        action="store_true",
+        help="Match Kraken ledger trade entries with recorded local BTC/USD fills",
+    )
+    balances_parser.add_argument("--data-dir", type=Path)
+    balances_parser.add_argument(
+        "--verify-venue-ledger",
+        action="store_true",
+        help="Replay Kraken ledger entries and compare them to current cash balances",
+    )
+    orders_parser = commands.add_parser(
+        "kraken-check-orders",
+        help="Compare Kraken open orders with the local order ledger",
+    )
+    orders_parser.add_argument("--credentials-file", type=Path, required=True)
+    orders_parser.add_argument("--data-dir", type=Path)
+    fills_parser = commands.add_parser(
+        "kraken-sync-fills",
+        help="Fetch and record executions for a reconciled spot order",
+    )
+    fills_parser.add_argument("client_order_id")
+    fills_parser.add_argument("--credentials-file", type=Path, required=True)
+    fills_parser.add_argument("--data-dir", type=Path)
+    allow_canary = commands.add_parser(
+        "spot-canary-allow",
+        help="Locally authorize one Kraken BTC/USD canary candidate",
+    )
+    allow_canary.add_argument("candidate_id")
+    allow_canary.add_argument("--credentials-file", type=Path, required=True)
+    allow_canary.add_argument("--max-notional", required=True)
+    commands.add_parser(
+        "spot-canary-revoke", help="Revoke the local spot canary approval"
+    )
+    canary_submit = commands.add_parser(
+        "spot-canary-submit",
+        help="Submit an authorized spot canary order to Kraken",
+    )
+    canary_submit.add_argument("candidate_id", help="Candidate identifier")
+    canary_submit.add_argument(
+        "--credentials-file", type=Path, required=True, help="Kraken credentials JSON"
+    )
+    canary_submit.add_argument(
+        "--side", choices=list(SpotSide), required=True, help="Order side"
+    )
+    canary_submit.add_argument("--quantity", required=True, help="BTC quantity")
+    canary_submit.add_argument("--limit-price", required=True, help="USD limit price")
+    canary_submit.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_list = commands.add_parser(
+        "strategy-list", help="List registered strategy candidates"
+    )
+    strategy_list.add_argument(
+        "--stage",
+        choices=[s.value for s in PromotionStage],
+        help="Filter candidates by promotion stage",
+    )
+    strategy_list.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_show = commands.add_parser(
+        "strategy-show", help="Show details of a registered strategy candidate"
+    )
+    strategy_show.add_argument("candidate_id", help="Candidate identifier")
+    strategy_show.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_promote = commands.add_parser(
+        "strategy-promote", help="Promote a strategy candidate to the next stage"
+    )
+    strategy_promote.add_argument("candidate_id", help="Candidate identifier")
+    strategy_promote.add_argument(
+        "--stage",
+        choices=[s.value for s in PromotionStage],
+        help="Target promotion stage (defaults to next stage in ladder)",
+    )
+    strategy_promote.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_shadow = commands.add_parser(
+        "strategy-shadow-run",
+        help="Execute and persist a paper shadow replay for a candidate",
+    )
+    strategy_shadow.add_argument("candidate_id", help="Candidate identifier")
+    strategy_shadow.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_shadow_history = commands.add_parser(
+        "strategy-shadow-history",
+        help="Read shadow replay history and metrics for a candidate",
+    )
+    strategy_shadow_history.add_argument("candidate_id", help="Candidate identifier")
+    strategy_shadow_history.add_argument(
+        "--limit", type=int, default=25, help="Max runs to return"
+    )
+    strategy_shadow_history.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    strategy_shadow_watch = commands.add_parser(
+        "strategy-shadow-watch",
+        help="Foreground scheduled observer for forward shadow execution",
+    )
+    strategy_shadow_watch.add_argument(
+        "--candidate-id", help="Optional candidate identifier filter"
+    )
+    strategy_shadow_watch.add_argument(
+        "--every-seconds",
+        type=int,
+        default=3600,
+        help="Observation interval in seconds",
+    )
+    strategy_shadow_watch.add_argument(
+        "--data-dir", type=Path, help="Use a separate local data directory"
+    )
+    research_parser = argparse.ArgumentParser(add_help=False)
     research_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
     )
@@ -321,11 +945,32 @@ def main() -> None:
     research_parser.add_argument("--model-alias")
     research_parser.add_argument("--model-manifest", type=Path)
     research_parser.add_argument("--token-file", type=Path)
+    research_parser.add_argument(
+        "--research-tools",
+        action="store_true",
+        help="Enable one archived indicator tool call",
+    )
+    commands.add_parser(
+        "research-brief", parents=[research_parser], help="Run one local research brief"
+    )
+    watch_parser = commands.add_parser(
+        "research-watch",
+        parents=[research_parser],
+        help="Run local research on a schedule",
+    )
+    watch_parser.add_argument("--every-seconds", type=int, default=3600)
+    history_parser = commands.add_parser(
+        "research-history", help="Read local research run history and statistics"
+    )
+    history_parser.add_argument("--limit", type=int, default=25)
     wallet_parser = commands.add_parser(
         "eth-balance", help="Read ETH balance from a local node"
     )
     wallet_parser.add_argument("address")
     wallet_parser.add_argument("--port", type=int, default=8545)
+    wallet_parser.add_argument(
+        "--network", choices=ETHEREUM_NETWORKS, default="mainnet"
+    )
     wallet_parser.add_argument(
         "--save", action="store_true", help="Save the observed balance locally"
     )
@@ -335,6 +980,9 @@ def main() -> None:
     sol_parser.add_argument("address")
     sol_parser.add_argument("--port", type=int, default=8899)
     sol_parser.add_argument(
+        "--network", choices=SOLANA_NETWORKS, default="mainnet-beta"
+    )
+    sol_parser.add_argument(
         "--save", action="store_true", help="Save the observed balance locally"
     )
     for command, network in UTXO_NETWORKS.items():
@@ -342,27 +990,50 @@ def main() -> None:
             command, help=f"Scan {network.name} UTXOs at a local node"
         )
         node_parser.add_argument("address")
-        node_parser.add_argument("--port", type=int, default=network.port)
+        node_parser.add_argument("--port", type=int)
+        node_parser.add_argument(
+            "--network", choices=UTXO_NETWORK_PROFILES[command], default="mainnet"
+        )
         node_parser.add_argument("--cookie-file", type=Path, required=True)
         node_parser.add_argument(
             "--save", action="store_true", help="Save the observed balance locally"
         )
+    rehearsal_parser = commands.add_parser(
+        "rehearsal-binance",
+        help="Run the Binance Spot TESTNET rehearsal (needs testnet API keys in env)",
+    )
+    rehearsal_parser.add_argument("--market", default="BTC/USDT")
+    rehearsal_parser.add_argument("--output", type=Path)
+    probe_parser = commands.add_parser(
+        "kraken-validate-probe",
+        help="Opt-in Kraken AddOrder validate=true probe (places no order)",
+    )
+    probe_parser.add_argument(
+        "--confirm-validate-only",
+        action="store_true",
+        help="Required: acknowledge this sends one authenticated validate-only call",
+    )
     tx_parser = commands.add_parser(
         "tx-status", help="Read a transaction status from a local node"
     )
-    tx_parser.add_argument("chain", choices=["eth", "sol"])
+    tx_parser.add_argument("chain", choices=["eth", "eth-sepolia", "sol", "sol-devnet"])
     tx_parser.add_argument("identifier")
     tx_parser.add_argument("--port", type=int)
     arguments = parser.parse_args()
     if arguments.command == "serve":
-        asyncio.run(
-            serve(
-                arguments.public_market_data,
-                arguments.paper_market_data,
-                data_dir=arguments.data_dir,
-                open_browser=arguments.open_browser,
+        try:
+            asyncio.run(
+                serve(
+                    arguments.public_market_data,
+                    arguments.paper_market_data,
+                    data_dir=arguments.data_dir,
+                    open_browser=arguments.open_browser,
+                    kraken_reconcile_credentials=arguments.kraken_reconcile_credentials,
+                    kraken_live_credentials=arguments.kraken_live_credentials,
+                )
             )
-        )
+        except (OSError, ValueError, RiskRejected) as error:
+            parser.exit(1, f"{error}\n")
     elif arguments.command == "import-candles":
         try:
             count = asyncio.run(import_candles(arguments.interval))
@@ -394,7 +1065,10 @@ def main() -> None:
         try:
             if arguments.command == "freeze-research":
                 freeze_research(
-                    arguments.commitment, arguments.interval, arguments.config
+                    arguments.commitment,
+                    arguments.interval,
+                    arguments.config,
+                    arguments.limit,
                 )
             else:
                 score_research(arguments.commitment, arguments.file)
@@ -406,44 +1080,447 @@ def main() -> None:
         store.initialize()
         store.set_execution_pause(paused)
         print("Execution paused." if paused else "Execution pause cleared.")
-    elif arguments.command == "mcp":
-        create_mcp_server(local_store().path).run(transport="stdio")
-    elif arguments.command == "research-brief":
+    elif arguments.command in {"live-status", "live-enable", "live-revoke"}:
         try:
-            report = asyncio.run(
-                market_research(
-                    arguments.interval,
-                    arguments.llama_port,
-                    arguments.model_alias,
-                    arguments.token_file,
-                    arguments.model_manifest,
-                )
-            )
+            code = live_command(arguments)
+        except (OSError, sqlite3.Error) as error:
+            parser.exit(1, f"{error}\n")
+        if code:
+            parser.exit(code)
+    elif arguments.command == "release-check":
+        try:
+            code = release_check_command(arguments)
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
-        print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
+        if code:
+            parser.exit(code)
+    elif arguments.command in {"mcp", "mcp-stdio"}:
+        mcp_store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        if arguments.command == "mcp-stdio" and not mcp_store.path.exists():
+            # A fresh install (for example a bundle) needs a migrated database.
+            mcp_store.initialize()
+        create_mcp_server(mcp_store.path).run(transport="stdio")
+    elif arguments.command == "selftest":
+        from hcs_trader import selftest
+
+        if arguments.trip_and_die is not None:
+            selftest.trip_and_die(arguments.trip_and_die)
+        sys.exit(selftest.main())
+    elif arguments.command in {"spot-canary-allow", "spot-canary-revoke"}:
+        store = local_store()
+        try:
+            store.initialize()
+            if arguments.command == "spot-canary-revoke":
+                store.revoke_spot_canary()
+                print("Spot canary authorization cleared.")
+                return
+            if not sys.stdin.isatty():
+                raise ValueError(
+                    "Canary authorization requires a local interactive terminal"
+                )
+            cap = Decimal(arguments.max_notional)
+            if not cap.is_finite() or not 10 <= cap <= 1000 or cap != round(cap, 2):
+                raise ValueError(
+                    "Use a USD cap of 10–1000 with at most two decimal places"
+                )
+            candidate = store.get_strategy_candidate(arguments.candidate_id)
+            if candidate is None or candidate.stage not in {
+                PromotionStage.PAPER_APPROVED,
+                PromotionStage.LIVE_CANARY,
+            }:
+                raise ValueError("A paper-approved strategy candidate is required")
+            key, _ = read_kraken_credentials(arguments.credentials_file)
+            identity = kraken_key_fingerprint(key)
+            print(
+                "Kraken BTC/USD spot limit orders · "
+                f"candidate {candidate.candidate_id} "
+                f"({candidate.version}) · API key fingerprint {identity[:12]} · "
+                f"USD {cap:.2f} per order · 24 hours. Orders can lose money.",
+                file=sys.stderr,
+            )
+            if (
+                input("Type AUTHORIZE to replace the active canary authorization: ")
+                != "AUTHORIZE"
+            ):
+                raise ValueError("Canary authorization was not confirmed")
+            at = datetime.now(UTC)
+            store.authorize_spot_canary(
+                candidate, identity, cap, at, at + timedelta(hours=24)
+            )
+            print("Spot canary authorization saved. Server execution is unchanged.")
+        except InvalidOperation:
+            parser.exit(1, "Notional cap must be a decimal\n")
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, "Canary authorization was not confirmed\n")
+        except (OSError, sqlite3.Error, RiskRejected, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+    elif arguments.command == "spot-canary-submit":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            quantity = Decimal(arguments.quantity)
+            limit_price = Decimal(arguments.limit_price)
+            submitted = asyncio.run(
+                submit_canary_order(
+                    store,
+                    arguments.credentials_file,
+                    arguments.candidate_id,
+                    SpotSide(arguments.side),
+                    quantity,
+                    limit_price,
+                )
+            )
+        except (CandidateNotFound, RiskRejected, KrakenExecutionError) as error:
+            parser.exit(1, f"{error}\n")
+        except (ValueError, InvalidOperation) as error:
+            parser.exit(1, f"Invalid order parameter: {error}\n")
+        except sqlite3.Error as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            json.dumps(
+                {
+                    "client_order_id": submitted.client_order_id,
+                    "order_id": submitted.order_id,
+                    "venue": submitted.venue,
+                    "market": submitted.market,
+                    "side": submitted.side.value,
+                    "order_type": submitted.order_type.value,
+                    "quantity": str(submitted.quantity),
+                    "limit_price": (
+                        str(submitted.limit_price)
+                        if submitted.limit_price is not None
+                        else None
+                    ),
+                    "state": submitted.state.value,
+                    "venue_order_id": submitted.venue_order_id,
+                    "risk_decision_id": submitted.risk_decision_id,
+                },
+                indent=2,
+            )
+        )
+    elif arguments.command == "strategy-list":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            stage = PromotionStage(arguments.stage) if arguments.stage else None
+            candidates = store.list_strategy_candidates(stage=stage)
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(json.dumps([c.model_dump(mode="json") for c in candidates], indent=2))
+    elif arguments.command == "strategy-show":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            candidate = store.get_strategy_candidate(arguments.candidate_id)
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        if candidate is None:
+            parser.exit(1, f"Strategy candidate '{arguments.candidate_id}' not found\n")
+        data = candidate.model_dump(mode="json")
+        shadow = store.latest_shadow_run(candidate.candidate_id)
+        if shadow is not None:
+            data["latest_shadow_run_id"] = shadow[0]
+        data["has_canary_approval"] = store.has_spot_canary_approval(
+            candidate.candidate_id, datetime.now(UTC)
+        )
+        print(json.dumps(data, indent=2))
+    elif arguments.command == "strategy-promote":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            stage = PromotionStage(arguments.stage) if arguments.stage else None
+            updated, verdict = promote_strategy_candidate(
+                store, arguments.candidate_id, stage
+            )
+        except CandidateNotFound as error:
+            parser.exit(1, f"{error}\n")
+        except PromotionRejected as error:
+            parser.exit(1, f"{error}\n")
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            f"Successfully promoted candidate '{updated.candidate_id}' "
+            f"to {updated.stage.value}."
+        )
+        print(
+            json.dumps(
+                {
+                    "candidate": updated.model_dump(mode="json"),
+                    "gate_result": {
+                        "from_stage": verdict.from_stage.value,
+                        "to_stage": verdict.to_stage.value,
+                        "passed": verdict.passed,
+                        "reasons": verdict.reasons,
+                        "evaluated_at": verdict.evaluated_at.isoformat(),
+                    },
+                },
+                indent=2,
+            )
+        )
+    elif arguments.command == "strategy-shadow-run":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            run_id, shadow_result = execute_shadow_run(store, arguments.candidate_id)
+        except CandidateNotFound as error:
+            parser.exit(1, f"{error}\n")
+        except (PaperRejected, PromotionRejected) as error:
+            parser.exit(1, f"{error}\n")
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            json.dumps(
+                {
+                    "candidate_id": arguments.candidate_id,
+                    "run_id": run_id,
+                    "dataset_closed_at": shadow_result.dataset_closed_at.isoformat(),
+                    "net_return": str(shadow_result.net_return),
+                    "max_drawdown": str(shadow_result.max_drawdown),
+                    "fills_count": len(shadow_result.fills),
+                },
+                indent=2,
+            )
+        )
+    elif arguments.command == "strategy-shadow-history":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        try:
+            store.initialize()
+            runs = list_shadow_runs_for_candidate(
+                store, arguments.candidate_id, limit=arguments.limit
+            )
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(
+            json.dumps(
+                [
+                    {
+                        "run_id": run_id,
+                        "evaluated_until": evaluated_until.isoformat(),
+                        "net_return": str(report.net_return),
+                        "max_drawdown": str(report.max_drawdown),
+                        "fills_count": len(report.fills),
+                        "dataset_closed_at": report.dataset_closed_at.isoformat(),
+                    }
+                    for run_id, evaluated_until, report in runs
+                ],
+                indent=2,
+            )
+        )
+    elif arguments.command == "strategy-shadow-watch":
+        store = (
+            local_store()
+            if arguments.data_dir is None
+            else AuditStore(arguments.data_dir / "audit.sqlite")
+        )
+        if not 60 <= arguments.every_seconds <= 86400:
+            parser.exit(
+                1, "Observation interval must be between 60 and 86400 seconds\n"
+            )
+        try:
+            asyncio.run(
+                watch_shadow(
+                    store,
+                    arguments.candidate_id,
+                    every_seconds=arguments.every_seconds,
+                )
+            )
+        except KeyboardInterrupt:
+            return
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+    elif arguments.command == "kraken-sync-fills":
+        path = (
+            local_store().path
+            if arguments.data_dir is None
+            else arguments.data_dir / "audit.sqlite"
+        )
+        if not path.is_file():
+            parser.exit(1, "Local Kraken order ledger was not found\n")
+        try:
+            count = asyncio.run(
+                sync_kraken_fills(
+                    arguments.credentials_file,
+                    AuditStore(path),
+                    arguments.client_order_id,
+                )
+            )
+        except (KrakenExecutionError, sqlite3.Error, OSError, ValueError):
+            parser.exit(1, "Kraken executions could not be verified and recorded\n")
+        print(json.dumps({"recorded_fills": count}))
+    elif arguments.command == "kraken-check-orders":
+        path = (
+            local_store().path
+            if arguments.data_dir is None
+            else arguments.data_dir / "audit.sqlite"
+        )
+        try:
+            count = asyncio.run(
+                check_kraken_orders(
+                    arguments.credentials_file, AuditStore(path, read_only=True)
+                )
+            )
+        except (KrakenExecutionError, sqlite3.Error, OSError, ValueError):
+            parser.exit(
+                1, "Kraken open orders could not be verified against the local ledger\n"
+            )
+        print(json.dumps({"matched_open_orders": count}))
+    elif arguments.command == "kraken-balances":
+        fill_store = None
+        if arguments.verify_local_fills:
+            path = (
+                local_store().path
+                if arguments.data_dir is None
+                else arguments.data_dir / "audit.sqlite"
+            )
+            fill_store = AuditStore(path, read_only=True)
+        try:
+            cash_snapshot = asyncio.run(
+                read_kraken_balances(
+                    arguments.credentials_file,
+                    verify_venue_ledger=arguments.verify_venue_ledger,
+                    fill_store=fill_store,
+                )
+            )
+        except (KrakenExecutionError, sqlite3.Error):
+            parser.exit(1, "Kraken BTC/USD cash balances could not be verified\n")
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        balances = {
+            asset: {
+                "total": str(balance.total),
+                "held": str(balance.held),
+                "available": str(balance.available),
+            }
+            for asset, balance in (
+                ("BTC", cash_snapshot.btc),
+                ("USD", cash_snapshot.usd),
+            )
+        }
+        print(
+            json.dumps(
+                {
+                    "observed_at": cash_snapshot.observed_at.isoformat(),
+                    "balances": balances,
+                }
+            )
+        )
+    elif arguments.command == "kraken-validate":
+        try:
+            validation = asyncio.run(
+                validate_kraken_order(
+                    arguments.credentials_file,
+                    SpotSide(arguments.side),
+                    Decimal(arguments.quantity),
+                    Decimal(arguments.limit_price),
+                )
+            )
+        except InvalidOperation:
+            parser.exit(1, "Quantity and limit price must be decimals\n")
+        except KrakenExecutionError:
+            parser.exit(1, "Kraken did not confirm validation-only\n")
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(KrakenOrderValidation).dump_json(validation).decode("utf-8"))
+    elif arguments.command in {"research-brief", "research-watch"}:
+        run = partial(
+            market_research,
+            arguments.interval,
+            arguments.llama_port,
+            arguments.model_alias,
+            arguments.token_file,
+            arguments.model_manifest,
+            use_tools=arguments.research_tools,
+        )
+        try:
+            if arguments.command == "research-watch":
+                if not 60 <= arguments.every_seconds <= 86400:
+                    raise ValueError(
+                        "Research period must be between 60 and 86400 seconds"
+                    )
+                asyncio.run(
+                    watch_research(
+                        local_store(),
+                        lambda failures: run(
+                            schedule=(arguments.every_seconds, failures)
+                        ),
+                    )
+                )
+            else:
+                store = local_store()
+                store.initialize()
+                with store.research_worker_lock():
+                    report = asyncio.run(run())
+                print(TypeAdapter(ResearchReport).dump_json(report).decode("utf-8"))
+        except KeyboardInterrupt:
+            return
+        except (OSError, sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+    elif arguments.command == "research-history":
+        store = local_store()
+        try:
+            store.initialize()
+            history = store.research_history(arguments.limit)
+        except (sqlite3.Error, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(TypeAdapter(ResearchHistory).dump_json(history).decode("utf-8"))
     elif arguments.command in {"eth-balance", "sol-balance", *UTXO_NETWORKS}:
         try:
             snapshot: WalletSnapshot
             if arguments.command == "eth-balance":
                 snapshot = asyncio.run(
-                    ethereum_balance(arguments.address, arguments.port)
+                    ethereum_balance(
+                        arguments.address, arguments.port, arguments.network
+                    )
                 )
             elif arguments.command == "sol-balance":
                 snapshot = asyncio.run(
-                    solana_balance(arguments.address, arguments.port)
+                    solana_balance(arguments.address, arguments.port, arguments.network)
                 )
             else:
+                network = UTXO_NETWORK_PROFILES[arguments.command][arguments.network]
                 snapshot = asyncio.run(
                     utxo_balance(
                         arguments.address,
-                        arguments.port,
+                        network.port if arguments.port is None else arguments.port,
                         arguments.cookie_file,
-                        UTXO_NETWORKS[arguments.command],
+                        network,
                     )
                 )
             if arguments.save:
                 store = local_store()
+                if arguments.network in {"sepolia", "devnet", "regtest", "signet"}:
+                    profile = arguments.network
+                    if arguments.command in {"ltc-balance", "dgb-balance"}:
+                        profile = f"{network.name.lower()}-{profile}"
+                    store = AuditStore(store.path.with_name(f"wallet-{profile}.sqlite"))
                 store.initialize()
                 store.save_wallet_snapshot(snapshot)
         except sqlite3.Error:
@@ -451,6 +1528,20 @@ def main() -> None:
         except (OSError, WalletUnavailable, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(WALLET_SNAPSHOT.dump_json(snapshot).decode("utf-8"))
+    elif arguments.command == "rehearsal-binance":
+        try:
+            written = asyncio.run(rehearse_binance(arguments.market, arguments.output))
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Rehearsal passed; evidence written to {written}")
+    elif arguments.command == "kraken-validate-probe":
+        if not arguments.confirm_validate_only:
+            parser.exit(2, "Pass --confirm-validate-only to run the probe\n")
+        try:
+            probe = asyncio.run(probe_kraken_validate())
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print(json.dumps(probe, sort_keys=True))
     elif arguments.command == "tx-status":
         try:
             observation = asyncio.run(

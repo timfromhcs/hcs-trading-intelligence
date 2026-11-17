@@ -6,12 +6,32 @@ import os
 import re
 import shutil
 import subprocess  # noqa: S404
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.client import HTTPConnection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 
 _NAME = "HCS-Trading-Intelligence"
+
+
+@contextmanager
+def _temporary_root(*, wait_for_extracted_files: bool) -> Iterator[Path]:
+    temporary = TemporaryDirectory(prefix="hcs-desktop-")
+    try:
+        yield Path(temporary.name)
+    finally:
+        deadline = monotonic() + 10
+        while True:
+            try:
+                temporary.cleanup()
+                break
+            except PermissionError:
+                # Windows may release the child's DLL mappings after taskkill returns.
+                if not wait_for_extracted_files or monotonic() >= deadline:
+                    raise
+                sleep(0.25)
 
 
 def _read(path: str) -> bytes:
@@ -52,6 +72,8 @@ def _verify(process: subprocess.Popen[bytes], data: Path) -> None:
         or status["network_enabled"]
     ):
         raise RuntimeError("Unexpected desktop startup capabilities")
+    if "/api/v1/health" not in json.loads(_read("/openapi.json")).get("paths", {}):
+        raise RuntimeError("Desktop OpenAPI schema is unavailable")
     html = _read("/").decode("utf-8")
     script = re.search(r'src="(/assets/[^"]+\.js)"', html)
     if (
@@ -62,19 +84,32 @@ def _verify(process: subprocess.Popen[bytes], data: Path) -> None:
         raise RuntimeError("Desktop dashboard assets are unavailable")
 
 
+def _selftest(executable: Path) -> None:
+    """Run the frozen binary's own offline selftest; any failed check is fatal."""
+    result = subprocess.run(  # noqa: S603
+        [str(executable), "selftest"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    print(result.stdout, end="")
+    if result.returncode != 0:
+        print(result.stderr)
+        raise RuntimeError("Frozen selftest failed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--onefile", action="store_true")
     args = parser.parse_args()
-    if args.onefile and os.name != "nt":
-        parser.error("The single-file build currently targets Windows")
     suffix = ".exe" if os.name == "nt" else ""
     layout = Path("dist") / ("desktop-single" if args.onefile else "desktop")
     program_dir = layout if args.onefile else layout / _NAME
     executable = (program_dir / (_NAME + suffix)).resolve()
-    with TemporaryDirectory(prefix="hcs-desktop-") as temporary:
-        root = Path(temporary)
-        data = root / "app data"
+    _selftest(executable)
+    with _temporary_root(wait_for_extracted_files=args.onefile) as root:
+        data = root / "Données héhé 数据" / "app data"
         log = root / "desktop.log"
         with log.open("wb") as output:
             process = subprocess.Popen(  # noqa: S603
@@ -95,7 +130,7 @@ def main() -> None:
             raise RuntimeError(f"{error}\n{log.read_text(errors='replace')}") from error
         finally:
             if process.poll() is None:
-                if args.onefile:
+                if args.onefile and os.name == "nt":
                     # The Windows bootloader runs a child containing the Python runtime.
                     taskkill = shutil.which("taskkill")
                     if taskkill is None:

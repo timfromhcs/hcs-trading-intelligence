@@ -28,6 +28,7 @@ interface SimulatedFill {
 interface BacktestResult {
   strategy: string;
   dataset_sha256: string;
+  config: { fast_period: number; slow_period: number };
   candle_count: number;
   ending_cash: string;
   ending_quantity: string;
@@ -36,6 +37,14 @@ interface BacktestResult {
   max_drawdown: string;
   total_fees: string;
   fills: SimulatedFill[];
+}
+
+interface WalkForwardReport {
+  folds: unknown[];
+  holdout: {
+    selection_dataset_sha256: string;
+    strategy: BacktestResult;
+  };
 }
 
 export interface StrategyCandidate {
@@ -92,6 +101,15 @@ export function StrategyLab() {
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
+  const [includeWalkForward, setIncludeWalkForward] = useState(false);
+  const [walkForward, setWalkForward] = useState<{
+    id: string;
+    result: WalkForwardReport;
+  } | null>(null);
+  const [holdoutCommitment, setHoldoutCommitment] = useState("");
+  const normalizedCommitment = holdoutCommitment.trim().toLowerCase();
+  const invalidCommitment =
+    normalizedCommitment !== "" && !/^[a-f0-9]{64}$/.test(normalizedCommitment);
 
   const [candidates, setCandidates] = useState<StrategyCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -99,6 +117,7 @@ export function StrategyLab() {
   const [candidateActionError, setCandidateActionError] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
   const [promotingId, setPromotingId] = useState<string | null>(null);
+  const [runningShadowId, setRunningShadowId] = useState<string | null>(null);
 
   async function loadCandidates() {
     setLoadingCandidates(true);
@@ -143,17 +162,21 @@ export function StrategyLab() {
     setBacktestError(null);
     setBacktestResult(null);
     setReportId(null);
+    setWalkForward(null);
 
     try {
-      const response = await fetch("/api/v1/backtests?interval=60", {
+      const holdoutCandles = includeWalkForward ? 100 : 0;
+      const simulation = {
+        fast_period: fastPeriod,
+        slow_period: slowPeriod,
+        starting_cash: "10000",
+        allocation: "0.10",
+      };
+      const response = await fetch(
+        `/api/v1/backtests?interval=60&holdout_candles=${holdoutCandles}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fast_period: fastPeriod,
-          slow_period: slowPeriod,
-          starting_cash: "10000",
-          allocation: "0.10",
-        }),
+        body: JSON.stringify(simulation),
       });
 
       if (!response.ok) {
@@ -161,13 +184,34 @@ export function StrategyLab() {
         throw new Error(err.detail || "Backtest execution failed");
       }
 
-      const loc = response.headers.get("Location");
-      if (loc) {
-        const id = loc.split("/").pop();
-        if (id) setReportId(id);
-      }
-
       const result = (await response.json()) as BacktestResult;
+      const id = response.headers.get("Location")?.split("/").pop();
+      if (!id) throw new Error("Backtest report ID is unavailable");
+      if (includeWalkForward) {
+        const walkResponse = await fetch("/api/v1/backtests/walk-forward?interval=60", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            training_candles: Math.max(200, slowPeriod + 1),
+            test_candles: 50,
+            holdout_candles: holdoutCandles,
+            candidates: [{ fast: fastPeriod, slow: slowPeriod }],
+            simulation,
+          }),
+        });
+        if (!walkResponse.ok) {
+          const error = await walkResponse.json().catch(() => ({}));
+          throw new Error(error.detail || "Walk-forward evaluation failed");
+        }
+        const walkId = walkResponse.headers.get("Location")?.split("/").pop();
+        const walkResult = (await walkResponse.json()) as WalkForwardReport;
+        if (!walkId) throw new Error("Walk-forward report ID is unavailable");
+        if (walkResult.holdout.selection_dataset_sha256 !== result.dataset_sha256) {
+          throw new Error("Candle history changed during evaluation. Run both reports again.");
+        }
+        setWalkForward({ id: walkId, result: walkResult });
+      }
+      setReportId(id);
       setBacktestResult(result);
     } catch (err: unknown) {
       setBacktestError(err instanceof Error ? err.message : "Backtest execution error");
@@ -177,7 +221,8 @@ export function StrategyLab() {
   }
 
   async function handleRegisterCandidate() {
-    if (!backtestResult) return;
+    if (!backtestResult || !reportId || (walkForward && invalidCommitment)) return;
+    const { fast_period: fast, slow_period: slow } = backtestResult.config;
     setRegistering(true);
     setCandidateActionError(null);
     setCandidateActionMessage(null);
@@ -186,9 +231,17 @@ export function StrategyLab() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: `SMA Crossover (${fastPeriod}/${slowPeriod})`,
+          name: `SMA Crossover (${fast}/${slow})`,
           version: "1.0.0",
-          parameters: { fast: fastPeriod, slow: slowPeriod },
+          parameters: {
+            fast,
+            slow,
+            backtest_report_id: reportId,
+            ...(walkForward && { walk_forward_report_id: walkForward.id }),
+            ...(walkForward && normalizedCommitment && {
+              holdout_commitment: normalizedCommitment,
+            }),
+          },
           dataset_hash: backtestResult.dataset_sha256,
         }),
       });
@@ -205,6 +258,30 @@ export function StrategyLab() {
     }
   }
 
+  async function handleRunShadow(candidate: StrategyCandidate) {
+    setRunningShadowId(candidate.candidate_id);
+    setCandidateActionError(null);
+    setCandidateActionMessage(null);
+    try {
+      const res = await fetch(`/api/v1/strategies/candidates/${candidate.candidate_id}/shadow-run`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Shadow replay failed" }));
+        throw new Error(err.detail || "Failed to execute shadow replay");
+      }
+      const data = (await res.json()) as { run_id: string; report: BacktestResult };
+      setCandidateActionMessage(
+        `Paper shadow replay completed (${data.report.fills.length} fills observed, run ID: ${data.run_id.slice(0, 10)}…)!`
+      );
+      await loadCandidates();
+    } catch (err: unknown) {
+      setCandidateActionError(err instanceof Error ? err.message : "Error executing shadow replay");
+    } finally {
+      setRunningShadowId(null);
+    }
+  }
+
   async function handlePromoteCandidate(candidate: StrategyCandidate) {
     const next = getNextStage(candidate.stage);
     if (!next) return;
@@ -217,7 +294,6 @@ export function StrategyLab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_stage: next,
-          shadow_fills: 5,
         }),
       });
       if (!res.ok) {
@@ -352,8 +428,16 @@ export function StrategyLab() {
           </div>
 
           <div className="form-group form-actions">
+            <label>
+              <input
+                type="checkbox"
+                checked={includeWalkForward}
+                onChange={(e) => setIncludeWalkForward(e.target.checked)}
+              />{" "}
+              Include walk-forward evaluation
+            </label>
             <button type="submit" disabled={backtestRunning}>
-              {backtestRunning ? "Simulating…" : "Run Backtest"}
+              {backtestRunning ? "Simulating…" : includeWalkForward ? "Run Both Reports" : "Run Backtest"}
             </button>
           </div>
         </form>
@@ -400,7 +484,7 @@ export function StrategyLab() {
 
               <div>
                 <dt>Simulated Fills</dt>
-                <dd>{backtestResult.fills.length} trades</dd>
+                <dd>{backtestResult.fills.length}</dd>
               </div>
             </div>
 
@@ -410,12 +494,38 @@ export function StrategyLab() {
               </div>
             )}
 
+            {walkForward && (
+              <>
+                <p>
+                  Walk-forward: {walkForward.result.folds.length} folds and{" "}
+                  simulated fills in the final 100 candles:{" "}
+                  {walkForward.result.holdout.strategy.fills.length}.
+                </p>
+                <div className="form-group">
+                  <label htmlFor="holdout-commitment">Separate holdout SHA-256 (optional)</label>
+                  <input
+                    id="holdout-commitment"
+                    value={holdoutCommitment}
+                    onChange={(e) => setHoldoutCommitment(e.target.value)}
+                    aria-invalid={invalidCommitment}
+                    aria-describedby="holdout-commitment-help"
+                    spellCheck={false}
+                  />
+                  <small id="holdout-commitment-help">
+                    {invalidCommitment
+                      ? "Enter a 64-character hexadecimal hash."
+                      : "Paper Shadow requires this holdout to be frozen and scored through the CLI."}
+                  </small>
+                </div>
+              </>
+            )}
+
             <div className="candidate-register-bar">
               <button
                 type="button"
                 className="btn-register"
                 onClick={handleRegisterCandidate}
-                disabled={registering}
+                disabled={registering || !reportId || (walkForward !== null && invalidCommitment)}
               >
                 {registering ? "Registering…" : "Register Strategy as Promotion Candidate"}
               </button>
@@ -491,17 +601,31 @@ export function StrategyLab() {
                         Version: {cand.version} · Dataset: <code>{cand.dataset_hash.slice(0, 12)}…</code>
                       </span>
                     </div>
-                    <span className={`stage-badge stage-${cand.stage.toLowerCase()}`}>
-                      {cand.stage}
-                    </span>
+                    <div className="candidate-badges">
+                      {cand.stage === "LIVE_CANARY" && (
+                        <span className="badge-canary-active">Canary Active</span>
+                      )}
+                      <span className={`stage-badge stage-${cand.stage.toLowerCase()}`}>
+                        {cand.stage}
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="stage-steps-bar" aria-label="Promotion Progress">
+                  <div
+                    className="stage-steps-bar"
+                    role="progressbar"
+                    aria-label={`Promotion progress: Stage ${stageIndex + 1} of ${PROMOTION_LADDER.length} (${cand.stage})`}
+                    aria-valuenow={stageIndex + 1}
+                    aria-valuemin={1}
+                    aria-valuemax={PROMOTION_LADDER.length}
+                    aria-valuetext={`Stage ${stageIndex + 1} of ${PROMOTION_LADDER.length}: ${cand.stage}`}
+                  >
                     {PROMOTION_LADDER.map((stg, i) => (
                       <div
                         key={stg}
                         className={`step-dot ${i <= stageIndex ? "step-active" : ""}`}
                         title={`Stage ${i + 1}: ${stg}`}
+                        aria-hidden="true"
                       />
                     ))}
                   </div>
@@ -510,20 +634,34 @@ export function StrategyLab() {
                     <div className="candidate-params muted">
                       Params: <code>{JSON.stringify(cand.parameters)}</code>
                     </div>
-                    {nextStage ? (
-                      <button
-                        type="button"
-                        className="btn-promote"
-                        onClick={() => handlePromoteCandidate(cand)}
-                        disabled={promotingId === cand.candidate_id}
-                      >
-                        {promotingId === cand.candidate_id
-                          ? "Evaluating Gate…"
-                          : `Promote to ${nextStage}`}
-                      </button>
-                    ) : (
-                      <span className="max-promoted">Fully Promoted (LIVE_BOUNDED)</span>
-                    )}
+                    <div className="candidate-actions">
+                      {cand.stage === "PAPER_SHADOW" && (
+                        <button
+                          type="button"
+                          className="btn-shadow-run"
+                          onClick={() => handleRunShadow(cand)}
+                          disabled={runningShadowId === cand.candidate_id}
+                        >
+                          {runningShadowId === cand.candidate_id
+                            ? "Replaying Shadow…"
+                            : "Run Paper Shadow Replay"}
+                        </button>
+                      )}
+                      {nextStage ? (
+                        <button
+                          type="button"
+                          className="btn-promote"
+                          onClick={() => handlePromoteCandidate(cand)}
+                          disabled={promotingId === cand.candidate_id}
+                        >
+                          {promotingId === cand.candidate_id
+                            ? "Evaluating Gate…"
+                            : `Promote to ${nextStage}`}
+                        </button>
+                      ) : (
+                        <span className="max-promoted">Fully Promoted (LIVE_BOUNDED)</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               );

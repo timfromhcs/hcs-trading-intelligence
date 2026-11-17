@@ -1,0 +1,14 @@
+# Security-sensitive paths require review by the maintainer (AGENTS.md section 15.5).
+# Enforcement needs branch protection with "Require review from Code Owners".
+/src/hcs_trader/risk.py            @timfromhcs
+/src/hcs_trader/signing.py         @timfromhcs
+/src/hcs_trader/domain/signing.py  @timfromhcs
+/src/hcs_trader/keystore.py        @timfromhcs
+/src/hcs_trader/wallets.py         @timfromhcs
+/src/hcs_trader/kraken_spot.py     @timfromhcs
+/src/hcs_trader/spot_execution.py  @timfromhcs
+/src/hcs_trader/jupiter_swap.py    @timfromhcs
+/src/hcs_trader/evm_swap.py        @timfromhcs
+/src/hcs_trader/mcp_server.py      @timfromhcs
+/src/hcs_trader/storage.py         @timfromhcs
+/.github/                          @timfromhcs

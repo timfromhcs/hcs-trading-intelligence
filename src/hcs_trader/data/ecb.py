@@ -8,6 +8,7 @@ from io import StringIO
 
 import httpx2
 
+from hcs_trader.data.provider import SourceRateLimited, parse_retry_after
 from hcs_trader.domain.macro import MacroObservation
 
 SOURCE = "ecb-sdmx"
@@ -19,6 +20,14 @@ _MAX_BYTES = 65_536
 
 class MacroUnavailable(Exception):
     """The macro source did not provide usable observations."""
+
+
+class MacroRateLimited(MacroUnavailable, SourceRateLimited):
+    """The source answered 429/503; ``retry_after`` carries the requested pause."""
+
+    def __init__(self, retry_after: float | None) -> None:
+        super().__init__("Macro source is rate limited")
+        self.retry_after = retry_after
 
 
 async def fetch_ecb_rates(client: httpx2.AsyncClient) -> list[MacroObservation]:
@@ -36,6 +45,10 @@ async def fetch_ecb_rates(client: httpx2.AsyncClient) -> list[MacroObservation]:
                 follow_redirects=False,
             ) as response,
         ):
+            if response.status_code in (429, 503):
+                raise MacroRateLimited(
+                    parse_retry_after(response.headers.get("retry-after"))
+                )
             response.raise_for_status()
             payload = bytearray()
             async for chunk in response.aiter_bytes():

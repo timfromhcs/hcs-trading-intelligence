@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.timfromhcs/hcs-trading-intelligence",
+  "description": "Local read-only trading research MCP server: indicators, paper portfolio, risk status.",
+  "repository": {
+    "url": "https://github.com/timfromhcs/hcs-trading-intelligence",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v0.2.0/HCS-Trading-Intelligence-0.2.0-windows-x64.mcpb",
+      "fileSha256": "${SHA256_WINDOWS_X64}",
+      "transport": { "type": "stdio" }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v0.2.0/HCS-Trading-Intelligence-0.2.0-macos-arm64.mcpb",
+      "fileSha256": "${SHA256_MACOS_ARM64}",
+      "transport": { "type": "stdio" }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v0.2.0/HCS-Trading-Intelligence-0.2.0-linux-x64.mcpb",
+      "fileSha256": "${SHA256_LINUX_X64}",
+      "transport": { "type": "stdio" }
+    }
+  ]
+}

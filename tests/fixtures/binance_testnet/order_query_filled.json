@@ -1,0 +1,22 @@
+{
+  "symbol": "BTCUSDT",
+  "orderId": 28,
+  "orderListId": -1,
+  "clientOrderId": "hcs-cl-001",
+  "price": "50000.00000000",
+  "origQty": "0.01000000",
+  "executedQty": "0.01000000",
+  "cummulativeQuoteQty": "500.00000000",
+  "status": "FILLED",
+  "timeInForce": "GTC",
+  "type": "LIMIT",
+  "side": "BUY",
+  "selfTradePreventionMode": "NONE",
+  "stopPrice": "0.00000000",
+  "icebergQty": "0.00000000",
+  "time": 1499827319559,
+  "updateTime": 1499827319900,
+  "isWorking": false,
+  "workingTime": 1499827319559,
+  "origQuoteOrderQty": "0.00000000"
+}

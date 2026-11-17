@@ -82,6 +82,12 @@ export function PaperPortfolio() {
             <div><dt>Simulated fees</dt><dd>{portfolio.account.balance.fees} USD</dd></div>
             <div><dt>Realized P&amp;L</dt><dd>{portfolio.account.balance.realized_pnl} USD</dd></div>
           </dl>
+          <ul className="paper-notes muted" aria-label="Accounting notes">
+            <li>Accounting value is simulated and denominated in USD (reporting currency). It is not a wallet balance.</li>
+            <li>Unrealized P&amp;L: unavailable, because the account endpoint carries no mark price.</li>
+            <li>Hot/cold split: this paper account holds no custody. A cold reserve is never tracked by this application.</li>
+            <li>Fiat USD and stablecoins are distinct assets and are not combined here.</li>
+          </ul>
           <h3 className="paper-fills-heading">Recent simulated fills</h3>
           {portfolio.account.fills.length === 0 ? <p className="muted">No fills recorded.</p> : (
             <ul className="paper-fills">

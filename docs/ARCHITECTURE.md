@@ -29,7 +29,7 @@ HCS Trading Intelligence is built as a local-first, modular monolith designed fo
                                     v
 +------------------------------------------------------------------------+
 |                   SQLite Audit & State Store (WAL)                     |
-|           (Schema v12, versioned migrations, online backups)           |
+|           (Versioned migrations, online backups)           |
 +------------------------------------------------------------------------+
                                     |
           +-------------------------+-------------------------+
@@ -55,3 +55,53 @@ HCS Trading Intelligence is built as a local-first, modular monolith designed fo
 6. **Portable Agent Skills:** Structured, versioned `SKILL.md` specifications in `src/hcs_trader/skills/` (`market-research`, `strategy-lab`, `portfolio-operator`, `risk-auditor`, `release-engineer`) define strict capability tiers, trusted/untrusted data boundaries, ordered workflows, stop conditions, and explicit forbidden actions.
 
 
+
+## Layering
+
+```mermaid
+flowchart TD
+  subgraph Transports
+    REST[REST API]
+    MCP[MCP stdio, read-only]
+    CLI[CLI]
+    UI[Dashboard]
+  end
+  UI --> REST
+  REST --> APP[Use cases: quotes, research, paper, orders, strategies]
+  MCP --> APP
+  CLI --> APP
+  APP --> DOMAIN[Domain: assets, money, order lifecycle]
+  APP --> RISK[Risk engine and kill switch]
+  APP --> STORE[(SQLite)]
+  APP --> DATA[Provider adapters]
+  RISK -.no model or network imports.-> DOMAIN
+  RISK --> SIGNER[Isolated signer]
+  SIGNER --> VENUES[Execution adapters]
+```
+
+Transports hold no business logic. The risk engine imports neither a model client nor a network adapter, and the signer is not reachable from MCP or from a model.
+
+## Trading and research loop
+
+```mermaid
+flowchart TD
+  A[Public data ingestion] --> B[Normalize and timestamp]
+  B --> C{Fresh and valid?}
+  C -->|no| N[NO_TRADE and alert]
+  C -->|yes| D[Indicators]
+  D --> E[Deterministic strategy]
+  D --> F[Optional local model commentary]
+  E --> G[Signal proposal]
+  F --> G
+  G --> H{Risk engine}
+  H -->|reject| N
+  H -->|approve| I[Order or transaction plan]
+  I --> J{Signer decodes and checks plan hash}
+  J -->|fail| N
+  J -->|pass| K[Submit once with idempotency key]
+  K --> L[Reconcile and persist]
+```
+
+Only the Kraken BTC/USD canary is wired to the submit step, and it needs credentials and an expiring operator authorization. Everything else ends at paper or preview. A model can add commentary but cannot approve a step.
+
+Decisions behind this layout are recorded in the [ADRs](ADR/0001-foundation.md), starting with [signing](ADR/0004-isolated-signer.md) and the [risk engine](ADR/0006-deterministic-risk-engine.md).

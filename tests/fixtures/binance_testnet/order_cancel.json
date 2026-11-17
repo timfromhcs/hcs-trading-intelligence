@@ -1,0 +1,17 @@
+{
+  "symbol": "BTCUSDT",
+  "orderId": 28,
+  "orderListId": -1,
+  "clientOrderId": "cancel-hcs-cl-001",
+  "price": "50000.00000000",
+  "origQty": "0.01000000",
+  "executedQty": "0.00000000",
+  "cummulativeQuoteQty": "0.00000000",
+  "status": "CANCELED",
+  "timeInForce": "GTC",
+  "type": "LIMIT",
+  "side": "BUY",
+  "selfTradePreventionMode": "NONE",
+  "origClientOrderId": "hcs-cl-001",
+  "transactTime": 1684804350068
+}

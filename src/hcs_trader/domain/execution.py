@@ -1,5 +1,6 @@
 """Domain types for spot order execution, state lifecycle, and venue mapping."""
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +20,39 @@ class SpotSide(StrEnum):
 class SpotOrderType(StrEnum):
     LIMIT = "limit"
     MARKET = "market"
+
+
+@dataclass(frozen=True, slots=True)
+class SpotCashTrade:
+    """Local BTC/USD cash deltas keyed externally by the venue execution ID."""
+
+    btc: Decimal
+    usd: Decimal
+    usd_fee: Decimal
+    btc_fee: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True)
+class SpotFill:
+    client_order_id: str
+    fill_id: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal
+    filled_at: datetime
+    cash_booking: SpotCashTrade | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SpotCanaryApproval:
+    candidate_id: str
+    candidate_version: str
+    dataset_hash: str
+    key_fingerprint: str
+    max_notional: Decimal
+    expires_at: datetime
+    stage: str
+    active: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,3 +123,27 @@ class SpotOrder:
             average_price=average_price or self.average_price,
             fee=fee or self.fee,
         )
+
+
+def spot_order_plan_hash(order: SpotOrder) -> str:
+    """Canonical SHA-256 over the economically relevant order fields.
+
+    Excludes lifecycle state, timestamps and the risk decision id so the hash
+    computed before risk evaluation stays stable through the state machine,
+    while any change to venue, market, side, type, size, price or the client
+    order id produces a different hash.
+    """
+    limit = "none" if order.limit_price is None else str(order.limit_price.normalize())
+    payload = "|".join(
+        (
+            "spot-plan-v1",
+            order.venue,
+            order.market,
+            order.side.value,
+            order.order_type.value,
+            str(order.quantity.normalize()),
+            limit,
+            order.client_order_id,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

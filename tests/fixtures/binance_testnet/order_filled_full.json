@@ -1,0 +1,26 @@
+{
+  "symbol": "BTCUSDT",
+  "orderId": 29,
+  "orderListId": -1,
+  "clientOrderId": "hcs-cl-001",
+  "price": "0.00000000",
+  "origQty": "0.01000000",
+  "executedQty": "0.01000000",
+  "cummulativeQuoteQty": "500.00000000",
+  "status": "FILLED",
+  "timeInForce": "GTC",
+  "type": "MARKET",
+  "side": "BUY",
+  "selfTradePreventionMode": "NONE",
+  "transactTime": 1507725176595,
+  "workingTime": 1507725176595,
+  "fills": [
+    {
+      "price": "50000.00000000",
+      "qty": "0.01000000",
+      "commission": "0.00001000",
+      "commissionAsset": "BTC",
+      "tradeId": 56
+    }
+  ]
+}

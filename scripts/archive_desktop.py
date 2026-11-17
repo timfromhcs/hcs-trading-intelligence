@@ -14,7 +14,8 @@ def main() -> None:
     parser.add_argument("--onefile", action="store_true")
     args = parser.parse_args()
     if args.onefile:
-        archive = Path("dist") / "desktop-single" / f"{_NAME}.exe"
+        suffix = ".exe" if platform.system() == "Windows" else ""
+        archive = Path("dist") / "desktop-single" / f"{_NAME}{suffix}"
     else:
         desktop = Path("dist") / "desktop"
         system = platform.system().lower()

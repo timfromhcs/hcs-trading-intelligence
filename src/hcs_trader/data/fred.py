@@ -8,7 +8,8 @@ from decimal import Decimal, InvalidOperation
 import httpx2
 from pydantic import BaseModel, Field
 
-from hcs_trader.data.ecb import MacroUnavailable
+from hcs_trader.data.ecb import MacroRateLimited, MacroUnavailable
+from hcs_trader.data.provider import parse_retry_after
 from hcs_trader.domain.macro import MacroObservation
 
 SOURCE = "fred"
@@ -51,6 +52,10 @@ async def fetch_fred_cpi(
             ) as response,
         ):
             # Avoid HTTPStatusError, whose message includes the query-string credential.
+            if response.status_code in (429, 503):
+                raise MacroRateLimited(
+                    parse_retry_after(response.headers.get("retry-after"))
+                )
             if response.status_code != 200:
                 raise MacroUnavailable("FRED request failed")
             body = bytearray()

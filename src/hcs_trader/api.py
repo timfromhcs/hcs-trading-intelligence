@@ -1,18 +1,25 @@
 """Read-only status endpoints for the loopback application."""
 
+import asyncio
 import csv
+import ipaddress
 import json
 import logging
+import os
+import re
+import secrets
 import sqlite3
-from collections.abc import AsyncIterator
+import time
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import StrEnum
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -21,42 +28,230 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
+from hcs_trader.application import (
+    ApplicationError,
+    ApplicationService,
+    ChainCapability,
+    Forbidden,
+    InvalidRequest,
+    NotFound,
+    Rejected,
+)
+from hcs_trader.application.service import (
+    AssetInfo,
+    OrderBookSnapshot,
+    OrderPreview,
+    Position,
+    StrategyMetrics,
+    WalletBalanceView,
+    WalletTransactions,
+    spot_order_dict,
+)
+from hcs_trader.backtest import BacktestConfig, BacktestResult
 from hcs_trader.data import ecb, fred
-from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
+from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
+from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
 from hcs_trader.domain.news import NewsItem
 from hcs_trader.domain.paper import (
     PaperBalance,
-    PaperConflict,
     PaperFill,
     PaperOrder,
     PaperRejected,
+    PaperSide,
 )
 from hcs_trader.domain.wallet import WalletSnapshot
-from hcs_trader.indicators import Indicators, calculate_indicators
+from hcs_trader.indicators import Indicators
+from hcs_trader.kraken_spot import KrakenAmbiguousExecutionError, KrakenOrderRejected
+from hcs_trader.local_research import ResearchHistory
+from hcs_trader.logging_config import correlation_id
+from hcs_trader.network_policy import NetworkPolicy, SystemMode
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
+    CandidateNotFound,
+    PromotionRejected,
     PromotionStage,
+    ReportPayload,
     StrategyCandidate,
-    evaluate_promotion_gate,
+    execute_shadow_run,
+    get_candidate_backtest_report,
+    get_latest_shadow_run,
+    list_shadow_runs_for_candidate,
+    promote_strategy_candidate,
 )
+from hcs_trader.risk import RiskRejected
 from hcs_trader.skills import list_skills
+from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import AuditStore, ExecutionPause
-from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult, walk_forward
+from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult
 
 _logger = logging.getLogger(__name__)
 LOOPBACK_HOST = "127.0.0.1"
 LOCAL_PORT = 8765
 
 
-class Mode(StrEnum):
-    OFFLINE = "OFFLINE"
-    DATA_ONLY = "DATA_ONLY"
-    PAPER = "PAPER"
-    LIVE = "LIVE"
+Mode = SystemMode
+
+API_TOKEN_ENV = "HCS_API_TOKEN"  # noqa: S105 - env var name
+MAX_BODY_BYTES = 1_048_576
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def generate_api_token() -> str:
+    """Random per-run token; the operator shows or stores it locally."""
+    return secrets.token_urlsafe(32)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class _Hardening:
+    """ASGI middleware: loopback peer, correlation ID, token, origin, size, rate."""
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        token: str | None,
+        max_body: int,
+        rate_limit: int,
+        window: float,
+    ) -> None:
+        self.app = app
+        self.token = token
+        self.max_body = max_body
+        self.rate_limit = rate_limit
+        self.window = window
+        self._hits: dict[str, deque[float]] = {}
+
+    @staticmethod
+    async def _reject(
+        send: Any,
+        status: int,
+        detail: str,
+        rid: str,
+        extra: list[tuple[bytes, bytes]] | None = None,
+    ) -> None:
+        body = json.dumps({"detail": detail}).encode()
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (b"x-request-id", rid.encode()),
+            *(extra or []),
+        ]
+        await send(
+            {"type": "http.response.start", "status": status, "headers": headers}
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    def _limited(self, key: str) -> bool:
+        now = time.monotonic()
+        hits = self._hits.setdefault(key, deque())
+        while hits and now - hits[0] > self.window:
+            hits.popleft()
+        if len(hits) >= self.rate_limit:
+            return True
+        hits.append(now)
+        return False
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope["headers"]
+        }
+        supplied = headers.get("x-request-id", "")
+        rid = supplied if _REQUEST_ID.match(supplied) else uuid4().hex
+        reset = correlation_id.set(rid)
+        try:
+            await self._handle(scope, receive, send, headers, rid)
+        finally:
+            correlation_id.reset(reset)
+
+    async def _handle(
+        self, scope: Any, receive: Any, send: Any, headers: dict[str, str], rid: str
+    ) -> None:
+        client = scope.get("client")
+        if client:
+            try:
+                if not ipaddress.ip_address(client[0]).is_loopback:
+                    await self._reject(send, 403, "Loopback clients only", rid)
+                    return
+            except ValueError:
+                pass  # non-IP peer (in-process test transport)
+        mutating = scope["method"] not in SAFE_METHODS
+        if mutating:
+            origin = headers.get("origin")
+            if headers.get("sec-fetch-site") == "cross-site" or (
+                origin is not None
+                and (urlsplit(origin).hostname or "")
+                not in {LOOPBACK_HOST, "localhost"}
+            ):
+                await self._reject(send, 403, "Local origin required", rid)
+                return
+            if self.token is not None:
+                presented = headers.get("x-hcs-token", "")
+                auth = headers.get("authorization", "")
+                if auth.lower().startswith("bearer "):
+                    presented = auth[7:].strip()
+                if not secrets.compare_digest(presented.encode(), self.token.encode()):
+                    await self._reject(
+                        send,
+                        401,
+                        "API token required",
+                        rid,
+                        [(b"www-authenticate", b"Bearer")],
+                    )
+                    return
+            declared = headers.get("content-length")
+            if declared is not None and (
+                not declared.isdigit() or int(declared) > self.max_body
+            ):
+                await self._reject(send, 413, "Request body too large", rid)
+                return
+            has_body = declared not in (None, "0") or "transfer-encoding" in headers
+            ctype = headers.get("content-type", "").split(";")[0].strip().lower()
+            if has_body and ctype != "application/json":
+                await self._reject(send, 415, "application/json required", rid)
+                return
+            key = client[0] if client else "local"
+            if self._limited(key):
+                await self._reject(
+                    send, 429, "Rate limit exceeded", rid, [(b"retry-after", b"60")]
+                )
+                return
+
+        received = 0
+
+        async def limited_receive() -> Any:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body:
+                    raise _BodyTooLarge
+            return message
+
+        async def tagged_send(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    *message["headers"],
+                    (b"x-request-id", rid.encode()),
+                ]
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive if mutating else receive, tagged_send)
+        except _BodyTooLarge:
+            await self._reject(send, 413, "Request body too large", rid)
 
 
 class Status(BaseModel):
@@ -125,11 +320,6 @@ class CandleRecord(BaseModel):
     trade_count: int
 
 
-class ReportPayload(BaseModel):
-    schema_version: Literal[1] = 1
-    report: BacktestResult | WalkForwardResult
-
-
 class StoredReport(ReportPayload):
     id: str
     recorded_at: datetime
@@ -158,8 +348,11 @@ class CreateCandidateRequest(BaseModel):
 
 class PromoteCandidateRequest(BaseModel):
     target_stage: PromotionStage
-    shadow_fills: int = 0
-    is_live_enabled: bool = False
+
+
+class ShadowRunResponse(BaseModel):
+    run_id: str
+    report: BacktestResult
 
 
 class PaperPortfolio(BaseModel):
@@ -173,16 +366,65 @@ class PaperAccount(PaperPortfolio):
     fills: list[PaperFill]
 
 
+class OrderPreviewRequest(BaseModel):
+    side: PaperSide
+    quantity: Decimal
+    idempotency_key: str | None = None
+
+
+class SystemCapabilities(Capabilities):
+    chains: list[ChainCapability]
+
+
+def _http_error(error: ApplicationError) -> HTTPException:
+    if isinstance(error, InvalidRequest):
+        return HTTPException(422, str(error))
+    if isinstance(error, NotFound):
+        return HTTPException(404, str(error))
+    if isinstance(error, Forbidden):
+        return HTTPException(403, str(error))
+    if isinstance(error, Rejected):
+        return HTTPException(409, str(error))
+    return HTTPException(503, str(error))
+
+
+class SpotOrderSubmission(BaseModel):
+    side: SpotSide
+    quantity: Decimal
+    limit_price: Decimal
+    candidate_id: str
+    strategy_version: str
+    client_order_id: str | None = None
+
+
 def create_app(
     store: AuditStore,
     ui_assets: Path | None = None,
     *,
     quote_service: QuoteService | None = None,
     paper_mode: bool = False,
+    kraken_reconciliation: Callable[[], Awaitable[object]] | None = None,
+    spot_execution: KrakenSpotExecution | None = None,
+    api_token: str | None = None,
+    network_policy: NetworkPolicy | None = None,
+    max_body_bytes: int = MAX_BODY_BYTES,
+    write_rate_limit: int = 60,
+    rate_window_seconds: float = 60.0,
 ) -> FastAPI:
+    token = api_token if api_token is not None else os.environ.get(API_TOKEN_ENV)
+    if token is not None and len(token) < 16:
+        raise ValueError("API token must be at least 16 characters")
+    if (
+        network_policy is not None
+        and network_policy.mode is SystemMode.LIVE
+        and spot_execution is None
+    ):
+        raise ValueError("LIVE mode requires configured spot execution")
     paper = (
         PaperExecution(store, quote_service) if paper_mode and quote_service else None
     )
+
+    service = ApplicationService(store, paper=paper)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -198,6 +440,20 @@ def create_app(
                 {"event": event.kind, "id": event.event_id, "at": event.recorded_at}
             ),
         )
+        if kraken_reconciliation is not None:
+            try:
+                async with asyncio.timeout(30):
+                    await kraken_reconciliation()
+                incomplete = any(
+                    order.state
+                    in {OrderState.SUBMITTED, OrderState.RECONCILIATION_REQUIRED}
+                    for order in store.list_open_spot_orders("kraken")
+                )
+            except TimeoutError:
+                incomplete = True
+            store.record_audit_event(
+                "spot.recovery.incomplete" if incomplete else "spot.recovery.completed"
+            )
         yield
 
     app = FastAPI(
@@ -207,6 +463,13 @@ def create_app(
         redoc_url=None,
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[LOOPBACK_HOST])
+    app.add_middleware(
+        _Hardening,
+        token=token,
+        max_body=max_body_bytes,
+        rate_limit=write_rate_limit,
+        window=rate_window_seconds,
+    )
 
     @app.get("/api/v1/health")
     def health() -> Health:
@@ -218,12 +481,29 @@ def create_app(
 
     @app.get("/api/v1/system/status")
     def status() -> Status:
+        if network_policy is not None:
+            return Status(
+                mode=network_policy.mode,
+                network_enabled=network_policy.mode is not SystemMode.OFFLINE,
+                execution_available=(
+                    network_policy.mode in {SystemMode.PAPER, SystemMode.LIVE}
+                    and not execution_pause().paused
+                ),
+            )
+        if spot_execution is not None:
+            return Status(
+                mode=Mode.LIVE,
+                network_enabled=True,
+                execution_available=not execution_pause().paused,
+            )
         if quote_service is not None:
             return Status(
                 mode=Mode.PAPER if paper is not None else Mode.DATA_ONLY,
                 network_enabled=True,
                 execution_available=paper is not None and not execution_pause().paused,
             )
+        if kraken_reconciliation is not None:
+            return Status(mode=Mode.DATA_ONLY, network_enabled=True)
         return Status()
 
     def _verify_local_origin(request: Request, action_name: str) -> None:
@@ -241,30 +521,46 @@ def create_app(
             raise HTTPException(503, "Execution pause state unavailable") from error
 
     @app.post("/api/v1/risk/pause")
+    @app.post("/api/v1/system/pause")
     def trigger_pause(request: Request) -> ExecutionPause:
         _verify_local_origin(request, "Risk controls")
         try:
-            return store.set_execution_pause(True)
-        except (sqlite3.Error, ValueError) as error:
-            raise HTTPException(503, "Risk control unavailable") from error
+            return service.pause_execution()
+        except ApplicationError as error:
+            raise _http_error(error) from error
 
     @app.post("/api/v1/risk/resume")
+    @app.post("/api/v1/system/resume")
     def clear_pause(request: Request) -> ExecutionPause:
         _verify_local_origin(request, "Risk controls")
         try:
-            return store.set_execution_pause(False)
-        except (sqlite3.Error, ValueError) as error:
-            raise HTTPException(503, "Risk control unavailable") from error
+            return service.resume_execution()
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/risk/policy")
+    def risk_policy() -> dict[str, Any]:
+        try:
+            return service.risk_policy_summary()
+        except ApplicationError as error:
+            raise _http_error(error) from error
 
     @app.get("/api/v1/system/config")
     def config() -> PublicConfig:
         return PublicConfig()
 
     @app.get("/api/v1/system/capabilities")
-    def capabilities() -> Capabilities:
-        return Capabilities(
-            market_data=quote_service is not None, paper_orders=paper is not None
+    def capabilities() -> SystemCapabilities:
+        return SystemCapabilities(
+            market_data=quote_service is not None,
+            paper_orders=paper is not None,
+            live_orders=spot_execution is not None,
+            chains=service.chain_capabilities(),
         )
+
+    @app.get("/api/v1/system/chains")
+    def chain_capabilities() -> list[ChainCapability]:
+        return service.chain_capabilities()
 
     @app.get("/api/v1/market/quotes")
     async def market_quote(response: Response) -> QuoteResponse:
@@ -312,12 +608,10 @@ def create_app(
         ]
 
     def read_candles(interval: int, limit: int) -> list[Candle]:
-        if interval not in CANDLE_INTERVALS:
-            raise HTTPException(422, "Unsupported candle interval")
         try:
-            return store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
-        except sqlite3.Error as error:
-            raise HTTPException(503, "Candle storage unavailable") from error
+            return service.candles(interval, limit)
+        except ApplicationError as error:
+            raise _http_error(error) from error
 
     @app.get("/api/v1/market/candles")
     def candle_history(
@@ -344,18 +638,10 @@ def create_app(
 
     @app.get("/api/v1/market/indicators")
     def indicators(interval: int = 60) -> Indicators:
-        return calculate_indicators(read_candles(interval, 720))
-
-    def save_report(
-        result: BacktestResult | WalkForwardResult, response: Response
-    ) -> None:
-        payload = ReportPayload(report=result).model_dump_json()
-        report_id = sha256(payload.encode("utf-8")).hexdigest()
         try:
-            store.record_backtest(report_id, payload)
-        except sqlite3.Error as error:
-            raise HTTPException(503, "Backtest storage unavailable") from error
-        response.headers["Location"] = f"/api/v1/backtests/{report_id}"
+            return service.indicators(interval)
+        except ApplicationError as error:
+            raise _http_error(error) from error
 
     @app.post("/api/v1/backtests")
     def backtest(
@@ -363,13 +649,19 @@ def create_app(
         response: Response,
         interval: int = 60,
         limit: Annotated[int, Query(ge=1, le=1000)] = 720,
+        holdout_candles: Annotated[int, Query(ge=0, le=999)] = 0,
     ) -> BacktestResult:
         try:
-            result = run_backtest(read_candles(interval, limit), config)
-        except ValueError as error:
-            raise HTTPException(422, str(error)) from error
-        save_report(result, response)
-        return result
+            run = service.run_backtest(
+                config,
+                interval=interval,
+                limit=limit,
+                holdout_candles=holdout_candles,
+            )
+        except ApplicationError as error:
+            raise _http_error(error) from error
+        response.headers["Location"] = f"/api/v1/backtests/{run.report_id}"
+        return cast(BacktestResult, run.result)
 
     @app.post("/api/v1/backtests/walk-forward")
     def walk_forward_backtest(
@@ -379,11 +671,11 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=1000)] = 720,
     ) -> WalkForwardResult:
         try:
-            result = walk_forward(read_candles(interval, limit), config)
-        except ValueError as error:
-            raise HTTPException(422, str(error)) from error
-        save_report(result, response)
-        return result
+            run = service.run_walk_forward(config, interval=interval, limit=limit)
+        except ApplicationError as error:
+            raise _http_error(error) from error
+        response.headers["Location"] = f"/api/v1/backtests/{run.report_id}"
+        return cast(WalkForwardResult, run.result)
 
     @app.get("/api/v1/backtests/{report_id}")
     def get_report(
@@ -474,11 +766,9 @@ def create_app(
             raise HTTPException(403, "Paper execution is disabled")
         _verify_local_origin(request, "Paper orders")
         try:
-            return await paper.submit(order)
-        except (PaperRejected, PaperConflict) as error:
-            raise HTTPException(409, str(error)) from error
-        except (sqlite3.Error, ValidationError) as error:
-            raise HTTPException(503, "Paper ledger unavailable") from error
+            return await service.place_paper_order(order)
+        except ApplicationError as error:
+            raise _http_error(error) from error
 
     @app.get("/api/v1/wallets")
     def wallet_snapshots(
@@ -498,35 +788,7 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         try:
             orders = store.list_open_spot_orders(venue)
-            return [
-                {
-                    "client_order_id": o.client_order_id,
-                    "order_id": o.order_id,
-                    "venue": o.venue,
-                    "market": o.market,
-                    "side": o.side.value,
-                    "order_type": o.order_type.value,
-                    "quantity": str(o.quantity),
-                    "limit_price": (
-                        str(o.limit_price) if o.limit_price is not None else None
-                    ),
-                    "state": o.state.value,
-                    "risk_decision_id": o.risk_decision_id,
-                    "created_at": o.created_at.isoformat(),
-                    "updated_at": o.updated_at.isoformat(),
-                    "venue_order_id": o.venue_order_id,
-                    "filled_quantity": (
-                        str(o.filled_quantity)
-                        if o.filled_quantity is not None
-                        else None
-                    ),
-                    "average_price": (
-                        str(o.average_price) if o.average_price is not None else None
-                    ),
-                    "fee": str(o.fee) if o.fee is not None else None,
-                }
-                for o in orders
-            ]
+            return [spot_order_dict(o) for o in orders]
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Spot order storage unavailable") from error
 
@@ -537,34 +799,73 @@ def create_app(
             o = store.get_spot_order(client_order_id)
             if o is None:
                 raise HTTPException(404, f"Spot order '{client_order_id}' not found")
-            return {
-                "client_order_id": o.client_order_id,
-                "order_id": o.order_id,
-                "venue": o.venue,
-                "market": o.market,
-                "side": o.side.value,
-                "order_type": o.order_type.value,
-                "quantity": str(o.quantity),
-                "limit_price": (
-                    str(o.limit_price) if o.limit_price is not None else None
-                ),
-                "state": o.state.value,
-                "risk_decision_id": o.risk_decision_id,
-                "created_at": o.created_at.isoformat(),
-                "updated_at": o.updated_at.isoformat(),
-                "venue_order_id": o.venue_order_id,
-                "filled_quantity": (
-                    str(o.filled_quantity) if o.filled_quantity is not None else None
-                ),
-                "average_price": (
-                    str(o.average_price) if o.average_price is not None else None
-                ),
-                "fee": str(o.fee) if o.fee is not None else None,
-            }
+            return spot_order_dict(o)
         except HTTPException:
             raise
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Spot order storage unavailable") from error
+
+    @app.post("/api/v1/orders/spot")
+    @app.post("/api/v1/orders/live")
+    async def submit_spot_order_endpoint(
+        submission: SpotOrderSubmission, request: Request
+    ) -> dict[str, Any]:
+        if spot_execution is None:
+            raise HTTPException(403, "Live spot execution is disabled")
+        _verify_local_origin(request, "Spot orders")
+        if quote_service is None:
+            raise HTTPException(
+                503, "Market quote service unavailable for spot execution"
+            )
+        try:
+            snap = await quote_service.snapshot()
+        except (QuoteUnavailable, sqlite3.Error) as error:
+            raise HTTPException(
+                503, "Market quote unavailable for spot execution"
+            ) from error
+        if snap.quality is not DataQuality.FRESH or snap.quote is None:
+            raise HTTPException(503, "Spot execution requires a fresh market quote")
+        now = datetime.now(UTC)
+        order = SpotOrder(
+            client_order_id=submission.client_order_id or uuid4().hex,
+            order_id=uuid4().hex,
+            venue="kraken",
+            market="BTC/USD",
+            side=submission.side,
+            order_type=SpotOrderType.LIMIT,
+            quantity=submission.quantity,
+            limit_price=submission.limit_price,
+            state=OrderState.PREVIEWED,
+            risk_decision_id="none",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            observed = await spot_execution.submit(
+                order,
+                snap.quote,
+                candidate_id=submission.candidate_id,
+                strategy_version=submission.strategy_version,
+            )
+            return spot_order_dict(observed)
+        except RiskRejected as error:
+            raise HTTPException(409, str(error)) from error
+        except KrakenOrderRejected as error:
+            raise HTTPException(400, str(error)) from error
+        except KrakenAmbiguousExecutionError as error:
+            raise HTTPException(504, str(error)) from error
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Spot order storage unavailable") from error
+
+    @app.get("/api/v1/research/runs")
+    def research_runs(
+        response: Response, limit: Annotated[int, Query(ge=1, le=100)] = 25
+    ) -> ResearchHistory:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return store.research_history(limit)
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Research history unavailable") from error
 
     @app.get("/api/v1/audit/events")
     def list_audit_events(
@@ -617,21 +918,58 @@ def create_app(
         req: CreateCandidateRequest, request: Request
     ) -> StrategyCandidate:
         _verify_local_origin(request, "Create candidate")
-        candidate = StrategyCandidate(
-            candidate_id=uuid4().hex,
-            name=req.name,
-            version=req.version,
-            stage=PromotionStage.RESEARCH,
-            parameters=req.parameters,
-            dataset_hash=req.dataset_hash,
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
-        )
         try:
-            store.save_strategy_candidate(candidate)
-            return candidate
+            return service.create_candidate(
+                req.name, req.version, req.parameters, req.dataset_hash
+            )
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    def candidate_backtest(candidate: StrategyCandidate) -> BacktestResult:
+        try:
+            return get_candidate_backtest_report(store, candidate)
+        except PromotionRejected as error:
+            raise HTTPException(409, str(error)) from error
+
+    def latest_shadow(candidate_id: str) -> ShadowRunResponse:
+        try:
+            run_id, report = get_latest_shadow_run(store, candidate_id)
+            return ShadowRunResponse(run_id=run_id, report=report)
+        except PromotionRejected as error:
+            raise HTTPException(404, str(error)) from error
+        except (sqlite3.Error, ValueError) as error:
+            raise HTTPException(503, "Paper shadow run unavailable") from error
+
+    @app.get("/api/v1/strategies/candidates/{candidate_id}/shadow-run")
+    def get_shadow_run(candidate_id: str) -> ShadowRunResponse:
+        return latest_shadow(candidate_id)
+
+    @app.post("/api/v1/strategies/candidates/{candidate_id}/shadow-run")
+    def run_shadow(candidate_id: str, request: Request) -> ShadowRunResponse:
+        _verify_local_origin(request, "Run paper shadow simulation")
+        try:
+            run_id, result = execute_shadow_run(store, candidate_id)
+            return ShadowRunResponse(run_id=run_id, report=result)
+        except CandidateNotFound as error:
+            raise HTTPException(404, str(error)) from error
+        except (PaperRejected, PromotionRejected, ValueError) as error:
+            raise HTTPException(409, str(error)) from error
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Paper shadow storage unavailable") from error
+
+    @app.get("/api/v1/strategies/candidates/{candidate_id}/shadow-runs")
+    def list_shadow_runs_endpoint(
+        candidate_id: str,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    ) -> list[ShadowRunResponse]:
+        try:
+            records = list_shadow_runs_for_candidate(store, candidate_id, limit=limit)
+            return [
+                ShadowRunResponse(run_id=run_id, report=report)
+                for run_id, _, report in records
+            ]
         except (sqlite3.Error, ValidationError) as error:
-            raise HTTPException(503, "Failed to save strategy candidate") from error
+            raise HTTPException(503, "Paper shadow history unavailable") from error
 
     @app.post("/api/v1/strategies/candidates/{candidate_id}/promote")
     def promote_candidate_endpoint(
@@ -640,21 +978,16 @@ def create_app(
         request: Request,
     ) -> dict[str, Any]:
         _verify_local_origin(request, "Promote candidate")
-        candidate = store.get_strategy_candidate(candidate_id)
-        if candidate is None:
-            raise HTTPException(404, f"Strategy candidate '{candidate_id}' not found")
-        verdict = evaluate_promotion_gate(
-            candidate,
-            req.target_stage,
-            shadow_fills=req.shadow_fills,
-            is_live_enabled=req.is_live_enabled,
-        )
-        if not verdict.passed:
-            raise HTTPException(
-                409,
-                f"Promotion gate rejected: {'; '.join(verdict.reasons)}",
+        try:
+            updated, verdict = promote_strategy_candidate(
+                store, candidate_id, req.target_stage
             )
-        updated = store.update_candidate_stage(candidate_id, req.target_stage)
+        except CandidateNotFound as error:
+            raise HTTPException(404, str(error)) from error
+        except PromotionRejected as error:
+            raise HTTPException(409, str(error)) from error
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Storage error during promotion") from error
         return {
             "candidate": updated.model_dump(mode="json"),
             "gate_result": {
@@ -666,6 +999,122 @@ def create_app(
                 "evaluated_at": verdict.evaluated_at.isoformat(),
             },
         }
+
+    @app.get("/api/v1/strategies/candidates/{candidate_id}/canary-approval")
+    def get_candidate_canary_approval(
+        candidate_id: str, response: Response
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            approval = store.get_spot_canary_approval(candidate_id)
+            if approval is None:
+                raise HTTPException(
+                    404, f"No canary approval recorded for '{candidate_id}'"
+                )
+            return {
+                "candidate_id": approval.candidate_id,
+                "candidate_version": approval.candidate_version,
+                "dataset_hash": approval.dataset_hash,
+                "key_fingerprint": approval.key_fingerprint,
+                "max_notional": str(approval.max_notional),
+                "expires_at": approval.expires_at.isoformat(),
+                "stage": approval.stage,
+                "active": approval.active,
+            }
+        except HTTPException:
+            raise
+        except (sqlite3.Error, ValidationError) as error:
+            raise HTTPException(503, "Audit storage unavailable") from error
+
+    @app.get("/api/v1/market/assets")
+    def market_assets() -> list[AssetInfo]:
+        return service.list_assets()
+
+    @app.get("/api/v1/market/orderbook")
+    def market_orderbook(response: Response) -> OrderBookSnapshot:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return service.orderbook_snapshot()
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/news/search")
+    def news_search(
+        q: Annotated[str, Query(min_length=1, max_length=100)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    ) -> list[NewsItem]:
+        try:
+            return service.search_news(q, limit)
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/portfolio/positions")
+    def portfolio_positions() -> list[Position]:
+        try:
+            return service.positions()
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/wallets/{wallet_id}/balances")
+    def wallet_balances(wallet_id: str, response: Response) -> list[WalletBalanceView]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return service.wallet_balances(wallet_id)
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/wallets/{wallet_id}/transactions")
+    def wallet_transactions(wallet_id: str, response: Response) -> WalletTransactions:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return service.wallet_transactions(wallet_id)
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/strategies")
+    def list_strategies(response: Response) -> list[StrategyCandidate]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return service.strategies()
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/strategies/{strategy_id}/metrics")
+    def strategy_metrics(strategy_id: str) -> StrategyMetrics:
+        try:
+            return service.strategy_metrics(strategy_id)
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.post("/api/v1/orders/preview")
+    async def preview_order(
+        body: OrderPreviewRequest, request: Request
+    ) -> OrderPreview:
+        _verify_local_origin(request, "Order preview")
+        quote: Any = None
+        if quote_service is not None:
+            try:
+                quote = (await quote_service.snapshot()).quote
+            except (QuoteUnavailable, sqlite3.Error):
+                quote = None
+        try:
+            return service.preview_order(
+                body.side,
+                body.quantity,
+                quote=quote,
+                idempotency_key=body.idempotency_key,
+            )
+        except ApplicationError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/v1/orders/{order_id}")
+    def get_order(order_id: str, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            record = service.get_order(order_id)
+        except ApplicationError as error:
+            raise _http_error(error) from error
+        return {"kind": record.kind, **record.payload}
 
     if ui_assets is not None and (ui_assets / "index.html").is_file():
         app.mount("/", StaticFiles(directory=ui_assets, html=True), name="ui")

@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Enforce the operator's hot-wallet USD cap and portfolio share in the LIVE risk engine. A missing valuation blocks authorization when a share cap is configured.
+- Require venue health and a recent reconciliation timestamp for LIVE authorization. Reject reconciliation timestamps in the future.
+
+- Report a forward shadow replay only when its result is newly recorded. An explicit replay still returns the existing result for identical inputs.
+- Require a fresh Kraken quote for CLI and HTTP canary submission. Cached quotes remain visible with their data-quality status during outages.
+
+- Gate the Kraken CLI and HTTP serving paths on the persisted operator policy and security-critical limitations. Recheck approval before submission.
+- Verify denied paper writes in the installed MCP smoke test and run frontend tests in CI.
+
+Changes since 0.2.0 on `main`. No release candidate has been cut and the version is still 0.2.0.
+
+### Added
+
+- Strategy Lab promotion evidence, persisted paper-shadow replays, forward shadow observation, and `strategy-list`, `strategy-show`, `strategy-promote` and `strategy-shadow-*` commands. Promotion logic is unified in `promotion.py`.
+- REST `GET /api/v1/strategies/candidates/{candidate_id}/shadow-runs`, MCP `strategies.get_candidates` and `strategies.get_shadow_runs`, and the `hcs://strategies/candidates` resource.
+- Interactive, expiring authorization for a single Kraken BTC/USD canary order, a validation-only CLI workflow, and guarded Kraken order recovery.
+- Deterministic local research tools, durable run history, a foreground scheduler and dashboard statistics.
+- Isolated read-only wallet profiles for Sepolia, Solana Devnet, Bitcoin regtest and Signet, Litecoin regtest and DigiByte regtest.
+- MCP capability tiers (`READ`, `RESEARCH`, `PAPER_TRADE`, `LIVE_TRADE`, `ADMIN_LOCAL`), a capability guard, and a JSONL invocation audit trail.
+- Jupiter Swap API V2 `/build` response inspection, instruction normalization and Associated Token Account `CreateIdempotent` allowlisting.
+- Accessible progress bars and a responsive layout for the strategy ladder.
+- Documentation: README rewritten to the 20 required sections, wallet security guide, API reference, strategy research guide, data source registry, expanded threat model, architecture diagrams, ADRs 0004 to 0009, and a documentation consistency test.
+- CodeQL, OpenSSF Scorecard, Dependabot, CODEOWNERS and Contributor Covenant 2.1.
+
+### Changed
+
+- `IsolatedSigner` is bound to the persisted pause state and to approved risk decisions with idempotency tracking. Placeholder chains return `SigningUnsupported`.
+- MCP risk resources and prompts are rendered from the `RiskPolicy` defaults that the engine enforces.
+- The threat model no longer copies numeric limits or the schema version.
+
+### Security
+
+- Expanded security policy. The threat model now lists the brief's threats with verifying tests and names the gaps (no injection corpus, no corruption injection, no SBOM).
+
 ## 0.2.0 — spot execution, isolated signing, research and dashboard UI (2026-11-15)
 
 - Added canonical asset and market identities, exact monetary values, and explicit order and transaction transitions for later adapters.

@@ -1,5 +1,22 @@
 # Data sources
 
+## Source registry
+
+Every source has a registry row. A source marked Planned has no adapter, and its quota and terms are stated from the provider's public documentation and must be rechecked before integration. Provider limits change. Public access does not grant redistribution rights. A planned REST endpoint `/api/v1/system/sources` and a Settings panel will surface this registry in the application ([API reference](API.md)).
+
+| Source ID | Owner | Format | Language | Key | Quota and cadence | Terms | Retry policy | Status |
+|---|---|---|---|---|---|---|---|---|
+| `kraken-spot` | Kraken | REST JSON | n/a | None for public data | About 1 request per second per IP. Refresh at most every 5 s | [Legal](https://www.kraken.com/legal) | Exponential backoff, at least 60 s after a rate limit | Implemented, off unless `--public-market-data` |
+| `federal-reserve-monetary-policy` | Federal Reserve Board | RSS XML | English | None | One request per manual import, releases at irregular intervals | [Feeds](https://www.federalreserve.gov/feeds/feeds.htm) | None, import is manual | Implemented |
+| `ecb-sdmx` | European Central Bank | SDMX JSON | English | None | One manual import, up to 250 daily values, published once per working day | [ECB data](https://data.ecb.europa.eu/help/api/data) | None, import is manual | Implemented |
+| `fred` | Federal Reserve Bank of St. Louis | REST JSON | English | Yes, your own | One manual import, up to 250 values | [Terms](https://fred.stlouisfed.org/docs/api/terms_of_use.html) | None, import is manual | Implemented |
+| `coingecko` | CoinGecko | REST JSON | English | Free demo key | Demo plan has a per-minute and monthly cap. Check current plan | [API](https://www.coingecko.com/en/api) | Planned: backoff with jitter | Planned, no adapter |
+| `binance-public` | Binance | REST and WebSocket | English | None for market data | Weighted per-IP limits. Availability varies by jurisdiction | [Docs](https://github.com/binance/binance-spot-api-docs) | Planned: circuit breaker | Planned, no adapter |
+| `gdelt-doc` | GDELT Project | REST JSON | Multilingual | None | Rate-limited, near real-time | [GDELT](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/) | Planned | Planned, no adapter. Discovery only, not verified truth |
+| `official-rss` (ECB, Bundesbank, US Treasury, SEC, ESMA, European Commission, Eurostat, BaFin) | Each publisher | RSS and Atom | Mostly English or German | None | Per-feed cadence | Per publisher | Planned | Planned, no adapters |
+
+All sources are disabled by default. Feed text is untrusted input. Do not scrape paywalled pages or bypass robots rules.
+
 ## Kraken Spot REST
 
 - Source ID `kraken-spot`, operated by Kraken. The adapter requests top-of-book BTC/USD as JSON from the public Depth endpoint. [Endpoint documentation](https://docs.kraken.com/api-reference/market-data/get-order-book)

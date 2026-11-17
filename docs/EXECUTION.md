@@ -1,12 +1,12 @@
 # Spot execution and deterministic risk
 
-Phase 8 introduces bounded live spot execution through an audited CEX adapter and an independent pre-trade risk engine.
+Phase 8 develops a bounded Kraken spot adapter and an independent pre-trade risk engine. The local application currently exposes order history and status. Integrating submission with a durable operator gate and proving venue behavior are release work.
 
 ## Non-negotiable execution boundaries
 
 In accordance with [AGENTS.md](../AGENTS.md):
 - **Spot only:** Leverage, margin borrowing, short selling, perpetual contracts, and derivatives are strictly forbidden. Any request specifying leverage or borrowed funds is rejected immediately.
-- **Withdrawals disabled:** The execution adapter implements only spot order endpoints (`AddOrder`, `CancelOrder`, `QueryOrders`, `OpenOrders`). Withdrawal, internal transfer, and sweep endpoints are deliberately omitted from the codebase and cannot be invoked by agents or tools.
+- **Withdrawals disabled:** The execution adapter uses `AddOrder`, `CancelOrder`, `QueryOrders`, `OpenOrders` and `ClosedOrders`. The adapter and tool catalogue expose no transfer or withdrawal capability.
 - **Default mode:** The application starts in `PAPER` mode by default. Real-money live execution requires explicit operator enablement.
 - **Persistent kill switch:** If the kill switch is triggered, all new order submissions are halted immediately.
 
@@ -30,14 +30,50 @@ Any violation returns a typed `RiskEvaluation` with `allowed=False` and a struct
 The `KrakenSpotAdapter` communicates directly with Kraken's private REST API using standard HMAC-SHA512 authentication:
 - `API-Key`: Header containing the API key.
 - `API-Sign`: HMAC-SHA512 over the URI path and SHA-256 of `(nonce + postdata)`, keyed with the base64-decoded secret.
-- **Fail-closed reconciliation:** When an order submission experiences an ambiguous outcome (network timeout or HTTP 5xx), the order is transitioned to `RECONCILIATION_REQUIRED`. The adapter does not retry blindly; instead, it queries the venue status by client order ID or venue order ID to ascertain the true state before progressing.
+- **Fail-closed reconciliation:** A timeout, inconclusive HTTP response or live acknowledgement missing its venue ID leaves the order in `RECONCILIATION_REQUIRED`. With a venue ID, the adapter queries `QueryOrders`. Without it, it searches open and closed orders by exact client ID. A missing or non-unique match remains unresolved. [Kraken open orders](https://docs.kraken.com/api-reference/account-data/get-open-orders) · [Kraken closed orders](https://docs.kraken.com/api-reference/account-data/get-closed-orders)
+- **Venue status:** The LIVE policy queries Kraken's public system status before reserving a new order. It requires a fresh `online` status and then verifies the operator policy again. Venue status and authenticated portfolio reconciliation are separate inputs to the risk decision. [Kraken system status](https://docs.kraken.com/api-reference/market-data/get-system-status)
+
+`hcs-trader kraken-balances --credentials-file PATH` is a local, read-only probe for a dedicated BTC/USD cash account. Use an operator-owned credential with Query Funds permission. The command prints totals, spot holds, available cash and the UTC observation time. It rejects nonzero credit or unsupported assets so those amounts cannot be mistaken for cash available to the strategy. This snapshot is one input to reconciliation. Local ledger matching and order reconciliation must also succeed before the LIVE policy can use it. [Kraken extended balance](https://docs.kraken.com/api-reference/account-data/get-extended-balance)
+
+Add `--verify-venue-ledger` with Query Ledger Entries permission to replay the dedicated account's BTC and USD deposits, withdrawals and trades from zero. The check keeps one end time across the cursor pages, verifies each resulting balance and compares the ending totals to `BalanceEx`. It rejects unknown ledger event types, gaps, repeated cursors and histories above the 20-page bound. Successful venue replay verifies the cash history returned by Kraken. The independent local-ledger comparison remains a separate prerequisite for LIVE. [Kraken ledger API](https://docs.kraken.com/api-reference/account-data/get-ledgers-info)
+
+Add `--verify-local-fills [--data-dir PATH]` to cross-check both asset entries for each Kraken trade against an existing local fill by its Kraken execution ID. The current local record represents fees in USD and derives gross USD from fill quantity and price. Checks reject missing or unmatched rows, fees charged in BTC, and any gross amount that differs at venue precision. The read-only command checks that the local fill snapshot stayed unchanged. Funding entries and LIVE authorization still require separate local evidence.
+
+Use `hcs-trader kraken-sync-fills CLIENT_ORDER_ID --credentials-file PATH [--data-dir PATH]` to record executions for a reconciled BTC/USD limit order. The command reads the order's trade IDs and execution details from Kraken, verifies the trades against the local order totals and writes the complete batch to SQLite in one transaction. Repeating an unchanged import records zero new fills. Fees from the trade report are quoted in USD. Verify the cash ledger separately before using them as evidence of the actual debited fee. [Kraken trade query](https://docs.kraken.com/api-reference/account-data/query-trades-info)
+
+`hcs-trader kraken-check-orders --credentials-file PATH [--data-dir PATH]` compares the complete Kraken open-order set with existing local ledger entries. It requires the Query Open Orders & Trades permission and a preexisting local database. It reports the count only when order IDs, side, quantities, execution values, limit price and spot terms agree. A mismatch, ambiguous local order or concurrent ledger change exits with an error. The check is read-only and does not mint a LIVE reconciliation record. [Kraken open orders](https://docs.kraken.com/api-reference/account-data/get-open-orders)
+
+`KrakenSpotExecution` is the internal orchestration path for BTC/USD limit orders. After risk evaluation it commits the order in `SUBMITTED` with the risk decision ID before the request. The transaction rejects duplicates, a persisted pause, unresolved orders at the venue or a full active-order budget. A test interrupts submission while the request is in flight, opens the database again and confirms that recovery sends only order queries. The application server has no active submission endpoint.
+
+Start with `hcs-trader serve --kraken-reconcile-credentials FILE` to enable one recovery pass during startup. Use a Kraken credential with open- and closed-order query permissions for the same account as the stored orders. The file has the same JSON shape as the validation credentials below. The startup path only calls order queries and applies an observation if the original record is still current. An unresolved order or a 30-second timeout records `spot.recovery.incomplete`. The dashboard still starts. Recovery alone reports `DATA_ONLY` and leaves execution unavailable. Startup without this option makes no private Kraken requests.
+
+### Venue validation
+
+`hcs-trader kraken-validate --credentials-file FILE --side buy --quantity 0.01 --limit-price 50000` explicitly requests Kraken's `validate=true` mode for a BTC/USD limit order. Use an operator-controlled credential file with JSON string fields `api_key` and `api_secret` and the minimum Kraken permissions needed to validate. The validation adapter cannot submit or cancel live orders. A successful command emits a validation result without a venue order ID or SQLite order record. A returned order ID or malformed response produces an error. The CLI contract is tested with synthetic credentials and HTTP responses. An authenticated venue run is pending. [Kraken Add Order reference](https://docs.kraken.com/api-reference/trading/add-order)
+
+### Local canary authorization
+
+Use `hcs-trader spot-canary-allow CANDIDATE_ID --credentials-file FILE --max-notional 75` from a local interactive terminal. The candidate must have passed paper approval. The prompt displays the venue, market, candidate, credential fingerprint and USD limit before accepting `AUTHORIZE`. The authorization lasts 24 hours, applies to one candidate and replaces the prior grant. The database stores the key fingerprint, candidate version and dataset hash. The credential secret remains in the operator's file. `hcs-trader spot-canary-revoke` clears the grant immediately for future order reservations.
+
+The active authorization permits the local promotion gate to record `LIVE_CANARY`. A reservation through the internal execution service requires that stage, the same key fingerprint and a limit-order notional within the granted cap. The execution pause and the deterministic risk checks still apply. Serving stays without live submission, and `LIVE_BOUNDED` remains gated pending canary evidence.
 
 ## Solana Jupiter swap adapter
 
 The `JupiterSwapAdapter` provides bounded routing and calldata inspection for Solana swaps:
-- **Allowlists:** Jupiter v6 program (`JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`), SPL Token Program, System Program, Compute Budget Program, and verified token mints (`SOL`, `USDC`, `USDT`).
+- **Allowlists (version `JUPITER_PROGRAM_ALLOWLIST_VERSION`):** Jupiter v6 program (`JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`), SPL Token Program, System Program, Compute Budget Program, Associated Token Account program (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`), and verified Solana mainnet-beta token mints (`SOL`, `USDC`, `USDT`). Any other program is rejected. Token-2022 (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`) stays rejected pending a separate review of its extensions.
+- **Associated Token Account rule:** The ATA program is accepted only for `CreateIdempotent` (instruction data is exactly the single byte `1`). The payer and wallet owner must equal the expected signer, the mint must be allowlisted, and the token program account must be the classic SPL Token program. `Create`, `RecoverNested` and any other data fail closed. The caller must pass `signer=` when an ATA instruction is present.
 - **Route checks:** Enforces freshness ($\le 30\text{s}$), max slippage, max price impact, and allowlisted intermediate token hops.
-- **Instruction safety:** Inspects all instruction accounts and program invocations in the transaction payload to prevent unauthorized approvals or third-party program calls.
+- **Instruction safety:** Inspects every instruction's program in the transaction payload to prevent unauthorized approvals or third-party program calls.
+
+### Swap API V2 `/build` response
+
+The adapter targets the [Jupiter Swap API V2 `/build`](https://developers.jup.ag/docs/swap/build) endpoint (`https://api.jup.ag/swap/v2/build`). `/build` returns separate instruction fields, not a flat list. `normalize_build_instructions` maps them in transaction order: `computeBudgetInstructions`, `setupInstructions`, `swapInstruction`, `cleanupInstruction` (nullable), `otherInstructions`, `tipInstruction` (nullable). Each instruction must have a `programId`, an `accounts` list of `{pubkey, isSigner, isWritable}` and base64 `data`. An unknown top-level instruction field, a missing `swapInstruction` or a malformed instruction fails closed. The `swapInstruction` must invoke the Jupiter program. The legacy flat `instructions` payload is still accepted for compatibility.
+
+Prefer `/build`: it returns raw instructions that the application inspects and assembles itself. Per the Jupiter documentation, `/build` charges no Jupiter platform fee. V2 requests need an `x-api-key` header in production, and the key's rate limits apply. The application does not ship a Jupiter API key. The operator configures one locally.
+
+### Network support and testing
+
+Jupiter is deployed on Solana mainnet only ([development basics](https://developers.jup.ag/docs/get-started/development-basics)). **Devnet routing is not supported.** The mint allowlist contains mainnet-beta mints only. Tests use synthetic `/build` fixtures derived from the documented response type plus local inspection. CI never calls the live Jupiter API, and there is no live Jupiter submission path. Before any live Jupiter use, recorded mainnet `/build` fixtures and local transaction simulation must pass.
 
 ## EVM spot swap adapter
 
@@ -62,3 +98,25 @@ Schema version 12 introduces the `spot_orders` table storing:
 - `state`: Current lifecycle state (`PREVIEWED`, `SUBMITTED`, `ACKNOWLEDGED`, `FILLED`, `REJECTED`, `CANCELLED`, `RECONCILIATION_REQUIRED`).
 - `risk_decision_id`: Audit correlation identifier.
 - Timestamps and execution results (`venue_order_id`, `filled_quantity`, `average_price`, `fee`).
+
+## Venue-agnostic spot port and Binance testnet adapter (KL-001 track)
+
+`hcs_trader.spot_port` defines `SpotExchangePort` (submit, cancel, reconcile) and shared error bases (`SpotOrderRejected`, `SpotAmbiguousExecutionError`). `KrakenSpotAdapter` and `BinanceSpotTestnetAdapter` both satisfy it; the port has no withdrawal or transfer method.
+
+`BinanceSpotTestnetAdapter` (`binance_testnet.py`) talks to the Binance Spot Test Network over httpx REST:
+- **Testnet-only by construction:** `BinanceTestnetProfile` accepts only `https://testnet.binance.vision/api` and `https://api1.testnet.binance.vision/api`. Mainnet, look-alike hosts, userinfo, ports and other paths raise `BinanceMainnetForbidden`. Redirects are never followed.
+- **Endpoint allowlist:** only `/v3/time`, `exchangeInfo`, `ticker/price`, `account`, `order` (GET/POST/DELETE), `openOrders`, `myTrades`.
+- **Signing:** HMAC-SHA256 hex (`HmacSha256Signer`) or Ed25519 base64 (`Ed25519Signer`) over the exact query string, `X-MBX-APIKEY` header, `recvWindow` 5000, fresh timestamp and signature on every attempt.
+- **Idempotency:** `newClientOrderId` = the order's client id. A timeout, 5xx, `-1007`, 429/418 or duplicate-client-id (`-2010 Duplicate order sent`) on submit returns `RECONCILIATION_REQUIRED`; nothing is resent. `reconcile_order` queries by `origClientOrderId` (`-2013` means unknown to the venue: it maps to `REJECTED` only from `SUBMITTED`, or from `RECONCILIATION_REQUIRED` when the caller passes `never_acknowledged=True` as `submit_and_reconcile` does; otherwise the order stays `RECONCILIATION_REQUIRED`). A malformed 200 or `-1006` on submit also yields `RECONCILIATION_REQUIRED`. `submit_and_reconcile` does submit then query.
+- **Rate limits:** read calls back off on 429 (honouring `Retry-After`, capped at 30 s, bounded retries); 418 is never retried; order submit/cancel are never auto-retried.
+- **Fills and fees:** `myTrades` supplies fills; fee is summed in quote units (base-asset commission converted at fill price; third-party fee assets leave `fee` unset).
+
+CI tests use `httpx2.MockTransport` with response-shape fixtures in `tests/fixtures/binance_testnet/` (no network, no keys).
+
+### Rehearsal and probes (opt-in, never in CI)
+
+- `hcs-trader rehearsal-binance [--market BTC/USDT] [--output PATH]` needs `HCS_BINANCE_TESTNET_KEY` and `HCS_BINANCE_TESTNET_SECRET` (testnet keys from https://testnet.binance.vision/). It rests one far-from-market LIMIT BUY, checks open orders and query-by-client-id, replays the same client id (must not create a second order), cancels, reads trades/balances and writes redacted evidence JSON (default under the user data dir, `evidence/`). Exit code 1 if any step fails.
+- `pytest tests/rehearsal -m rehearsal --no-cov` runs the same flow; it skips unless the env vars are set.
+- `hcs-trader kraken-validate-probe --confirm-validate-only` sends one authenticated `AddOrder` with `validate=true` (Kraken checks but never places it) using `HCS_KRAKEN_KEY` / `HCS_KRAKEN_SECRET`.
+
+Known limits: the rehearsal has not been run against the live testnet in this environment (no keys); Binance testnet balances and order books are periodically reset by Binance; an order-not-found result immediately after a timeout could in theory race an in-flight order, so operators should re-query before manual action.

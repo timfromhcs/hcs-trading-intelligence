@@ -88,3 +88,64 @@ async def test_model_does_not_follow_redirect_or_run_during_indicator_warmup() -
         assert warming_up.status == "insufficient_data" and calls == 0
         assert (await research_report(_EVIDENCE, provider)).status == "unavailable"
     assert calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("problem", [None, "unknown", "arguments", "repeated"])
+async def test_opt_in_tool_reads_only_frozen_indicator_snapshot(
+    problem: str | None,
+) -> None:
+    call_id = "call_1"
+    call = {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "orders_place"
+            if problem == "unknown"
+            else "get_archived_indicators",
+            "arguments": '{"asset":"ETH"}' if problem == "arguments" else "{}",
+        },
+    }
+    requests = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal requests
+        requests += 1
+        body = json.loads(request.content)
+        assert [tool["function"]["name"] for tool in body["tools"]] == [
+            "get_archived_indicators"
+        ]
+        if requests == 1:
+            assert body["tool_choice"] == "required"
+            assert "51.25" not in request.content.decode()
+        else:
+            assert body["tool_choice"] == "none"
+            indicators = body["messages"][-1]
+            assert (
+                indicators["role"] == "tool" and indicators["tool_call_id"] == call_id
+            )
+            assert json.loads(indicators["content"])["rsi14"] == "51.25"
+        if requests == 1 or problem == "repeated":
+            choice = {"finish_reason": "tool_calls", "message": {"tool_calls": [call]}}
+        else:
+            assessment = {
+                "regime": "mixed",
+                "thesis": "Mixed momentum.",
+                "uncertainties": ["Short history."],
+            }
+            choice = {
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(assessment)},
+            }
+        return httpx2.Response(
+            200, json={"model": "local-fixture", "choices": [choice]}
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
+        provider = LlamaCppProvider(
+            client, 9931, "local-fixture", "fixture-token", use_tools=True
+        )
+        report = await research_report(_EVIDENCE, provider)
+    assert requests == (1 if problem in {"unknown", "arguments"} else 2)
+    assert report.execution_decision == "NO_TRADE"
+    assert report.status == ("available" if problem is None else "unavailable")

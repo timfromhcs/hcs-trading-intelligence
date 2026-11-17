@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-11-16T15:49:43.072929+00:00",
+  "git_sha": "a0e7cfe2d0ae2317cab42cb7c1dd7b539228827f",
+  "all_passed": false,
+  "gates": [
+    {
+      "name": "ruff-check",
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "ruff",
+        "check",
+        "."
+      ],
+      "exit_code": 1,
+      "attempts": 3,
+      "attempt_exit_codes": [
+        1,
+        1,
+        1
+      ],
+      "output_tail": "    |\n1168 |         with self._connect() as connection:\n1169 |             rows = connection.execute(\n1170 |                 \"SELECT client_order_id, fill_id, quantity, price, fee, filled_at, cash_booking \"\n     |                                                                                         ^^^^^^^^^\n1171 |                 \"FROM spot_fills WHERE client_order_id = ? ORDER BY filled_at, fill_id\",\n1172 |                 (client_order_id,),\n     |\n\nE501 Line too long (97 > 88)\n    --> src\\hcs_trader\\storage.py:1190:89\n     |\n1188 |         with self._connect() as connection:\n1189 |             rows = connection.execute(\n1190 |                 \"SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee, f.cash_booking \"\n     |                                                                                         ^^^^^^^^^\n1191 |                 \"FROM spot_fills f JOIN spot_orders o USING (client_order_id) \"\n1192 |                 \"WHERE o.venue = ?\",\n     |\n\nFound 6 errors.\n"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # Implementation plan
 
+> Next stable wave: see [WAVES.md](WAVES.md) (planned 2026-11-22). The sections below record the v1 release-candidate work.
+
 ## Free-route plan · 2026-11-16 (supersedes the integration status below where they differ)
 
 Every gap is closed with free tooling and no real funds. What cannot be closed by an agent is listed as operator-only and stays a documented limitation. Evidence from a testnet proves adapter and reconciliation code paths, never mainnet or Kraken-specific semantics.

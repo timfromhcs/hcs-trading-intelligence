@@ -39,6 +39,7 @@ from hcs_trader.data.kraken import (
 )
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.data.runtime import IngestionService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import DataQuality
@@ -89,6 +90,7 @@ from hcs_trader.local_research import (
 )
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
+from hcs_trader.network_policy import NetworkPolicy, SystemMode, build_http_client
 from hcs_trader.promotion import (
     CandidateNotFound,
     PromotionRejected,
@@ -559,12 +561,16 @@ async def serve(
     open_browser: bool = False,
     kraken_reconcile_credentials: Path | None = None,
     kraken_live_credentials: Path | None = None,
+    ingest_feeds: bool = False,
 ) -> None:
     store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
         quotes = (
             QuoteService(
-                KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+                KrakenQuoteProvider(client),
+                BTC_USD,
+                record_quote=store.record_quote,
+                record_state=store.save_ingest_state,
             )
             if market_data or paper_mode or kraken_live_credentials is not None
             else None
@@ -591,9 +597,21 @@ async def serve(
                 RiskEngine(RiskPolicy()),
             )
             recovery = execution.reconcile_startup
+        ingestion = None
+        if ingest_feeds:
+            feed_policy = NetworkPolicy(
+                SystemMode.PAPER if paper_mode else SystemMode.DATA_ONLY
+            )
+            ingestion = IngestionService(
+                store,
+                build_http_client(feed_policy, follow_redirects=False),
+                feed_policy,
+                own_client=True,
+            )
         app = create_app(
             store,
             Path(__file__).with_name("ui_assets"),
+            ingestion=ingestion,
             quote_service=quotes,
             paper_mode=paper_mode,
             kraken_reconciliation=recovery,
@@ -759,6 +777,11 @@ def main() -> None:
     )
     serve_parser.add_argument(
         "--open-browser", action="store_true", help="Open the dashboard"
+    )
+    serve_parser.add_argument(
+        "--ingest-feeds",
+        action="store_true",
+        help="Opt in to background Federal Reserve and ECB feed polling",
     )
     serve_parser.add_argument(
         "--kraken-reconcile-credentials",
@@ -1070,6 +1093,7 @@ def main() -> None:
                     open_browser=arguments.open_browser,
                     kraken_reconcile_credentials=arguments.kraken_reconcile_credentials,
                     kraken_live_credentials=arguments.kraken_live_credentials,
+                    ingest_feeds=arguments.ingest_feeds,
                 )
             )
         except (OSError, ValueError, RiskRejected) as error:

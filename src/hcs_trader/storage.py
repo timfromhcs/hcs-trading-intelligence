@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
+from hcs_trader.data.feed_status import IngestRecord
 from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.execution import (
     SpotCanaryApproval,
@@ -43,7 +44,7 @@ from hcs_trader.local_research import ResearchHistory, ResearchRun, ResearchRunS
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEvaluation, RiskRejected
 
-_SCHEMA_VERSION = 19
+_SCHEMA_VERSION = 20
 _SPOT_CASH_TRADE = TypeAdapter(SpotCashTrade)
 _PAPER_FILL = TypeAdapter(PaperFill)
 _RESEARCH_RUN = TypeAdapter(ResearchRun)
@@ -578,7 +579,97 @@ class AuditStore:
                         "ALTER TABLE spot_fills ADD COLUMN cash_booking TEXT"
                     )
                 connection.execute("PRAGMA user_version = 19")
+            if version < 20:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ingest_state (
+                        source_id TEXT PRIMARY KEY NOT NULL,
+                        last_success TEXT,
+                        last_error TEXT,
+                        newest_item_at TEXT,
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        retry_after_until TEXT,
+                        breaker_state TEXT NOT NULL DEFAULT 'CLOSED',
+                        breaker_open_until TEXT,
+                        updated_at TEXT NOT NULL
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 20")
         self._verify_integrity()
+
+    # --- ingestion runtime state (migration 20) ---------------------------
+
+    _INGEST_COLUMNS = (
+        "source_id, last_success, last_error, newest_item_at, "
+        "consecutive_failures, retry_after_until, breaker_state, breaker_open_until"
+    )
+
+    @staticmethod
+    def _ingest_record(row: tuple[Any, ...]) -> IngestRecord:
+        def when(value: str | None) -> datetime | None:
+            return datetime.fromisoformat(value) if value else None
+
+        return IngestRecord(
+            row[0],
+            when(row[1]),
+            row[2],
+            when(row[3]),
+            int(row[4]),
+            when(row[5]),
+            row[6],
+            when(row[7]),
+        )
+
+    def load_ingest_state(self, source_id: str) -> IngestRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {self._INGEST_COLUMNS} FROM ingest_state "  # noqa: S608
+                "WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        return IngestRecord(source_id) if row is None else self._ingest_record(row)
+
+    def list_ingest_state(self) -> list[IngestRecord]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT {self._INGEST_COLUMNS} FROM ingest_state "  # noqa: S608
+                    "ORDER BY source_id"
+                ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error):
+                return []  # database not yet upgraded by the writer process
+            raise
+        return [self._ingest_record(row) for row in rows]
+
+    def save_ingest_state(self, record: IngestRecord) -> None:
+        def text(value: datetime | None) -> str | None:
+            return value.astimezone(UTC).isoformat() if value else None
+
+        with self._connect() as connection, connection:
+            connection.execute(
+                f"INSERT INTO ingest_state ({self._INGEST_COLUMNS}, updated_at) "  # noqa: S608
+                "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET "
+                "last_success=excluded.last_success, last_error=excluded.last_error, "
+                "newest_item_at=excluded.newest_item_at, "
+                "consecutive_failures=excluded.consecutive_failures, "
+                "retry_after_until=excluded.retry_after_until, "
+                "breaker_state=excluded.breaker_state, "
+                "breaker_open_until=excluded.breaker_open_until, "
+                "updated_at=excluded.updated_at",
+                (
+                    record.source_id,
+                    text(record.last_success),
+                    record.last_error,
+                    text(record.newest_item_at),
+                    record.consecutive_failures,
+                    text(record.retry_after_until),
+                    record.breaker_state,
+                    text(record.breaker_open_until),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
 
     def _verify_integrity(self) -> None:
         try:

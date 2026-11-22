@@ -36,6 +36,7 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | GET | `/api/v1/wallets` | Stored read-only wallet snapshots |
 | GET | `/api/v1/market/assets` | Asset registry |
 | GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote |
+| GET | `/api/v1/data/sources` | Per-source freshness (`FRESH`, `STALE`, `DEGRADED`, `MISSING`, `INVALID`), circuit breaker state, `retry_in_seconds` and whether background ingestion is on. Read from the audit database, so it works with ingestion off |
 | GET | `/api/v1/news/search` | Search stored news titles and sources, `q` and `limit` |
 | GET | `/api/v1/portfolio/positions` | Simulated positions |
 | GET | `/api/v1/wallets/{wallet_id}/balances` | Stored balance snapshots for one public address |

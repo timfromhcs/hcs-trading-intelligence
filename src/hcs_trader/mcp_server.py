@@ -43,6 +43,7 @@ from hcs_trader.application.service import (
     spot_order_dict,
 )
 from hcs_trader.backtest import BacktestConfig
+from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
 from hcs_trader.domain.news import NewsItem
@@ -107,6 +108,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "strategy.list": _R,
     "risk.get_status": _R,
     "system.get_health": _R,
+    "data.get_source_status": _R,
     "quant.calculate_indicators": _R,
     "quant.compare_strategy_candidates": _R,
     # READ (earlier names; the renamed ones stay registered as aliases)
@@ -805,6 +807,11 @@ def create_mcp_server(
     def wallet_addresses_tool() -> list[str]:
         """Read public addresses that have stored balance snapshots."""
         return _local_read(service.wallet_addresses)
+
+    @read_tool("data.get_source_status")
+    def data_source_status_tool() -> DataSourcesReport:
+        """Read per-source freshness, circuit breaker state and retry timing."""
+        return _local_read(service.data_sources)
 
     @read_tool("system.get_health")
     def health_tool() -> dict[str, str]:

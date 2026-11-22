@@ -34,3 +34,27 @@ def assess_feed(
     if state.last_error is not None or state.consecutive_failures > 0:
         return DataQuality.DEGRADED
     return DataQuality.FRESH
+
+
+@dataclass(frozen=True, slots=True)
+class IngestRecord:
+    """Persisted per-source runtime state (feed outcome, rate-limit and breaker)."""
+
+    source_id: str
+    last_success: datetime | None = None
+    last_error: str | None = None
+    newest_item_at: datetime | None = None
+    consecutive_failures: int = 0
+    retry_after_until: datetime | None = None
+    breaker_state: str = "CLOSED"
+    breaker_open_until: datetime | None = None
+
+    @property
+    def feed(self) -> FeedState:
+        return FeedState(
+            self.source_id,
+            self.last_success,
+            self.last_error,
+            self.newest_item_at,
+            self.consecutive_failures,
+        )

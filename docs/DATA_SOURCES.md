@@ -17,6 +17,14 @@ Every source has a registry row. A source marked Planned has no adapter, and its
 
 All sources are disabled by default. Feed text is untrusted input. Do not scrape paywalled pages or bypass robots rules.
 
+## Ingestion runtime
+
+- Background polling is opt-in: `hcs-trader serve --ingest-feeds`. The default stays off, so tests and the default PAPER setup make no feed requests. The scheduler runs inside the FastAPI lifespan and is cancelled on shutdown. It polls only the existing Federal Reserve and ECB providers. Mode is `PAPER` with `--paper-market-data`, otherwise `DATA_ONLY`. In `OFFLINE` mode the scheduler never polls. The HTTP client enforces the network allowlist.
+- Per-source state lives in the `ingest_state` table of the audit database (schema version 20): last success, last error, newest item time, consecutive failures, a `Retry-After` deadline and a circuit breaker snapshot. A restart restores the deadline and the open breaker, so a rate-limited provider is not called again early. A 429 or 503 response is never retried in-process. Its pause is the `Retry-After` value, or 60 seconds when absent.
+- A sink or storage failure (for example a locked database) is recorded as the source error, backs the source off exponentially up to one hour and never ends the loop.
+- `QuoteService` uses the same `CircuitBreaker` and persists its state under source ID `kraken`, including the rate-limit cooldown.
+- Freshness uses `assess_feed`. `GET /api/v1/data/sources`, the MCP tool `data.get_source_status` and the Overview panel read one `SourceStatus` model. Sources with an API key requirement stay disabled.
+
 ## Kraken Spot REST
 
 - Source ID `kraken-spot`, operated by Kraken. The adapter requests top-of-book BTC/USD as JSON from the public Depth endpoint. [Endpoint documentation](https://docs.kraken.com/api-reference/market-data/get-order-book)

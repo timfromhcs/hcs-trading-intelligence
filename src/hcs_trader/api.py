@@ -41,6 +41,7 @@ from hcs_trader.application.service import (
     OrderPreview,
     Position,
     StrategyMetrics,
+    Unavailable,
     WalletBalanceView,
     WalletTransactions,
     spot_order_dict,
@@ -50,6 +51,8 @@ from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import BTC_USD, SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.data.runtime import IngestionService
+from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
@@ -312,6 +315,11 @@ class QuoteResponse(BaseModel):
     received_at: datetime | None = None
 
 
+class DataSourcesResponse(DataSourcesReport):
+    ingestion_enabled: bool
+    ingestion_mode: SystemMode | None = None
+
+
 class QuoteRecord(BaseModel):
     source: str
     base_asset: str
@@ -426,6 +434,7 @@ def create_app(
     spot_execution: KrakenSpotExecution | None = None,
     api_token: str | None = None,
     network_policy: NetworkPolicy | None = None,
+    ingestion: IngestionService | None = None,
     max_body_bytes: int = MAX_BODY_BYTES,
     write_rate_limit: int = 60,
     rate_window_seconds: float = 60.0,
@@ -453,6 +462,11 @@ def create_app(
         if quote_service is not None:
             for quote in store.quote_history(BTC_USD, limit=1):
                 quote_service.restore(quote)
+        if quote_service is not None:
+            try:
+                quote_service.restore_state(store.load_ingest_state("kraken"))
+            except sqlite3.Error:
+                pass  # status persistence is best effort; quotes still refresh
         event = store.record_startup()
         # Only allowlisted fields from the local event enter operational logs.
         _logger.info(
@@ -475,7 +489,13 @@ def create_app(
             store.record_audit_event(
                 "spot.recovery.incomplete" if incomplete else "spot.recovery.completed"
             )
-        yield
+        if ingestion is not None:
+            ingestion.start()
+        try:
+            yield
+        finally:
+            if ingestion is not None:
+                await ingestion.stop()
 
     app = FastAPI(
         title="HCS Trading Intelligence",
@@ -582,6 +602,20 @@ def create_app(
     @app.get("/api/v1/system/chains")
     def chain_capabilities() -> list[ChainCapability]:
         return service.chain_capabilities()
+
+    @app.get("/api/v1/data/sources")
+    def data_sources(response: Response) -> DataSourcesResponse:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            report = service.data_sources()
+        except Unavailable as error:
+            raise HTTPException(503, "Source status storage unavailable") from error
+        return DataSourcesResponse(
+            generated_at=report.generated_at,
+            sources=report.sources,
+            ingestion_enabled=ingestion is not None,
+            ingestion_mode=ingestion.network_policy.mode if ingestion else None,
+        )
 
     @app.get("/api/v1/market/quotes")
     async def market_quote(response: Response) -> QuoteResponse:

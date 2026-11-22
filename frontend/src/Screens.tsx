@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getJson, requestSignal, type Capabilities, type SystemStatus } from "./api";
 import { AuditLog } from "./AuditLog";
+import { DataSources } from "./DataSources";
 import { MarketQuote } from "./MarketQuote";
 import { ResearchRuns } from "./ResearchRuns";
 
@@ -81,6 +82,7 @@ export function Overview({
         </Unavailable>
       </section>
       {capabilities.market_data && <MarketQuote />}
+      <DataSources />
       <section className="panel" aria-labelledby="capabilities-heading">
         <h2 id="capabilities-heading">Capabilities</h2>
         <CapabilityList capabilities={capabilities} />

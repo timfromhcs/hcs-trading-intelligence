@@ -21,7 +21,10 @@ from hcs_trader.application.capabilities import (
 )
 from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
 from hcs_trader.data import ecb, fred
+from hcs_trader.data.feed_status import IngestRecord
 from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
+from hcs_trader.data.source_status import DataSourcesReport, build_source_status
+from hcs_trader.data.sources import DEFAULT_REGISTRY
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality, Quote
 from hcs_trader.domain.news import NewsItem
@@ -349,6 +352,27 @@ class ApplicationService:
             return calculate_indicators(history)
         except ValueError:
             raise Unavailable("Local data unavailable") from None
+
+    # --- data sources -----------------------------------------------------
+
+    def data_sources(self) -> DataSourcesReport:
+        """Freshness, breaker state and retry timing per registered source."""
+        try:
+            records = {r.source_id: r for r in self.store.list_ingest_state()}
+        except sqlite3.Error:
+            raise Unavailable("Source status storage unavailable") from None
+        now = datetime.now(UTC)
+        return DataSourcesReport(
+            generated_at=now,
+            sources=[
+                build_source_status(
+                    entry,
+                    records.get(entry.source_id, IngestRecord(entry.source_id)),
+                    now,
+                )
+                for entry in DEFAULT_REGISTRY.all()
+            ],
+        )
 
     # --- news / macro -----------------------------------------------------
 

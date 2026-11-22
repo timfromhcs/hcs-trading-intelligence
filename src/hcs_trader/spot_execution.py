@@ -6,11 +6,18 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.kraken import SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, spot_order_plan_hash
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import Quote
+from hcs_trader.domain.markets import (
+    DEFAULT_MARKET_ID,
+    MARKET_REGISTRY,
+    OrderShapeError,
+    UnknownMarket,
+    validate_order_shape,
+)
 from hcs_trader.kraken_spot import (
     KrakenExecutionError,
     KrakenOrderValidation,
@@ -27,7 +34,7 @@ from hcs_trader.risk import (
 from hcs_trader.storage import AuditStore, KillSwitchCause, RiskOutcome
 
 # Markets the execution path can actually trade; RiskPolicy defaults must not exceed it.
-SUPPORTED_MARKETS = frozenset({"BTC/USD"})
+SUPPORTED_MARKETS = MARKET_REGISTRY.live_allowed_symbols()
 _CANCELLABLE = frozenset({OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED})
 
 
@@ -49,9 +56,10 @@ class KrakenSpotExecution:
     @staticmethod
     def _check_shape(order: SpotOrder, quote: Quote) -> None:
         if (
-            order.venue != BTC_USD.venue
+            order.venue != DEFAULT_MARKET_ID.venue
             or order.market not in SUPPORTED_MARKETS
-            or quote.market != BTC_USD
+            or quote.market != DEFAULT_MARKET_ID
+            or not MARKET_REGISTRY.is_live_allowed(order.market)
             or quote.source != SOURCE
             or order.order_type != SpotOrderType.LIMIT
             or order.limit_price is None
@@ -59,6 +67,15 @@ class KrakenSpotExecution:
             raise RiskRejected(
                 "Submission requires a Kraken BTC/USD limit order and quote"
             )
+        # Strictly additive to the bounds below: registry precision and minimum size.
+        try:
+            validate_order_shape(
+                MARKET_REGISTRY.resolve(order.market), order.quantity, order.limit_price
+            )
+        except (OrderShapeError, UnknownMarket) as error:
+            raise RiskRejected(
+                f"Order shape rejected by the market registry: {error}"
+            ) from None
 
     def _check_bounds(self, order: SpotOrder) -> None:
         if order.limit_price is None or (

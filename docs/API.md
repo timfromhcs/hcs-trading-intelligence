@@ -19,9 +19,9 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | POST | `/api/v1/system/resume` | Alias of `/api/v1/risk/resume` (brief naming; local operator action) |
 | GET | `/api/v1/risk/policy` | Read-only risk policy summary |
 | GET | `/api/v1/system/chains` | Per-chain capability matrix derived from the signer report |
-| GET | `/api/v1/market/quotes` | Live BTC/USD book when public data is enabled, otherwise 503 |
-| GET | `/api/v1/market/quotes/history` | Stored quotes, `limit` up to 500 |
-| GET | `/api/v1/market/candles` | Stored candles, `interval`, `limit` |
+| GET | `/api/v1/market/quotes` | Live BTC/USD book when public data is enabled, otherwise 503. `market` (registry symbol, for example `ETH/USD`) selects an archived quote for other markets, flagged `provider_issue: archived_only`; unknown markets return 422 |
+| GET | `/api/v1/market/quotes/history` | Stored quotes, `limit` up to 500, optional `market` |
+| GET | `/api/v1/market/candles` | Stored candles, `interval`, `limit`, optional `market` |
 | GET | `/api/v1/market/candles.csv` | Same candles as CSV |
 | GET | `/api/v1/market/indicators` | Offline indicators over the latest contiguous candles |
 | POST | `/api/v1/backtests` | Run the SMA research simulation and store a report |
@@ -34,8 +34,9 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | GET | `/api/v1/paper/fills` | Simulated fills |
 | POST | `/api/v1/orders/paper` | Simulated BTC/USD order (needs `--paper-market-data`) |
 | GET | `/api/v1/wallets` | Stored read-only wallet snapshots |
-| GET | `/api/v1/market/assets` | Asset registry |
-| GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote |
+| GET | `/api/v1/market/assets` | Asset registry with status and quote assets |
+| GET | `/api/v1/market/markets` | Market registry: venue pair, precision, minimum size, `status` (`read_only`, `paper`, `live_allowed`) |
+| GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote, optional `market` |
 | GET | `/api/v1/data/sources` | Per-source freshness (`FRESH`, `STALE`, `DEGRADED`, `MISSING`, `INVALID`), circuit breaker state, `retry_in_seconds` and whether background ingestion is on. Read from the audit database, so it works with ingestion off |
 | GET | `/api/v1/news/search` | Search stored news (FTS5 over title and snippet, plus source id), `q` and `limit`. Existing fields are kept; additive provenance fields (`article_id`, `canonical_url`, `language`, `content_hash`, `duplicate_group_id`, `source_reliability`, `revision_count`, `snippet`) and an `envelope` (`source`, `trust_tier`, `untrusted: true`) mark the text as untrusted data |
 | GET | `/api/v1/portfolio/positions` | Simulated positions |

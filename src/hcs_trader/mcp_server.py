@@ -468,6 +468,14 @@ def _percent(basis_points: Decimal) -> str:
     return str((basis_points / Decimal(100)).quantize(Decimal("0.01")))
 
 
+_MarketParam = Annotated[
+    str | None,
+    Field(
+        max_length=16, description="Registry symbol such as ETH/USD; default BTC/USD"
+    ),
+]
+
+
 def _local_read[T](read: Callable[[], T]) -> T:
     try:
         return read()
@@ -530,8 +538,10 @@ def create_mcp_server(
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
         return guard.tool(server, name, tool_tier(name), annotations=annotations)
 
-    def read_candles(interval: int, limit: int) -> list[Candle]:
-        return _local_read(lambda: service.candles(interval, limit))
+    def read_candles(
+        interval: int, limit: int, market: str | None = None
+    ) -> list[Candle]:
+        return _local_read(lambda: service.candles(interval, limit, market))
 
     def need_writer() -> ApplicationService:
         if writer is None:
@@ -549,21 +559,26 @@ def create_mcp_server(
     )
 
     @read_tool("market.get_quotes")
-    def quotes(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> list[Quote]:
-        """Read archived BTC/USD books and original observation times."""
-        return _local_read(lambda: service.quote_history(limit))
+    def quotes(
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+        market: _MarketParam = None,
+    ) -> list[Quote]:
+        """Read archived books and original observation times (default BTC/USD)."""
+        return _local_read(lambda: service.quote_history(limit, market))
 
     @read_tool("market.get_candles")
     def candles(
-        interval: int = 60, limit: Annotated[int, Field(ge=1, le=1000)] = 200
+        interval: int = 60,
+        limit: Annotated[int, Field(ge=1, le=1000)] = 200,
+        market: _MarketParam = None,
     ) -> list[Candle]:
-        """Read archived Kraken BTC/USD candles in chronological order."""
-        return read_candles(interval, limit)
+        """Read archived Kraken candles in chronological order (default BTC/USD)."""
+        return read_candles(interval, limit, market)
 
     @read_tool("quant.calculate_indicators", "quant.get_indicators")
-    def indicators(interval: int = 60) -> Indicators:
+    def indicators(interval: int = 60, market: _MarketParam = None) -> Indicators:
         """Calculate indicators from contiguous stored candles."""
-        return _local_read(lambda: service.indicators(interval))
+        return _local_read(lambda: service.indicators(interval, market))
 
     @read_tool("research.get_runs")
     def research_runs(
@@ -755,17 +770,17 @@ def create_mcp_server(
         return _local_read(_read_approval)
 
     @read_tool("market.get_quote")
-    def latest_quote_tool() -> Quote:
-        """Read the most recent archived BTC/USD best bid and ask."""
-        quote = _local_read(service.latest_quote)
+    def latest_quote_tool(market: _MarketParam = None) -> Quote:
+        """Read the most recent archived best bid and ask (default BTC/USD)."""
+        quote = _local_read(lambda: service.latest_quote(market))
         if quote is None:
-            raise ToolError("No BTC/USD quote is archived")
+            raise ToolError("No quote is archived for this market")
         return quote
 
     @read_tool("market.get_orderbook_snapshot")
-    def orderbook_tool() -> OrderBookSnapshot:
+    def orderbook_tool(market: _MarketParam = None) -> OrderBookSnapshot:
         """Read the top of book from the latest archived quote, with freshness."""
-        return _local_read(service.orderbook_snapshot)
+        return _local_read(lambda: service.orderbook_snapshot(market))
 
     @read_tool("news.search")
     def news_search_tool(

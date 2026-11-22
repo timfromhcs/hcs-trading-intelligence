@@ -68,6 +68,10 @@ class QuoteService:
         self._next_refresh = float("-inf")
         self._failure_count = 0
 
+    @property
+    def market(self) -> MarketId:
+        return self._market
+
     def restore(self, quote: Quote) -> None:
         if (
             quote.market == self._market

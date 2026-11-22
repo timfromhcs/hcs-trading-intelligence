@@ -33,7 +33,6 @@ from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.fred import fetch_fred_cpi
 from hcs_trader.data.kraken import (
-    BTC_USD,
     CANDLE_INTERVALS,
     SOURCE,
     KrakenQuoteProvider,
@@ -44,6 +43,7 @@ from hcs_trader.data.runtime import IngestionService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import DataQuality
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID, MARKET_REGISTRY
 from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.domain.wallet import (
     SolanaBalance,
@@ -159,9 +159,10 @@ async def probe_kraken_validate() -> dict[str, object]:
         return await kraken_validate_probe(key, secret, client)
 
 
-async def import_candles(interval: int) -> int:
+async def import_candles(interval: int, market: str | None = None) -> int:
+    market_id = MARKET_REGISTRY.resolve(market).market_id
     async with httpx2.AsyncClient(trust_env=False) as client:
-        candles = await KrakenQuoteProvider(client).get_candles(BTC_USD, interval)
+        candles = await KrakenQuoteProvider(client).get_candles(market_id, interval)
     store = local_store()
     store.initialize()
     return store.record_candles(candles)
@@ -216,7 +217,7 @@ def freeze_research(
         config = TypeAdapter(WalkForwardConfig).validate_json(model)
     store = local_store()
     store.initialize()
-    development = store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
+    development = store.candle_history(DEFAULT_MARKET_ID, SOURCE, interval, limit=limit)
     candidate = freeze_candidate(development, config, commitment)
     payload = CANDIDATE_JSON.dump_json(candidate).decode("utf-8")
     store.freeze_holdout(commitment, payload)
@@ -256,7 +257,7 @@ async def market_research(
     store = local_store()
     store.initialize()
     evidence = calculate_indicators(
-        store.candle_history(BTC_USD, SOURCE, interval, limit=720)
+        store.candle_history(DEFAULT_MARKET_ID, SOURCE, interval, limit=720)
     )
     if alias is None and token_file is None and manifest_path is None:
         report = await research_report(evidence, NoneModelProvider())
@@ -472,7 +473,9 @@ async def submit_canary_order(
             live_policy=lambda: require_runtime_live_policy(store),
         )
         quotes = QuoteService(
-            KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+            KrakenQuoteProvider(client),
+            DEFAULT_MARKET_ID,
+            record_quote=store.record_quote,
         )
         snap = await quotes.snapshot()
         if snap.quality is not DataQuality.FRESH or snap.quote is None:
@@ -603,7 +606,7 @@ async def serve(
         quotes = (
             QuoteService(
                 KrakenQuoteProvider(client),
-                BTC_USD,
+                DEFAULT_MARKET_ID,
                 record_quote=store.record_quote,
                 record_state=store.save_ingest_state,
             )
@@ -845,7 +848,12 @@ def main() -> None:
         help="Enable paper BTC/USD orders using public Kraken quotes",
     )
     import_parser = commands.add_parser(
-        "import-candles", help="Import closed Kraken BTC/USD candles into local history"
+        "import-candles", help="Import closed Kraken candles into local history"
+    )
+    import_parser.add_argument(
+        "--market",
+        choices=[m.symbol for m in MARKET_REGISTRY.markets()],
+        default=MARKET_REGISTRY.default.symbol,
     )
     import_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
@@ -1147,10 +1155,10 @@ def main() -> None:
             parser.exit(1, f"{error}\n")
     elif arguments.command == "import-candles":
         try:
-            count = asyncio.run(import_candles(arguments.interval))
+            count = asyncio.run(import_candles(arguments.interval, arguments.market))
         except QuoteUnavailable as error:
             parser.exit(1, f"{error}\n")
-        print(f"Imported {count} new BTC/USD candles.")
+        print(f"Imported {count} new {arguments.market} candles.")
     elif arguments.command == "import-news":
         try:
             count = asyncio.run(import_news())

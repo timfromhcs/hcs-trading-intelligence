@@ -37,6 +37,7 @@ from hcs_trader.application import (
 )
 from hcs_trader.application.service import (
     AssetInfo,
+    MarketInfo,
     OrderBookSnapshot,
     OrderPreview,
     Position,
@@ -48,7 +49,7 @@ from hcs_trader.application.service import (
 )
 from hcs_trader.backtest import BacktestConfig, BacktestResult
 from hcs_trader.data import ecb, fred
-from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.kraken import SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.data.runtime import IngestionService
@@ -57,6 +58,7 @@ from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID
 from hcs_trader.domain.news import NewsHit, NewsItem
 from hcs_trader.domain.paper import (
     PaperBalance,
@@ -303,6 +305,7 @@ class Capabilities(BaseModel):
 
 
 class QuoteResponse(BaseModel):
+    market: str | None = None
     source: str
     base_asset: str
     quote_asset: str
@@ -460,7 +463,7 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store.initialize()
         if quote_service is not None:
-            for quote in store.quote_history(BTC_USD, limit=1):
+            for quote in store.quote_history(DEFAULT_MARKET_ID, limit=1):
                 quote_service.restore(quote)
         if quote_service is not None:
             try:
@@ -618,19 +621,48 @@ def create_app(
         )
 
     @app.get("/api/v1/market/quotes")
-    async def market_quote(response: Response) -> QuoteResponse:
+    async def market_quote(
+        response: Response,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> QuoteResponse:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            spec = service.resolve_market(market)
+        except ApplicationError as error:
+            raise _http_error(error) from error
         if quote_service is None:
             raise HTTPException(503, "Public market data is disabled")
-        response.headers["Cache-Control"] = "no-store"
+        if spec.market_id != quote_service.market:
+            # Only the configured market has a live refresh; others are archive reads.
+            try:
+                archived = service.latest_quote(spec.symbol)
+            except ApplicationError as error:
+                raise _http_error(error) from error
+            return QuoteResponse(
+                market=spec.symbol,
+                source=archived.source if archived else SOURCE,
+                base_asset=str(spec.base),
+                quote_asset=str(spec.quote),
+                quality=(
+                    service.quote_quality(archived) if archived else DataQuality.MISSING
+                ),
+                provider_issue="archived_only",
+                bid=archived.bid if archived else None,
+                ask=archived.ask if archived else None,
+                bid_updated_at=archived.bid_updated_at if archived else None,
+                ask_updated_at=archived.ask_updated_at if archived else None,
+                received_at=archived.received_at if archived else None,
+            )
         try:
             snapshot = await quote_service.snapshot()
         except sqlite3.Error as error:
             raise HTTPException(503, "Quote storage unavailable") from error
         quote = snapshot.quote
         return QuoteResponse(
+            market=spec.symbol,
             source=SOURCE,
-            base_asset=str(BTC_USD.base),
-            quote_asset=str(BTC_USD.quote),
+            base_asset=str(spec.base),
+            quote_asset=str(spec.quote),
             quality=snapshot.quality,
             provider_issue=snapshot.provider_issue,
             bid=quote.bid if quote else None,
@@ -643,11 +675,12 @@ def create_app(
     @app.get("/api/v1/market/quotes/history")
     def quote_history(
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        market: Annotated[str | None, Query(max_length=16)] = None,
     ) -> list[QuoteRecord]:
         try:
-            quotes = store.quote_history(BTC_USD, limit=limit)
-        except sqlite3.Error as error:
-            raise HTTPException(503, "Quote storage unavailable") from error
+            quotes = service.quote_history(limit, market)
+        except ApplicationError as error:
+            raise _http_error(error) from error
         return [
             QuoteRecord(
                 source=quote.source,
@@ -662,15 +695,19 @@ def create_app(
             for quote in quotes
         ]
 
-    def read_candles(interval: int, limit: int) -> list[Candle]:
+    def read_candles(
+        interval: int, limit: int, market: str | None = None
+    ) -> list[Candle]:
         try:
-            return service.candles(interval, limit)
+            return service.candles(interval, limit, market)
         except ApplicationError as error:
             raise _http_error(error) from error
 
     @app.get("/api/v1/market/candles")
     def candle_history(
-        interval: int = 60, limit: Annotated[int, Query(ge=1, le=1000)] = 720
+        interval: int = 60,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 720,
+        market: Annotated[str | None, Query(max_length=16)] = None,
     ) -> list[CandleRecord]:
         return [
             CandleRecord(
@@ -688,13 +725,16 @@ def create_app(
                 volume=candle.volume,
                 trade_count=candle.trade_count,
             )
-            for candle in read_candles(interval, limit)
+            for candle in read_candles(interval, limit, market)
         ]
 
     @app.get("/api/v1/market/indicators")
-    def indicators(interval: int = 60) -> Indicators:
+    def indicators(
+        interval: int = 60,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> Indicators:
         try:
-            return service.indicators(interval)
+            return service.indicators(interval, market)
         except ApplicationError as error:
             raise _http_error(error) from error
 
@@ -1085,11 +1125,18 @@ def create_app(
     def market_assets() -> list[AssetInfo]:
         return service.list_assets()
 
+    @app.get("/api/v1/market/markets")
+    def market_registry() -> list[MarketInfo]:
+        return service.list_markets()
+
     @app.get("/api/v1/market/orderbook")
-    def market_orderbook(response: Response) -> OrderBookSnapshot:
+    def market_orderbook(
+        response: Response,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> OrderBookSnapshot:
         response.headers["Cache-Control"] = "no-store"
         try:
-            return service.orderbook_snapshot()
+            return service.orderbook_snapshot(market)
         except ApplicationError as error:
             raise _http_error(error) from error
 

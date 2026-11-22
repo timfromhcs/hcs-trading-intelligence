@@ -32,6 +32,7 @@ FLOORS: dict[str, int] = {
     "domain/lifecycle.py": 90,
     "domain/macro.py": 90,
     "domain/market_data.py": 90,
+    "domain/markets.py": 90,
     "domain/news.py": 90,
     "domain/paper.py": 90,
     "domain/signing.py": 86,  # TODO: below 90

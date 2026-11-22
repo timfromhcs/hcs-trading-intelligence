@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from hcs_trader.domain.execution import SpotOrder, SpotSide, spot_order_plan_hash
 from hcs_trader.domain.market_data import DataQuality, Quote
+from hcs_trader.domain.markets import MARKET_REGISTRY
 from hcs_trader.portfolio_state import PortfolioState
 
 _BPS = Decimal("10000")
@@ -36,7 +37,7 @@ class RiskPolicy:
     kill_switch_active: bool = False
     allowed_venues: frozenset[str] = frozenset({"kraken"})
     # Must stay equal to the executable scope (spot_execution.SUPPORTED_MARKETS).
-    allowed_markets: frozenset[str] = frozenset({"BTC/USD"})
+    allowed_markets: frozenset[str] = MARKET_REGISTRY.live_allowed_symbols()
     min_notional_usd: Decimal = Decimal("10.00")
     max_notional_usd: Decimal = Decimal("1000.00")
     max_spread_bps: Decimal = Decimal("100.00")  # 1.00%
@@ -171,6 +172,11 @@ class RiskEngine:
             return f"Venue '{order.venue}' is not allowlisted for live execution"
         if order.market not in pol.allowed_markets:
             return f"Market '{order.market}' is not allowlisted for live execution"
+        if not MARKET_REGISTRY.is_live_allowed(order.market):
+            return (
+                f"Market '{order.market}' is not live_allowed in the market "
+                "registry (read-only or paper)"
+            )
         if strategy_version not in pol.approved_strategy_versions:
             return (
                 f"Strategy version '{strategy_version}' is not approved "

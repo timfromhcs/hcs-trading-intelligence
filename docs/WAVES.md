@@ -44,6 +44,8 @@ Everything runs locally with internet access. All market, news and macro data co
 | W1-D Loopback hardening | Host and Origin allowlist, `Sec-Fetch-Site` check, CSP, JSON content type on writes, Host validation on MCP HTTP. Confirm the locked `mcp` version matches the `pyproject.toml` pin | DNS-rebinding test fails closed; CI resolves the pinned SDK |
 | W1-E CI tiers | Nightly and weekly workflows, Hypothesis profiles, per-module coverage floors (90% for risk, signing, execution, domain), cassette tooling with network blocked by default, 13.2 invariant map. Triage Dependabot PR #3 (TypeScript 7) behind a green frontend build | floors measured first, then enforced; no gate weakened |
 
+**W1-B status note.** Implemented: registry, per-market Kraken quotes, candles and order book (BTC, ETH, SOL, LTC against USD and EUR, read-only for all but BTC/USD), DGB registered read-only with no pair. Paper execution and live submission stay BTC/USD only; paper support for ETH, SOL and LTC is deferred. The live Kraken shape check now also enforces registry precision and minimum size (`validate_order_shape`), additive to the existing bounds. Quote archiving is BTC/USD only, so other markets return archived data only if candles or quotes were imported.
+
 ## Wave 2: Free data breadth
 
 - Market providers behind the registry, each verified and rate-limited by a token bucket: Kraken (REST and WebSocket v2), Coinbase Exchange public, Binance `data-api.binance.vision` and `data-stream.binance.vision` (market data only, jurisdiction check first), plus one or two more verified venues. CoinGecko keyless as metadata fallback only.

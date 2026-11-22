@@ -2,9 +2,9 @@
 
 import asyncio
 
-from hcs_trader.data.kraken import BTC_USD
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.market_data import DataQuality
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID
 from hcs_trader.domain.paper import (
     PaperFill,
     PaperOrder,
@@ -31,7 +31,7 @@ class PaperExecution:
         if (
             snapshot.quality is not DataQuality.FRESH
             or quote is None
-            or quote.market != BTC_USD
+            or quote.market != DEFAULT_MARKET_ID
         ):
             raise PaperRejected("Paper execution requires a fresh BTC/USD quote")
         price, fee = simulated_terms(order, quote)

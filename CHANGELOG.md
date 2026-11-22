@@ -7,7 +7,7 @@
 - Skills follow the Agent Skills frontmatter (`name`, `description`, `metadata`); skill directories are hyphenated to match their names; a test checks every `required_tools` entry against the registered MCP tools and the declared tier.
 - Run the ingestion scheduler in the app lifespan behind the opt-in `serve --ingest-feeds` flag (default off, never polls in OFFLINE mode). Persist ingest state, `Retry-After` deadlines and breaker snapshots in the audit database (schema version 20) so a restart does not hammer a provider. Sink and storage errors no longer stop the loop. `QuoteService` now shares the `CircuitBreaker` and persists its state.
 - Add `GET /api/v1/data/sources`, the MCP read tool `data.get_source_status` and a Data sources panel on the Overview screen.
-
+- News provenance (schema 21): stored news now carries article id, canonical URL, language, content hash, duplicate group and source trust tier. Tracking-parameter URLs collapse onto one article and a changed title is kept as a revision in `news_revisions`. Dedup state lives in SQLite and survives restart. `news.search` and `GET /api/v1/news/search` use an FTS5 index over title and snippet (with a substring fallback) and add provenance fields plus an `envelope` marking the text as untrusted. Existing fields are unchanged.
 - Enforce the operator's hot-wallet USD cap and portfolio share in the LIVE risk engine. A missing valuation blocks authorization when a share cap is configured.
 - Require venue health and a recent reconciliation timestamp for LIVE authorization. Reject reconciliation timestamps in the future.
 

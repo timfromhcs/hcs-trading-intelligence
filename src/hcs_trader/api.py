@@ -57,7 +57,7 @@ from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
-from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.news import NewsHit, NewsItem
 from hcs_trader.domain.paper import (
     PaperBalance,
     PaperFill,
@@ -1097,7 +1097,7 @@ def create_app(
     def news_search(
         q: Annotated[str, Query(min_length=1, max_length=100)],
         limit: Annotated[int, Query(ge=1, le=100)] = 25,
-    ) -> list[NewsItem]:
+    ) -> list[NewsHit]:
         try:
             return service.search_news(q, limit)
         except ApplicationError as error:

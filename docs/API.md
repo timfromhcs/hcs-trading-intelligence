@@ -37,7 +37,7 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | GET | `/api/v1/market/assets` | Asset registry |
 | GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote |
 | GET | `/api/v1/data/sources` | Per-source freshness (`FRESH`, `STALE`, `DEGRADED`, `MISSING`, `INVALID`), circuit breaker state, `retry_in_seconds` and whether background ingestion is on. Read from the audit database, so it works with ingestion off |
-| GET | `/api/v1/news/search` | Search stored news titles and sources, `q` and `limit` |
+| GET | `/api/v1/news/search` | Search stored news (FTS5 over title and snippet, plus source id), `q` and `limit`. Existing fields are kept; additive provenance fields (`article_id`, `canonical_url`, `language`, `content_hash`, `duplicate_group_id`, `source_reliability`, `revision_count`, `snippet`) and an `envelope` (`source`, `trust_tier`, `untrusted: true`) mark the text as untrusted data |
 | GET | `/api/v1/portfolio/positions` | Simulated positions |
 | GET | `/api/v1/wallets/{wallet_id}/balances` | Stored balance snapshots for one public address |
 | GET | `/api/v1/wallets/{wallet_id}/transactions` | Reports that no history is stored locally |

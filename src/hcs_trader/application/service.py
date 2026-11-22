@@ -27,7 +27,7 @@ from hcs_trader.data.source_status import DataSourcesReport, build_source_status
 from hcs_trader.data.sources import DEFAULT_REGISTRY
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality, Quote
-from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.news import NewsHit, NewsItem
 from hcs_trader.domain.paper import (
     PaperBalance,
     PaperConflict,
@@ -382,16 +382,14 @@ class ApplicationService:
         except sqlite3.Error:
             raise Unavailable("News storage unavailable") from None
 
-    def search_news(self, query: str, limit: int) -> list[NewsItem]:
-        needle = query.strip().casefold()
+    def search_news(self, query: str, limit: int) -> list[NewsHit]:
+        needle = query.strip()
         if not needle or len(needle) > 100:
             raise InvalidRequest("Search text must be 1 to 100 characters")
-        hits = [
-            item
-            for item in self.news(100)
-            if needle in item.title.casefold() or needle in item.source.casefold()
-        ]
-        return hits[:limit]
+        try:
+            return self.store.search_news(needle, limit=limit)
+        except sqlite3.Error:
+            raise Unavailable("News storage unavailable") from None
 
     def news_timeline(self, limit: int) -> list[NewsItem]:
         return sorted(self.news(limit), key=lambda item: item.published_at)

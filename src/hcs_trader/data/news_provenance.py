@@ -59,9 +59,30 @@ class ProvenancedNews:
     raw_payload_reference: str | None = None
 
 
+def source_tier(source_id: str) -> str:
+    """Trust tier for a source: registered in the source registry or unverified."""
+    from hcs_trader.data.sources import DEFAULT_REGISTRY
+
+    try:
+        DEFAULT_REGISTRY.get(source_id)
+    except KeyError:
+        return "unverified"
+    return "registered"
+
+
+def source_language(source_id: str, default: str = "en") -> str:
+    from hcs_trader.data.sources import DEFAULT_REGISTRY
+
+    try:
+        return DEFAULT_REGISTRY.get(source_id).language
+    except KeyError:
+        return default
+
+
 def enrich(
     item: NewsItem,
     *,
+    strict: bool = True,
     language: str = "en",
     region: str | None = None,
     entities: tuple[str, ...] = (),
@@ -69,7 +90,12 @@ def enrich(
     event_type: str | None = None,
     raw_payload_reference: str | None = None,
 ) -> ProvenancedNews:
-    canonical = canonical_url(item.url)
+    try:
+        canonical = canonical_url(item.url)
+    except ValueError:
+        if strict:
+            raise
+        canonical = item.url.strip()  # stored as-is; never fetched
     digest = content_hash(item.title)
     return ProvenancedNews(
         hashlib.sha256(f"{item.source}\n{canonical}".encode()).hexdigest(),

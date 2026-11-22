@@ -246,7 +246,7 @@ def test_migration_20_upgrade_and_backup_restore(tmp_path: Path) -> None:
         connection.execute("PRAGMA user_version = 19")
     store.initialize()  # upgrade from 19
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (20,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (21,)
     saved = _record(
         last_success=T0,
         last_error="Limited",

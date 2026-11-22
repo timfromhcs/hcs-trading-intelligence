@@ -2,8 +2,10 @@
 
 The global 80% gate in pyproject.toml stays as it is; these floors are additional and
 module-specific. A floor is 90 where the module already meets 90, otherwise the value
-measured on 2026-11 rounded down (see docs/RELEASE.md). Raise a floor when a module
-improves; never lower one to get a build green.
+measured on 2026-11 (Windows, full suite) rounded down; the method is in
+docs/INVARIANTS.md ("Coverage floors"). Raise a floor when a module improves; never
+lower one to get a build green. Keep one FLOORS entry per line so concurrent additions
+merge. A new module under domain/ needs its own entry (tests/test_coverage_floors.py).
 
 Usage: pytest --cov-report=xml && python scripts/check_coverage_floors.py [coverage.xml]
 """

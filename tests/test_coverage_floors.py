@@ -40,7 +40,12 @@ def test_every_domain_module_has_a_floor() -> None:
     expected = {
         f"domain/{p.name}" for p in domain.glob("*.py") if p.name != "__init__.py"
     }
-    assert expected <= set(floors.FLOORS)
+    missing = sorted(expected - set(floors.FLOORS))
+    assert not missing, (
+        f"No coverage floor for {missing}. Add one line per module to FLOORS in "
+        "scripts/check_coverage_floors.py (use 90, or the measured value rounded down "
+        "plus a TODO comment and a docs/KNOWN_LIMITATIONS.md entry)."
+    )
 
 
 def test_floors_never_exceed_target_and_cover_core_modules() -> None:

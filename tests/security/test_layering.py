@@ -190,7 +190,14 @@ def test_allowance_table_covers_every_signing_and_execution_module() -> None:
         or path.stem in {"signing", "keystore", "spot_port"}
     }
     # signing.py is guarded by PROTECTED above; the rest must be in the table.
-    assert present - {"signing.py"} <= set(SIGNING_AND_EXECUTION_ALLOWED)
+    missing = sorted(present - {"signing.py"} - set(SIGNING_AND_EXECUTION_ALLOWED))
+    assert not missing, (
+        f"{missing} not in SIGNING_AND_EXECUTION_ALLOWED "
+        "(tests/security/test_layering.py). "
+        "Add one line per module mapping it to the frozenset of hcs_trader/third-party "
+        "import prefixes it may use (frozenset() if none), and never a network or LLM "
+        "adapter."
+    )
 
 
 def test_allowances_are_effective_and_not_blanket() -> None:

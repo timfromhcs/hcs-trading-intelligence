@@ -50,6 +50,13 @@ jobs:
             uv run --locked --with mutmut==3.8.1 mutmut results || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Flag a mutation run that produced nothing
+        if: always()
+        run: |
+          if [ -z "$(ls -A mutants 2>/dev/null)" ]; then
+            echo '::warning::mutmut produced no mutants/ output; the report-only job is not measuring anything'
+            echo '**WARNING: mutmut produced no output.**' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

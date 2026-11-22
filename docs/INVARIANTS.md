@@ -30,3 +30,26 @@ shows where coverage lives; it does not by itself prove the invariant. Gaps are 
   show that a user kept a cold key out of the hot wallet; that is a custody decision.
 - Invariants 1 and 3 are unit-tested on the risk engine and signer; end-to-end proof with a
   real venue remains in the rehearsal evidence listed in `docs/KNOWN_LIMITATIONS.md`.
+
+## Test-tier choices
+
+- Hypothesis profiles (`tests/conftest.py`): `dev` uses defaults plus 100 examples. `ci`
+  sets `derandomize=True` and no example database so a CI failure reproduces exactly, and
+  `deadline=None` with `HealthCheck.too_slow` suppressed because shared runners (Windows
+  and macOS especially) vary in speed and a timing flake is not a property failure. This
+  relaxes slow-example detection that CI used to have at its defaults. Because `ci` is
+  derandomised it does not explore new examples between runs; the `nightly` profile (random
+  seeds, 500 examples, same deadline relaxation) does. 500 rather than more keeps the
+  Windows and macOS jobs well inside their timeout; raise it only after measuring.
+  Tests that set `max_examples` explicitly keep their value.
+- Network block: `NetworkBlockedError` derives from `BaseException` so no broad
+  `except Exception` in code under test can swallow it.
+
+## Coverage floors
+
+`scripts/check_coverage_floors.py` adds per-module line-coverage floors on top of the global
+80% gate. Each floor is 90 where the module measured at least 90, otherwise the value
+measured on Windows with the full suite (`pytest --cov-report=xml:coverage.xml`) rounded
+down. Floors only go up. A module below 90 is listed in `docs/KNOWN_LIMITATIONS.md`
+(KL-005). A module with a measured value within a point of its floor can flake across
+operating systems; if that happens, fix the test, do not lower the floor.

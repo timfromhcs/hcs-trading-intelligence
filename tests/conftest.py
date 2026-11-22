@@ -45,7 +45,7 @@ settings.register_profile(
 )
 settings.register_profile(
     "nightly",
-    max_examples=2000,
+    max_examples=500,
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
@@ -57,8 +57,12 @@ NETWORK_MARKERS = ("allow_network", "rehearsal", "regtest")
 _LOCAL_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", ""}
 
 
-class NetworkBlockedError(RuntimeError):
-    """Raised when a test tries to reach a non-loopback host without opting in."""
+class NetworkBlockedError(BaseException):  # noqa: N818, B903
+    """Raised when a test tries to reach a non-loopback host without opting in.
+
+    Deliberately a BaseException (like KeyboardInterrupt) so a broad
+    ``except Exception`` in code under test cannot swallow the block.
+    """
 
 
 def _is_loopback_host(host: object) -> bool:

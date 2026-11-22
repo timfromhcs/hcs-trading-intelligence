@@ -48,7 +48,7 @@ Each tool declares one tier: `READ`, `RESEARCH`, `PAPER_TRADE`, `LIVE_TRADE` or 
 
 ### Loopback Streamable HTTP
 
-`mcp_server.create_http_app` serves a stateless Streamable HTTP app and `run_http` binds `127.0.0.1` only. Each request needs a bearer token issued by `ClientRegistry.register(client_id, tiers)`. The registry stores only token hashes, can revoke a client at any time and refuses `ADMIN_LOCAL` and `LIVE_TRADE` for network clients. Non-loopback peers get 403 and missing or revoked tokens get 401. The client's tiers replace the server-level grant for its requests.
+`mcp_server.create_http_app` serves a stateless Streamable HTTP app and `run_http` binds `127.0.0.1` only. Each request needs a bearer token issued by `ClientRegistry.register(client_id, tiers)`. The registry stores only token hashes, can revoke a client at any time and refuses `ADMIN_LOCAL` and `LIVE_TRADE` for network clients. Non-loopback peers get 403 and missing or revoked tokens get 401. Before the token is read, `Host` must be a local name on the bound port and any `Origin` must be a local http origin on that port, and `Sec-Fetch-Site` must be absent, `same-origin` or `none` (403 otherwise), which blocks DNS rebinding and browser cross-origin calls. `hcs-trader mcp-http [--port 8766] [--client-id ID] [--tier READ|RESEARCH|PAPER_TRADE]` starts it on 127.0.0.1, registers one client in memory and prints its random bearer token once; `ADMIN_LOCAL` and `LIVE_TRADE` cannot be requested. The client's tiers replace the server-level grant for its requests.
 
 ### Chain capability resource
 

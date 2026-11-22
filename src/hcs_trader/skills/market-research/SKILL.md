@@ -1,9 +1,11 @@
 ---
 name: market-research
-version: 1.0.0
-purpose: Collect, validate, and analyze market candles, quotes, and world news events
-capability_tier: READ
-required_tools: market.get_quotes, market.get_candles, news.get_events
+description: Collect, validate and analyze market candles, quotes and world news events. Use for scheduled data cycles, market briefs and pre-backtest data readiness checks.
+metadata:
+  version: "1.0.0"
+  purpose: "Collect, validate, and analyze market candles, quotes, and world news events"
+  capability_tier: READ
+  required_tools: "market.get_quotes, market.get_candles, news.get_events"
 ---
 
 # Market Research Skill

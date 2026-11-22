@@ -1,9 +1,11 @@
 ---
 name: release-engineer
-version: 1.0.0
-purpose: Multi-platform build verification, supply chain auditing, SPDX license compliance, and release gate enforcement
-capability_tier: ADMIN_LOCAL
-required_tools: audit.get_events
+description: Verify multi-platform builds, supply chain evidence, license compliance and release gates. Use before tagging a release candidate or reviewing release evidence.
+metadata:
+  version: "1.0.0"
+  purpose: "Multi-platform build verification, supply chain auditing, SPDX license compliance, and release gate enforcement"
+  capability_tier: ADMIN_LOCAL
+  required_tools: "audit.get_events"
 ---
 
 # Release Engineer Skill

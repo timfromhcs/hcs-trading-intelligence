@@ -18,7 +18,7 @@ import uvicorn
 from fastapi.testclient import TestClient
 
 from hcs_trader import __main__ as launcher
-from hcs_trader.api import create_app
+from hcs_trader.api import LOCAL_PORT, create_app
 from hcs_trader.data.kraken import BTC_USD, SOURCE, KrakenQuoteProvider
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
@@ -897,7 +897,9 @@ def test_serve_recovers_kraken_orders_only_when_opted_in(
             self.app: Any = config.app
 
         async def serve(self) -> None:
-            with TestClient(self.app, base_url="http://127.0.0.1") as client:
+            # serve pins the Host allowlist to the bound port
+            base = f"http://127.0.0.1:{LOCAL_PORT}"
+            with TestClient(self.app, base_url=base) as client:
                 status.update(client.get("/api/v1/system/status").json())
                 assert (
                     client.get("/api/v1/system/capabilities").json()["live_orders"]

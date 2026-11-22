@@ -1,6 +1,6 @@
 # Local REST API
 
-The service binds to `127.0.0.1:8765` only. The schema is at `/openapi.json`. Requests must carry an accepted loopback `Host` header, and state-changing requests (`POST`) must come from a matching local origin, which blocks cross-site requests from other browser tabs. There is no remote access mode. The API has no generic key export, seed export, arbitrary transfer, arbitrary signing, withdrawal or risk-limit mutation endpoint, and none may be added.
+The service binds to `127.0.0.1:8765` only. The schema is at `/openapi.json`. Requests must carry a `Host` of `localhost`, `127.0.0.1` or `[::1]` on the bound port (400 otherwise, which stops DNS rebinding; extra names via `create_app(extra_allowed_hosts=...)`). State-changing requests must have no `Origin` or a local http origin on the bound port, and `Sec-Fetch-Site` must be absent, `same-origin` or `none` (403 otherwise). Writes with a body need `application/json` (415) and at most 1 MiB (413). Every response, including rejections and the static UI, carries a Content-Security-Policy (`default-src 'self'`, `connect-src 'self'`, no inline script, `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`. The checks live in `loopback.py` and are shared with MCP HTTP. There is no remote access mode. The API has no generic key export, seed export, arbitrary transfer, arbitrary signing, withdrawal or risk-limit mutation endpoint, and none may be added.
 
 Money and prices are returned as decimal strings. Times are UTC. Endpoints that read stored data work with provider access disabled and return the original observation times.
 
@@ -77,4 +77,4 @@ Errors use FastAPI's JSON `detail`. Typical codes: 403 foreign origin, 404 unkno
 
 ## Auth scopes
 
-The REST API relies on loopback binding and origin checks. Per-client scopes and tokens exist only for MCP, where tiers are enforced at tool execution (see [MCP](MCP.md)). Streamable HTTP and remote access are not supported.
+The REST API relies on loopback binding and origin checks. Per-client scopes and tokens exist only for MCP, where tiers are enforced at tool execution (see [MCP](MCP.md)). Remote access is not supported.

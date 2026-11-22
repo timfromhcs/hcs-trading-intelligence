@@ -19,14 +19,12 @@ from hashlib import sha256
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from hcs_trader.application import (
     ApplicationError,
@@ -69,6 +67,7 @@ from hcs_trader.indicators import Indicators
 from hcs_trader.kraken_spot import KrakenAmbiguousExecutionError, KrakenOrderRejected
 from hcs_trader.local_research import ResearchHistory
 from hcs_trader.logging_config import correlation_id
+from hcs_trader.loopback import HostPolicy, fetch_site_allowed
 from hcs_trader.network_policy import NetworkPolicy, SystemMode
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
@@ -102,6 +101,20 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
+SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (
+        b"content-security-policy",
+        b"default-src 'self'; script-src 'self'; style-src 'self'; "
+        b"img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+        b"object-src 'none'; base-uri 'none'; form-action 'self'; "
+        b"frame-ancestors 'none'",
+    ),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-frame-options", b"DENY"),
+)
+
+
 def generate_api_token() -> str:
     """Random per-run token; the operator shows or stores it locally."""
     return secrets.token_urlsafe(32)
@@ -122,8 +135,10 @@ class _Hardening:
         max_body: int,
         rate_limit: int,
         window: float,
+        hosts: HostPolicy | None = None,
     ) -> None:
         self.app = app
+        self.hosts = hosts or HostPolicy()
         self.token = token
         self.max_body = max_body
         self.rate_limit = rate_limit
@@ -143,6 +158,7 @@ class _Hardening:
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
             (b"x-request-id", rid.encode()),
+            *SECURITY_HEADERS,
             *(extra or []),
         ]
         await send(
@@ -187,13 +203,14 @@ class _Hardening:
                     return
             except ValueError:
                 pass  # non-IP peer (in-process test transport)
+        if not self.hosts.host_allowed(headers.get("host")):
+            await self._reject(send, 400, "Invalid host header", rid)
+            return
         mutating = scope["method"] not in SAFE_METHODS
         if mutating:
             origin = headers.get("origin")
-            if headers.get("sec-fetch-site") == "cross-site" or (
-                origin is not None
-                and (urlsplit(origin).hostname or "")
-                not in {LOOPBACK_HOST, "localhost"}
+            if not fetch_site_allowed(headers.get("sec-fetch-site")) or (
+                origin is not None and not self.hosts.origin_allowed(origin)
             ):
                 await self._reject(send, 403, "Local origin required", rid)
                 return
@@ -242,9 +259,11 @@ class _Hardening:
 
         async def tagged_send(message: Any) -> None:
             if message["type"] == "http.response.start":
+                present = {k.lower() for k, _ in message["headers"]}
                 message["headers"] = [
                     *message["headers"],
                     (b"x-request-id", rid.encode()),
+                    *(h for h in SECURITY_HEADERS if h[0] not in present),
                 ]
             await send(message)
 
@@ -410,6 +429,8 @@ def create_app(
     max_body_bytes: int = MAX_BODY_BYTES,
     write_rate_limit: int = 60,
     rate_window_seconds: float = 60.0,
+    bound_port: int | None = None,
+    extra_allowed_hosts: tuple[str, ...] = (),
 ) -> FastAPI:
     token = api_token if api_token is not None else os.environ.get(API_TOKEN_ENV)
     if token is not None and len(token) < 16:
@@ -462,9 +483,9 @@ def create_app(
         docs_url=None,
         redoc_url=None,
     )
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[LOOPBACK_HOST])
     app.add_middleware(
         _Hardening,
+        hosts=HostPolicy(bound_port, extra_allowed_hosts),
         token=token,
         max_body=max_body_bytes,
         rate_limit=write_rate_limit,

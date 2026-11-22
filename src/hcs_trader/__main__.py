@@ -598,6 +598,7 @@ async def serve(
             paper_mode=paper_mode,
             kraken_reconciliation=recovery,
             spot_execution=spot_exec,
+            bound_port=LOCAL_PORT,
         )
         config = uvicorn.Config(
             app,
@@ -706,6 +707,32 @@ def live_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def mcp_http_command(arguments: argparse.Namespace) -> None:
+    """Serve MCP over loopback HTTP; the bearer token is printed once."""
+    from hcs_trader import mcp_server  # noqa: PLC0415
+
+    if not 1 <= arguments.port <= 65535:
+        raise SystemExit("--port must be between 1 and 65535")
+    store = (
+        local_store()
+        if arguments.data_dir is None
+        else AuditStore(arguments.data_dir / "audit.sqlite")
+    )
+    if not store.path.exists():
+        store.initialize()
+    tiers = frozenset(
+        mcp_server.CapabilityTier(t) for t in (arguments.tier or ["READ"])
+    )
+    registry = mcp_server.ClientRegistry()
+    token = registry.register(arguments.client_id, tiers)
+    print(f"MCP endpoint: http://127.0.0.1:{arguments.port}/mcp")
+    granted = ", ".join(sorted(t.value for t in tiers))
+    print(f"Client {arguments.client_id} tiers: {granted}")
+    print(f"Bearer token (shown once, not stored): {token}", flush=True)
+    server = create_mcp_server(store.path, granted_tiers=frozenset())
+    mcp_server.run_http(server, registry, port=arguments.port)
+
+
 def release_check_command(arguments: argparse.Namespace) -> int:
     report = evaluate_checklist(
         load_context(arguments.root, arguments.gates_report, arguments.dist)
@@ -783,6 +810,19 @@ def main() -> None:
         mcp_parser.add_argument(
             "--data-dir", type=Path, help="Use a separate local data directory"
         )
+    http_parser = commands.add_parser(
+        "mcp-http",
+        help="Run the local MCP server over Streamable HTTP on 127.0.0.1 only",
+    )
+    http_parser.add_argument("--data-dir", type=Path)
+    http_parser.add_argument("--port", type=int, default=8766)
+    http_parser.add_argument("--client-id", default="local-client")
+    http_parser.add_argument(
+        "--tier",
+        action="append",
+        choices=["READ", "RESEARCH", "PAPER_TRADE"],
+        help="Capability tier granted to the client (repeatable; default READ)",
+    )
     selftest_parser = commands.add_parser(
         "selftest", help="Run the offline installation self-test"
     )
@@ -1104,6 +1144,8 @@ def main() -> None:
             # A fresh install (for example a bundle) needs a migrated database.
             mcp_store.initialize()
         create_mcp_server(mcp_store.path).run(transport="stdio")
+    elif arguments.command == "mcp-http":
+        mcp_http_command(arguments)
     elif arguments.command == "selftest":
         from hcs_trader import selftest
 

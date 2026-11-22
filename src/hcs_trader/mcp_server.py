@@ -49,6 +49,7 @@ from hcs_trader.domain.news import NewsItem
 from hcs_trader.domain.paper import PaperBalance, PaperOrder, PaperSide
 from hcs_trader.indicators import Indicators
 from hcs_trader.local_research import ResearchHistory
+from hcs_trader.loopback import HostPolicy, fetch_site_allowed
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
     ComparisonMetrics,
@@ -377,9 +378,12 @@ class ClientRegistry:
 class BearerTokenMiddleware:
     """ASGI guard: loopback peer plus a registered, unrevoked bearer token."""
 
-    def __init__(self, app: Any, registry: ClientRegistry) -> None:
+    def __init__(
+        self, app: Any, registry: ClientRegistry, hosts: HostPolicy | None = None
+    ) -> None:
         self.app = app
         self.registry = registry
+        self.hosts = hosts or HostPolicy()
 
     @staticmethod
     async def _reject(send: Any, status: int, detail: str) -> None:
@@ -403,6 +407,17 @@ class BearerTokenMiddleware:
         if peer is None or peer[0] not in LOOPBACK_PEERS:
             await self._reject(send, 403, "Loopback clients only")
             return
+        raw = {k.lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        # DNS-rebinding and browser cross-origin defence, before any token check.
+        if not self.hosts.host_allowed(raw.get(b"host")):
+            await self._reject(send, 403, "Host not allowed")
+            return
+        origin = raw.get(b"origin")
+        if not fetch_site_allowed(raw.get(b"sec-fetch-site")) or (
+            origin is not None and not self.hosts.origin_allowed(origin)
+        ):
+            await self._reject(send, 403, "Local origin required")
+            return
         header = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1")
         scheme, _, token = header.partition(" ")
         grant = (
@@ -418,17 +433,33 @@ class BearerTokenMiddleware:
             _ACTIVE_CLIENT.reset(reset)
 
 
-def create_http_app(server: MCPServer, registry: ClientRegistry) -> Any:
-    """Stateless Streamable HTTP app; each request carries its client identity."""
+def create_http_app(
+    server: MCPServer,
+    registry: ClientRegistry,
+    *,
+    port: int | None = None,
+    extra_hosts: tuple[str, ...] = (),
+) -> Any:
+    """Stateless Streamable HTTP app; each request carries its client identity.
+
+    Host and Origin are validated against the loopback allowlist (pinned to
+    `port` when given) before the bearer token is looked at.
+    """
     inner = server.streamable_http_app(stateless_http=True, json_response=True)
-    return BearerTokenMiddleware(inner, registry)
+    return BearerTokenMiddleware(inner, registry, HostPolicy(port, extra_hosts))
 
 
 def run_http(server: MCPServer, registry: ClientRegistry, port: int = 8766) -> None:
     """Serve on 127.0.0.1 only. There is no option to bind another address."""
     import uvicorn  # noqa: PLC0415
 
-    uvicorn.run(create_http_app(server, registry), host="127.0.0.1", port=port)
+    uvicorn.run(
+        create_http_app(server, registry, port=port),
+        host="127.0.0.1",
+        port=port,
+        access_log=False,
+        proxy_headers=False,
+    )
 
 
 def _percent(basis_points: Decimal) -> str:

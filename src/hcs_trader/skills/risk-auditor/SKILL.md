@@ -1,9 +1,11 @@
 ---
 name: risk-auditor
-version: 1.0.0
-purpose: Deterministic pre-trade risk policy verification, emergency kill-switch monitoring, and append-only audit trail inspection
-capability_tier: READ
-required_tools: risk.get_status, orders.get_spot_orders, audit.get_events
+description: Verify deterministic pre-trade risk policy, kill-switch state and the append-only audit trail. Use when explaining a risk decision or reviewing limits.
+metadata:
+  version: "1.0.0"
+  purpose: "Deterministic pre-trade risk policy verification, emergency kill-switch monitoring, and append-only audit trail inspection"
+  capability_tier: READ
+  required_tools: "risk.get_status, orders.get_spot_orders, audit.get_events"
 ---
 
 # Risk Auditor Skill

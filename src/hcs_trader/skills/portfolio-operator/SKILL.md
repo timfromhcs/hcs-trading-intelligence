@@ -1,9 +1,11 @@
 ---
 name: portfolio-operator
-version: 1.0.0
-purpose: Track portfolio balances, verify on-chain UTXO/account state, reconcile cost basis, and monitor custody boundaries
-capability_tier: READ
-required_tools: portfolio.get_paper_balance, wallets.get_snapshots
+description: Track paper balances, verify read-only wallet state, reconcile cost basis and monitor custody boundaries. Use for portfolio snapshots and reconciliation reviews.
+metadata:
+  version: "1.0.0"
+  purpose: "Track portfolio balances, verify on-chain UTXO/account state, reconcile cost basis, and monitor custody boundaries"
+  capability_tier: READ
+  required_tools: "portfolio.get_paper_balance, wallets.get_snapshots"
 ---
 
 # Portfolio Operator Skill

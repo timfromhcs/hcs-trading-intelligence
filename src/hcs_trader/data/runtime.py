@@ -94,6 +94,7 @@ class IngestionService:
     async def stop(self, timeout: float = 5.0) -> None:
         task, self._task = self._task, None
         if task is None:
+            await self._close_client()  # never started: still release the owned client
             return
         self._stop.set()
         try:
@@ -103,5 +104,9 @@ class IngestionService:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         finally:
-            if self._client is not None:
-                await self._client.aclose()
+            await self._close_client()
+
+    async def _close_client(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()

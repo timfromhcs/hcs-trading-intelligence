@@ -135,6 +135,10 @@ class QuoteService:
                 self._issue = "invalid"
             else:
                 self._issue = "unavailable"
+        except BaseException:
+            # Cancellation or an unexpected error must not wedge a HALF_OPEN probe.
+            self._breaker.release_probe()
+            raise
         else:
             self._breaker.record_success()
             self._failure_count = 0

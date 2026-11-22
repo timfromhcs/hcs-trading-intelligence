@@ -415,3 +415,132 @@ async def test_quote_service_uses_breaker_and_restores_rate_limit(
     revived.restore_state(AuditStore(store.path).load_ingest_state("kraken"))
     await revived.snapshot()
     assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_cancelled_probe_does_not_wedge_half_open_breaker(
+    tmp_path: Path,
+) -> None:
+    from hcs_trader.data.kraken import BTC_USD
+    from hcs_trader.data.quotes import QuoteService
+
+    clock = Clock()
+    breaker = CircuitBreaker(failure_threshold=1, reset_timeout=10, clock=clock)
+    breaker.record_failure()
+    clock.t += 11  # reset timeout elapsed: HALF_OPEN
+    assert breaker.state is CircuitState.HALF_OPEN
+    started = asyncio.Event()
+    calls = 0
+
+    class Hanging:
+        async def get_quote(self, market: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await asyncio.sleep(3600)
+
+    service = QuoteService(
+        Hanging(), BTC_USD, elapsed=clock, utc_now=clock.now, breaker=breaker
+    )
+    task = asyncio.create_task(service.snapshot())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The probe slot was released: the next refresh may probe again, not CircuitOpen.
+    assert breaker.state is CircuitState.HALF_OPEN
+    breaker.before_call()
+    breaker.release_probe()
+    again = asyncio.create_task(service.snapshot())
+    await asyncio.sleep(0.05)
+    assert calls == 2
+    again.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await again
+
+
+@pytest.mark.anyio
+async def test_stop_without_start_closes_owned_client(tmp_path: Path) -> None:
+    policy = NetworkPolicy(SystemMode.DATA_ONLY)
+    client = build_http_client(
+        policy, transport=httpx2.MockTransport(lambda _r: httpx2.Response(500))
+    )
+    service = IngestionService(_store(tmp_path), client, policy, own_client=True)
+    await service.stop()
+    assert client.is_closed
+
+
+@pytest.mark.parametrize(
+    ("flags", "mode"),
+    [
+        (["--ingest-feeds"], "DATA_ONLY"),
+        (["--ingest-feeds", "--paper-market-data"], "PAPER"),
+        (["--ingest-feeds", "--ingest-offline"], "OFFLINE"),
+    ],
+)
+def test_serve_shares_one_ingestion_policy_with_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    mode: str,
+) -> None:
+    import uvicorn
+
+    from hcs_trader import __main__ as launcher
+    from hcs_trader.api import LOCAL_PORT
+
+    seen: dict[str, Any] = {}
+
+    class Server:
+        def __init__(self, config: uvicorn.Config) -> None:
+            self.app: Any = config.app
+
+        async def serve(self) -> None:
+            base = f"http://127.0.0.1:{LOCAL_PORT}"
+            with TestClient(self.app, base_url=base) as api:
+                seen["status"] = api.get("/api/v1/system/status").json()
+                seen["sources"] = api.get("/api/v1/data/sources").json()
+
+    # No real network: every outbound request is answered locally.
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(
+        httpx2,
+        "AsyncClient",
+        lambda **kw: client_class(
+            **kw, transport=httpx2.MockTransport(lambda _r: httpx2.Response(500))
+        ),
+    )
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    monkeypatch.setattr(
+        "sys.argv", ["hcs-trader", "serve", "--data-dir", str(tmp_path), *flags]
+    )
+    launcher.main()
+    assert seen["status"]["mode"] == mode
+    assert seen["sources"]["ingestion_mode"] == mode
+    assert seen["status"]["network_enabled"] is (mode != "OFFLINE")
+
+
+def test_serve_closes_ingestion_client_when_app_build_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hcs_trader import __main__ as launcher
+
+    closed: list[bool] = []
+    real = IngestionService.stop
+
+    async def tracking_stop(self: IngestionService, timeout: float = 5.0) -> None:
+        await real(self, timeout)
+        closed.append(True)
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(IngestionService, "stop", tracking_stop)
+    monkeypatch.setattr(launcher, "_build_app", boom)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["hcs-trader", "serve", "--data-dir", str(tmp_path), "--ingest-feeds"],
+    )
+    with pytest.raises(SystemExit):
+        launcher.main()
+    assert closed == [True]

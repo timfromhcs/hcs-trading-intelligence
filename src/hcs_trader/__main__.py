@@ -18,6 +18,7 @@ from getpass import GetPassWarning, getpass
 from importlib.metadata import version
 from pathlib import Path
 from time import monotonic_ns
+from typing import Any
 from uuid import uuid4
 
 import httpx2
@@ -553,6 +554,39 @@ async def utxo_balance(
         return await LocalWalletRpc(client, port).utxo_balance(address, network)
 
 
+def ingestion_network_policy(
+    *, paper_mode: bool, live: bool = False, offline: bool = False
+) -> NetworkPolicy:
+    """The one policy shared by background ingestion and /system/status."""
+    if offline:
+        return NetworkPolicy(SystemMode.OFFLINE)
+    if live:
+        return NetworkPolicy(SystemMode.LIVE)
+    return NetworkPolicy(SystemMode.PAPER if paper_mode else SystemMode.DATA_ONLY)
+
+
+def _build_app(
+    store: AuditStore,
+    ingestion: IngestionService | None,
+    network_policy: NetworkPolicy | None,
+    quotes: QuoteService | None,
+    paper_mode: bool,
+    recovery: Any,
+    spot_exec: Any,
+) -> Any:
+    return create_app(
+        store,
+        Path(__file__).with_name("ui_assets"),
+        ingestion=ingestion,
+        network_policy=network_policy,
+        quote_service=quotes,
+        paper_mode=paper_mode,
+        kraken_reconciliation=recovery,
+        spot_execution=spot_exec,
+        bound_port=LOCAL_PORT,
+    )
+
+
 async def serve(
     market_data: bool,
     paper_mode: bool = False,
@@ -562,6 +596,7 @@ async def serve(
     kraken_reconcile_credentials: Path | None = None,
     kraken_live_credentials: Path | None = None,
     ingest_feeds: bool = False,
+    ingest_offline: bool = False,
 ) -> None:
     store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
@@ -598,26 +633,32 @@ async def serve(
             )
             recovery = execution.reconcile_startup
         ingestion = None
+        feed_policy: NetworkPolicy | None = None
+        feed_client: httpx2.AsyncClient | None = None
         if ingest_feeds:
-            feed_policy = NetworkPolicy(
-                SystemMode.PAPER if paper_mode else SystemMode.DATA_ONLY
+            feed_policy = ingestion_network_policy(
+                paper_mode=paper_mode,
+                live=kraken_live_credentials is not None,
+                offline=ingest_offline,
             )
+            feed_client = build_http_client(feed_policy, follow_redirects=False)
             ingestion = IngestionService(
-                store,
-                build_http_client(feed_policy, follow_redirects=False),
-                feed_policy,
-                own_client=True,
+                store, feed_client, feed_policy, own_client=True
             )
-        app = create_app(
-            store,
-            Path(__file__).with_name("ui_assets"),
-            ingestion=ingestion,
-            quote_service=quotes,
-            paper_mode=paper_mode,
-            kraken_reconciliation=recovery,
-            spot_execution=spot_exec,
-            bound_port=LOCAL_PORT,
-        )
+        try:
+            app = _build_app(
+                store,
+                ingestion,
+                feed_policy,
+                quotes,
+                paper_mode,
+                recovery,
+                spot_exec,
+            )
+        except BaseException:
+            if ingestion is not None:
+                await ingestion.stop()  # closes the owned client; never started
+            raise
         config = uvicorn.Config(
             app,
             host=LOOPBACK_HOST,
@@ -782,6 +823,11 @@ def main() -> None:
         "--ingest-feeds",
         action="store_true",
         help="Opt in to background Federal Reserve and ECB feed polling",
+    )
+    serve_parser.add_argument(
+        "--ingest-offline",
+        action="store_true",
+        help="With --ingest-feeds, run the scheduler in OFFLINE mode (never polls)",
     )
     serve_parser.add_argument(
         "--kraken-reconcile-credentials",
@@ -1094,6 +1140,7 @@ def main() -> None:
                     kraken_reconcile_credentials=arguments.kraken_reconcile_credentials,
                     kraken_live_credentials=arguments.kraken_live_credentials,
                     ingest_feeds=arguments.ingest_feeds,
+                    ingest_offline=arguments.ingest_offline,
                 )
             )
         except (OSError, ValueError, RiskRejected) as error:

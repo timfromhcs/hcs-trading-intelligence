@@ -88,6 +88,14 @@ class CircuitBreaker:
             self._state = CircuitState.HALF_OPEN
             self._probe_in_flight = True
 
+    def release_probe(self) -> None:
+        """Free a HALF_OPEN probe slot after a call that neither succeeded nor failed.
+
+        Used when the call was cancelled or died with an unexpected error, so
+        the breaker stays HALF_OPEN and the next caller may probe again.
+        """
+        self._probe_in_flight = False
+
     def record_success(self) -> None:
         self._failures = 0
         self._probe_in_flight = False

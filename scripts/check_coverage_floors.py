@@ -23,7 +23,7 @@ FLOORS: dict[str, int] = {
     "risk.py": 90,
     "signing.py": 75,  # TODO: below 90, raise toward 90
     "evm_signing.py": 85,  # TODO: below 90
-    "solana_signing.py": 85,  # TODO: below 90
+    "solana_signing.py": 90,
     "utxo_psbt.py": 90,
     "spot_execution.py": 87,  # TODO: below 90
     "paper_execution.py": 90,

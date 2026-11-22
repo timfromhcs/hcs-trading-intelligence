@@ -2,6 +2,7 @@
 
 import json
 import os
+import struct
 import time
 import urllib.request
 from dataclasses import replace
@@ -12,11 +13,21 @@ from typing import Any
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+from solders.compute_budget import (
+    request_heap_frame,
+    set_compute_unit_limit,
+    set_compute_unit_price,
+)
 from solders.hash import Hash
-from solders.instruction import AccountMeta, Instruction
+from solders.instruction import AccountMeta, CompiledInstruction, Instruction
 from solders.keypair import Keypair
-from solders.message import Message, to_bytes_versioned
+from solders.message import (
+    Message,
+    MessageAddressTableLookup,
+    MessageHeader,
+    MessageV0,
+    to_bytes_versioned,
+)
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.system_program import ID as SYSTEM_ID
@@ -44,6 +55,8 @@ from hcs_trader.solana_signing import (
     SolanaMessageError,
     SolanaMessagePolicy,
     decode_solana_message,
+    message_digest,
+    sign_solana_message,
 )
 from hcs_trader.storage import AuditStore
 
@@ -718,3 +731,284 @@ def test_devnet_airdrop_and_transfer_rehearsal() -> None:
         ],
     )
     assert out == signed.tx_hash
+
+
+# --- additional rejection / edge coverage for the message decoder -----------
+
+_POL = SolanaMessagePolicy()
+_JUP_POL = SolanaMessagePolicy(allow_jupiter=True)
+_OTHER = Keypair.from_seed(bytes([9] * 32)).pubkey()
+
+
+def _sys_data(lamports: int = 1_000_000) -> bytes:
+    return struct.pack("<IQ", 2, lamports)
+
+
+def _raw_legacy(keys: list[Pubkey], ixs: list[CompiledInstruction]) -> bytes:
+    """Hand-built legacy message (1 signer, last key read-only program)."""
+    return to_bytes_versioned(
+        Message.new_with_compiled_instructions(1, 0, 1, keys, _BLOCKHASH, ixs)
+    )
+
+
+def _token_ix(data: bytes, metas: list[AccountMeta]) -> Instruction:
+    return Instruction(TOKEN_PROGRAM_ID, data, metas)
+
+
+def test_message_with_no_instructions_rejected() -> None:
+    with pytest.raises(SolanaMessageError, match="no instructions"):
+        decode_solana_message(_msg([]), _plan(), _POL)
+
+
+def test_too_many_instructions_rejected() -> None:
+    msg = _msg([set_compute_unit_limit(1), _sys_transfer()])
+    with pytest.raises(SolanaMessageError, match="too many instructions"):
+        decode_solana_message(msg, _plan(), SolanaMessagePolicy(max_instructions=1))
+
+
+def test_program_id_outside_static_keys_rejected() -> None:
+    msg = _raw_legacy(
+        [_KP.pubkey(), SYSTEM_ID],
+        [
+            CompiledInstruction(
+                program_id_index=5, accounts=bytes([0, 1]), data=_sys_data()
+            )
+        ],
+    )
+    with pytest.raises(SolanaMessageError, match="program id outside"):
+        decode_solana_message(msg, _plan(), _POL)
+
+
+def test_instruction_account_index_outside_static_keys_rejected() -> None:
+    msg = _raw_legacy(
+        [_KP.pubkey(), SYSTEM_ID],
+        [
+            CompiledInstruction(
+                program_id_index=1, accounts=bytes([0, 7]), data=_sys_data()
+            )
+        ],
+    )
+    with pytest.raises(SolanaMessageError, match="lookup-table account"):
+        decode_solana_message(msg, _plan(), _POL)
+
+
+def test_instruction_missing_required_account_rejected() -> None:
+    short = _token_ix(
+        bytes([12]) + (1).to_bytes(8, "little") + bytes([6]),
+        [AccountMeta(_USDC, False, True), AccountMeta(_USDC, False, False)],
+    )
+    with pytest.raises(SolanaMessageError, match="missing required account"):
+        decode_solana_message(_msg([short]), _plan(token_in=str(_USDC)), _POL)
+
+
+def test_unsupported_compute_budget_instruction_rejected() -> None:
+    with pytest.raises(SolanaMessageError, match="compute budget"):
+        decode_solana_message(
+            _msg([request_heap_frame(65536), _sys_transfer()]), _plan(), _POL
+        )
+
+
+def test_compute_unit_price_without_limit_rejected() -> None:
+    msg = _msg([set_compute_unit_price(1), _sys_transfer()])
+    with pytest.raises(SolanaMessageError, match="explicit compute unit limit"):
+        decode_solana_message(msg, _plan(), _POL)
+
+
+def test_compute_unit_limit_over_policy_rejected() -> None:
+    msg = _msg([set_compute_unit_limit(1_400_001), _sys_transfer()])
+    with pytest.raises(SolanaMessageError, match="compute unit limit exceeds"):
+        decode_solana_message(msg, _plan(), _POL)
+    # Exactly at the limit is accepted (boundary).
+    decode_solana_message(
+        _msg([set_compute_unit_limit(1_400_000), _sys_transfer()]), _plan(), _POL
+    )
+
+
+def test_spl_transfer_with_foreign_authority_rejected() -> None:
+    src = get_associated_token_address(_KP.pubkey(), _USDC)
+    dst = get_associated_token_address(_RECIPIENT, _USDC)
+    # Non-signer authority keeps the header at one signature, so the decoder's
+    # own authority check (not the signature-count check) must reject it.
+    ix = _token_ix(
+        bytes([12]) + (1).to_bytes(8, "little") + bytes([6]),
+        [
+            AccountMeta(src, False, True),
+            AccountMeta(_USDC, False, False),
+            AccountMeta(dst, False, True),
+            AccountMeta(_OTHER, False, False),
+        ],
+    )
+    plan = _plan(destination=str(dst), amount=1, token_in=str(_USDC))
+    with pytest.raises(SolanaMessageError, match="authority is not the signer"):
+        decode_solana_message(_msg([ix]), plan, _POL)
+
+
+def test_sync_native_and_close_account_only_in_jupiter_swaps() -> None:
+    wsol_ata = get_associated_token_address(_KP.pubkey(), Pubkey.from_string(WSOL_MINT))
+    sync = _token_ix(bytes([17]), [AccountMeta(wsol_ata, False, True)])
+    close = _token_ix(
+        bytes([9]),
+        [
+            AccountMeta(wsol_ata, False, True),
+            AccountMeta(_KP.pubkey(), False, True),
+            AccountMeta(_KP.pubkey(), True, False),
+        ],
+    )
+    with pytest.raises(SolanaMessageError, match="SyncNative only allowed"):
+        decode_solana_message(_msg([sync, _sys_transfer()]), _plan(), _POL)
+    with pytest.raises(SolanaMessageError, match="CloseAccount only allowed"):
+        decode_solana_message(_msg([close, _sys_transfer()]), _plan(), _POL)
+    plan = _plan(destination=str(JUPITER_V6_PROGRAM_ID), token_in=WSOL_MINT)
+    decoded = decode_solana_message(_msg([sync, close, _jup()]), plan, _JUP_POL)
+    assert decoded.uses_jupiter
+
+
+def test_close_account_destination_must_be_signer() -> None:
+    wsol_ata = get_associated_token_address(_KP.pubkey(), Pubkey.from_string(WSOL_MINT))
+    plan = _plan(destination=str(JUPITER_V6_PROGRAM_ID), token_in=WSOL_MINT)
+    for dest, owner in ((_OTHER, _KP.pubkey()), (_KP.pubkey(), _OTHER)):
+        close = _token_ix(
+            bytes([9]),
+            [
+                AccountMeta(wsol_ata, False, True),
+                AccountMeta(dest, False, True),
+                AccountMeta(owner, owner == _KP.pubkey(), False),
+            ],
+        )
+        with pytest.raises(SolanaMessageError, match="CloseAccount destination"):
+            decode_solana_message(_msg([close, _jup()]), plan, _JUP_POL)
+
+
+def test_ata_create_wrong_variant_funder_and_programs_rejected() -> None:
+    dst = get_associated_token_address(_RECIPIENT, _USDC)
+    plan = _plan(destination=str(dst), amount=1, token_in=str(_USDC))
+    src = get_associated_token_address(_KP.pubkey(), _USDC)
+    xfer = _spl_checked(1, src, dst, _KP.pubkey())
+    good = _ata_create(_RECIPIENT, _USDC)
+
+    legacy_create = Instruction(ATA_PROGRAM_ID, b"", good.accounts)  # variant 0
+    with pytest.raises(SolanaMessageError, match="only ATA CreateIdempotent"):
+        decode_solana_message(_msg([legacy_create, xfer]), plan, _POL)
+
+    metas = list(good.accounts)
+    metas[0] = AccountMeta(_OTHER, False, True)  # funder is not the signer
+    with pytest.raises(SolanaMessageError, match="funder is not the signer"):
+        decode_solana_message(
+            _msg([Instruction(ATA_PROGRAM_ID, bytes([1]), metas), xfer]), plan, _POL
+        )
+
+    metas = list(good.accounts)
+    metas[4], metas[5] = metas[5], metas[4]  # system/token programs swapped
+    with pytest.raises(SolanaMessageError, match="unexpected system/token program"):
+        decode_solana_message(
+            _msg([Instruction(ATA_PROGRAM_ID, bytes([1]), metas), xfer]), plan, _POL
+        )
+
+
+def test_system_transfer_source_must_be_signer() -> None:
+    ix = Instruction(
+        SYSTEM_ID,
+        _sys_data(),
+        [AccountMeta(_OTHER, False, True), AccountMeta(_RECIPIENT, False, True)],
+    )
+    with pytest.raises(SolanaMessageError, match="source is not the signer"):
+        decode_solana_message(_msg([ix]), _plan(), _POL)
+
+
+def test_address_table_lookups_only_for_jupiter() -> None:
+    keys = [_KP.pubkey(), _RECIPIENT, SYSTEM_ID]
+    lookup = MessageAddressTableLookup(Pubkey.new_unique(), bytes([0]), b"")
+    msg = to_bytes_versioned(
+        MessageV0(
+            MessageHeader(1, 0, 1),
+            keys,
+            _BLOCKHASH,
+            [
+                CompiledInstruction(
+                    program_id_index=2, accounts=bytes([0, 1]), data=_sys_data()
+                )
+            ],
+            [lookup],
+        )
+    )
+    with pytest.raises(SolanaMessageError, match="address table lookups only"):
+        decode_solana_message(msg, _plan(), _POL)
+
+
+def test_too_many_ata_creations_rejected() -> None:
+    mints = [Pubkey.new_unique() for _ in range(5)]
+    ixs = [_ata_create(_KP.pubkey(), m) for m in mints] + [_jup()]
+    plan = _plan(destination=str(JUPITER_V6_PROGRAM_ID), token_in=str(mints[0]))
+    with pytest.raises(SolanaMessageError, match="too many ATA creations"):
+        decode_solana_message(_msg(ixs), plan, _JUP_POL)
+
+
+def test_jupiter_plan_destination_and_spl_transfers_bound() -> None:
+    src = get_associated_token_address(_KP.pubkey(), _USDC)
+    dst = get_associated_token_address(_RECIPIENT, _USDC)
+    xfer = _spl_checked(1, src, dst, _KP.pubkey())
+    wrong_dest = _plan(destination=str(_RECIPIENT), token_in=str(_USDC))
+    with pytest.raises(SolanaMessageError, match="not the Jupiter program"):
+        decode_solana_message(_msg([_jup()]), wrong_dest, _JUP_POL)
+    plan = _plan(destination=str(JUPITER_V6_PROGRAM_ID), token_in=str(_USDC))
+    with pytest.raises(SolanaMessageError, match="not allowed inside a Jupiter"):
+        decode_solana_message(_msg([xfer, _jup()]), plan, _JUP_POL)
+
+
+def test_message_without_any_transfer_rejected() -> None:
+    msg = _msg([set_compute_unit_limit(1000)])
+    with pytest.raises(SolanaMessageError, match="exactly one kind of transfer"):
+        decode_solana_message(msg, _plan(), _POL)
+
+
+def test_multiple_transfers_rejected() -> None:
+    two_sys = _msg([_sys_transfer(500_000), _sys_transfer(500_000)])
+    with pytest.raises(SolanaMessageError, match="exactly one System transfer"):
+        decode_solana_message(two_sys, _plan(), _POL)
+    src = get_associated_token_address(_KP.pubkey(), _USDC)
+    dst = get_associated_token_address(_RECIPIENT, _USDC)
+    two_spl = _msg(
+        [
+            _spl_checked(1, src, dst, _KP.pubkey()),
+            _spl_checked(1, src, dst, _KP.pubkey()),
+        ]
+    )
+    plan = _plan(destination=str(dst), amount=1, token_in=str(_USDC))
+    with pytest.raises(SolanaMessageError, match="exactly one SPL transfer"):
+        decode_solana_message(two_spl, plan, _POL)
+
+
+def test_spl_transfer_must_match_plan_destination_amount_and_mint() -> None:
+    src = get_associated_token_address(_KP.pubkey(), _USDC)
+    dst = get_associated_token_address(_RECIPIENT, _USDC)
+    plan = _plan(destination=str(dst), amount=5, token_in=str(_USDC))
+    for bad in (
+        _spl_checked(5, src, get_associated_token_address(_OTHER, _USDC), _KP.pubkey()),
+        _spl_checked(6, src, dst, _KP.pubkey()),
+    ):
+        with pytest.raises(SolanaMessageError, match="SPL transfer does not match"):
+            decode_solana_message(_msg([bad]), plan, _POL)
+    wrong_mint_plan = _plan(destination=str(dst), amount=5, token_in=WSOL_MINT)
+    with pytest.raises(SolanaMessageError, match="SPL transfer does not match"):
+        decode_solana_message(
+            _msg([_spl_checked(5, src, dst, _KP.pubkey())]), wrong_mint_plan, _POL
+        )
+
+
+def test_sign_rejects_bad_seed_length_and_signs_valid_message() -> None:
+    msg = _msg([_sys_transfer()])
+    plan = _plan()
+    with pytest.raises(SignerTamperingError, match="32 raw seed bytes"):
+        sign_solana_message(msg, plan, _POL, _SEED[:31], _AT)
+    signed = sign_solana_message(msg, plan, _POL, _SEED, _AT)
+    assert signed.plan_hash == plan.plan_hash
+    _verify_wire(signed.raw_transaction_hex, msg)
+    # Tampered bytes are rejected before any key is touched.
+    with pytest.raises(SolanaMessageError):
+        sign_solana_message(msg + b"\x00", plan, _POL, _SEED, _AT)
+
+
+def test_message_digest_is_sha256_hex_and_changes_with_content() -> None:
+    expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    assert message_digest(b"abc") == expected
+    assert message_digest(b"abd") != expected

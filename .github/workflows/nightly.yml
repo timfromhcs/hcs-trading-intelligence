@@ -1,0 +1,108 @@
+name: Nightly
+
+# Slow tier: the full suite on three systems with the Hypothesis "nightly" profile,
+# plus a packaging smoke test (Unicode and space in the install path, offline start).
+# Nothing here uses secrets, real funds or mainnet endpoints.
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HYPOTHESIS_PROFILE: nightly
+
+jobs:
+  full-tests:
+    # Scheduled runs use the default branch; manual runs use the selected ref.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.5'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: uv sync --locked
+      - run: npm ci --prefix frontend --ignore-scripts
+      - run: npm run build --prefix frontend
+      - name: Full suite with Hypothesis nightly profile
+        run: uv run --locked pytest -p no:cacheprovider --cov-report=term --cov-report=xml:coverage.xml
+      - run: uv run --locked python scripts/check_coverage_floors.py coverage.xml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: nightly-coverage-${{ matrix.os }}
+          path: coverage.xml
+          if-no-files-found: warn
+
+  packaging-smoke:
+    # smoke_wheel.py installs into a directory with Unicode and spaces in its path, runs the
+    # CLI and `selftest` with network access disabled by policy, and checks the sdist too.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.5'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: uv sync --locked
+      - run: npm ci --prefix frontend --ignore-scripts
+      - run: npm run build --prefix frontend
+      - run: uv build
+      - run: uv run --locked python scripts/smoke_wheel.py
+      - run: uv run --locked --group packaging python scripts/build_desktop.py
+      - run: uv run --locked python scripts/smoke_desktop.py
+
+  report-failure:
+    # Opens one tracking issue, or comments on the open one. Only this job can write issues.
+    needs: [full-tests, packaging-smoke]
+    if: ${{ always() && (needs.full-tests.result == 'failure' || needs.packaging-smoke.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          TITLE: Nightly CI failed
+        run: |
+          body="Nightly run failed on ${SHA}: ${RUN_URL}"
+          number=$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$body"
+          fi

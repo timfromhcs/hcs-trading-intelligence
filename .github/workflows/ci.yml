@@ -50,7 +50,9 @@ jobs:
       - run: uv run --locked ruff check
       - run: uv run --locked ruff format --check
       - run: uv run --locked mypy
-      - run: uv run --locked pytest
+      - run: uv run --locked pytest --cov-report=term --cov-report=xml:coverage.xml
+      - name: Per-module coverage floors (the global 80% gate still applies)
+        run: uv run --locked python scripts/check_coverage_floors.py coverage.xml
       - run: uv build
       - name: Verify fresh Python installs and upgrade from v0.2.0
         shell: bash

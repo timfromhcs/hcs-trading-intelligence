@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- CI tiers: nightly and weekly workflows (full suite with the Hypothesis nightly profile, packaging smoke, mutation testing of risk and signing code, chaos, dependency audits), Hypothesis profiles dev/ci/nightly, per-module coverage floors (`scripts/check_coverage_floors.py`, in `run_gates.py` and CI; the global 80% gate is unchanged), an invariant map (`docs/INVARIANTS.md`) checked by tests, a stricter layering test for signing and execution modules, and a default test block on non-loopback sockets (`allow_network`, `rehearsal` and `regtest` markers opt out).
 - Enforce the operator's hot-wallet USD cap and portfolio share in the LIVE risk engine. A missing valuation blocks authorization when a share cap is configured.
 - Require venue health and a recent reconciliation timestamp for LIVE authorization. Reject reconciliation timestamps in the future.
 

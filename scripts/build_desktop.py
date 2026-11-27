@@ -18,6 +18,9 @@ def main() -> None:
     layout = "desktop-single" if args.onefile else "desktop"
     assets = ROOT / "src" / "hcs_trader" / "ui_assets"
     skills = ROOT / "src" / "hcs_trader" / "skills"
+    sources = ROOT / "src" / "hcs_trader" / "data" / "sources.json"
+    if not sources.is_file():
+        raise SystemExit("Build the source registry before building the desktop app.")
     if not (assets / "index.html").is_file():
         raise SystemExit("Build the frontend before building the desktop application.")
 
@@ -42,6 +45,8 @@ def main() -> None:
             f"{assets}:hcs_trader/ui_assets",
             "--add-data",
             f"{skills}:hcs_trader/skills",
+            "--add-data",
+            f"{sources}:hcs_trader/data",
             str(ROOT / "scripts" / "desktop_entry.py"),
         ],
         cwd=ROOT,

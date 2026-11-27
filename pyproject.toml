@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "hcs-trader"
-version = "0.2.0"
+version = "1.1.0-rc.1"
 description = "Local-first foundation for HCS Trading Intelligence"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -81,3 +81,4 @@ paths_to_mutate = [
 ]
 tests_dir = ["tests/"]
 pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider"]
+

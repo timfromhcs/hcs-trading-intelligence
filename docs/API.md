@@ -60,6 +60,8 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | POST | `/api/v1/strategies/candidates/{candidate_id}/shadow-run` | Run a shadow replay |
 | GET | `/api/v1/strategies/candidates/{candidate_id}/shadow-runs` | Shadow run history |
 | GET | `/api/v1/strategies/candidates/{candidate_id}/canary-approval` | Canary authorization state |
+| GET | `/api/v1/webfetch/sources` | Registered external sources with verification state; all shipped sources start disabled |
+| GET | `/api/v1/webfetch/{source_id}` | Fetch one registered source by id. The caller cannot supply a URL or path; results are marked `UNTRUSTED`, raw markup is never returned and unverified sources return 403 |
 
 Live order submission passes the same deterministic risk engine as every other path and is off by default.
 

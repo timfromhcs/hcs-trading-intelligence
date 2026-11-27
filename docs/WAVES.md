@@ -98,3 +98,12 @@ Testnet keys and the Binance, Sepolia and devnet rehearsals; any real Kraken evi
 6. Too much scope and packaging breakage from new native dependencies (cut line, optional extras).
 7. SDK claims unverified; the installed `mcp` differed from the pin during planning (W1-D).
 8. New CI gates can break existing ones (measure floors first; `filterwarnings=error` may trip on deprecations).
+
+## Wave status (2026-11-27)
+
+- **Wave 1 — done.** All five tracks are merged and covered by tests.
+- **Wave 2 — partial.** The shared data-quality library (`data/quality.py`), the keyless Coinbase Exchange public REST adapter behind the reviewed `VenueConfig` host allowlist, the transport-injected Kraken v2 book feed with cursor/gap handling and bounded backoff, and the versioned source registry (`data/sources.json`) are implemented with 34 offline tests. Binance `data-api.binance.vision` is deliberately **not** enabled: it needs the jurisdiction check and a verification record first. WebSocket transport itself stays injected; no websocket dependency was added.
+- **Wave 3 — core done.** `webfetch.py` enforces host/port/address validation, refuses redirects and caller-supplied URLs, re-resolves DNS to detect rebinding, applies robots.txt with a 24 h cache (5xx means disallow), per-source budgets, conditional GET and hard size limits. `data/untrusted.py` strips scripts, hidden/bidirectional characters and instruction-like lines and marks output with an `UNTRUSTED` envelope. Wired at READ tier through `GET /api/v1/webfetch/sources`, `GET /api/v1/webfetch/{source_id}` and MCP `webfetch.list_sources` / `webfetch.get`. All shipped sources remain disabled until verification.
+- **Wave 4 — core done.** Typed MCP outputs with `outputSchema` and `structuredContent` (`news.search_page`, `webfetch.*`), opaque cursor pagination and field projection, four prompts already present, loopback HTTP bearer/Host/Origin guards already present, skills frontmatter and required-tool tests already present. Added `model_catalog.py` (license/SHA/9B admission), `agents/eval.py` (schema, citation and injection gates) and [model policy](MODELS.md). Remaining: alias-tool cleanup, SSE, generated API client and the wider Wave 5 UI work.
+- **Release state:** `1.1.0-rc.1`. The seven-day PAPER soak, operator testnet keys, signing identities and independent review are not closable by an agent; see [known limitations](KNOWN_LIMITATIONS.md).
+

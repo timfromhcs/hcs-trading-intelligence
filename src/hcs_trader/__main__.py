@@ -40,6 +40,7 @@ from hcs_trader.data.kraken import (
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.data.runtime import IngestionService
+from hcs_trader.data.source_registry import load_source_registry
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import DataQuality
@@ -114,6 +115,7 @@ from hcs_trader.wallets import (
     UtxoNetwork,
     WalletUnavailable,
 )
+from hcs_trader.webfetch import SafeFetcher
 
 
 def local_store() -> AuditStore:
@@ -577,9 +579,17 @@ def _build_app(
     recovery: Any,
     spot_exec: Any,
 ) -> Any:
+    fetcher = None
+    if network_policy is not None and network_policy.mode is not SystemMode.OFFLINE:
+        fetcher = SafeFetcher(
+            build_http_client(network_policy, follow_redirects=False),
+            load_source_registry(),
+            contact_url="https://hcs.media/contact",
+        )
     return create_app(
         store,
         Path(__file__).with_name("ui_assets"),
+        webfetch=fetcher,
         ingestion=ingestion,
         network_policy=network_policy,
         quote_service=quotes,

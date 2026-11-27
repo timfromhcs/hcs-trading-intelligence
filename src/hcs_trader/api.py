@@ -53,6 +53,7 @@ from hcs_trader.data.kraken import SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.data.runtime import IngestionService
+from hcs_trader.data.source_registry import load_source_registry
 from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
@@ -92,6 +93,7 @@ from hcs_trader.skills import list_skills
 from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult
+from hcs_trader.webfetch import SafeFetcher, SafeFetchError, SourceDisabled
 
 _logger = logging.getLogger(__name__)
 LOOPBACK_HOST = "127.0.0.1"
@@ -443,6 +445,7 @@ def create_app(
     rate_window_seconds: float = 60.0,
     bound_port: int | None = None,
     extra_allowed_hosts: tuple[str, ...] = (),
+    webfetch: SafeFetcher | None = None,
 ) -> FastAPI:
     token = api_token if api_token is not None else os.environ.get(API_TOKEN_ENV)
     if token is not None and len(token) < 16:
@@ -499,6 +502,8 @@ def create_app(
         finally:
             if ingestion is not None:
                 await ingestion.stop()
+            if webfetch is not None:
+                await webfetch.aclose()
 
     app = FastAPI(
         title="HCS Trading Intelligence",
@@ -619,6 +624,53 @@ def create_app(
             ingestion_enabled=ingestion is not None,
             ingestion_mode=ingestion.network_policy.mode if ingestion else None,
         )
+
+    @app.get("/api/v1/webfetch/sources")
+    def registered_web_sources(response: Response) -> list[dict[str, Any]]:
+        """List registered external sources with their verification state."""
+        response.headers["Cache-Control"] = "no-store"
+        registry = load_source_registry()
+        return [
+            {
+                "id": spec.id,
+                "url": spec.url,
+                "format": spec.format,
+                "language": spec.language,
+                "api_key_required": spec.api_key_required,
+                "enabled": spec.usable,
+                "terms_url": spec.terms_url,
+                "attribution": spec.attribution,
+                "requests_per_minute": spec.requests_per_minute,
+                "verification_result": spec.verification.result,
+            }
+            for spec in registry.all()
+        ]
+
+    @app.get("/api/v1/webfetch/{source_id}")
+    async def fetch_registered_source(
+        source_id: Annotated[str, PathParameter(min_length=1, max_length=64)],
+        response: Response,
+    ) -> dict[str, Any]:
+        """Fetch a registered source; URLs and paths are never caller-supplied."""
+        response.headers["Cache-Control"] = "no-store"
+        if webfetch is None:
+            raise HTTPException(503, "Web fetch is not configured")
+        try:
+            document = await webfetch.fetch(source_id)
+        except SourceDisabled as error:
+            raise HTTPException(403, str(error)) from error
+        except SafeFetchError as error:
+            raise HTTPException(422, str(error)) from error
+        # Only metadata and marked text leave the fetch boundary; raw HTML is
+        # never returned to a client or model.
+        return {
+            **webfetch.document_envelope(document),
+            "url": document.url,
+            "status_code": document.status_code,
+            "content_type": document.content_type,
+            "fetched_at": document.fetched_at.isoformat(),
+            "from_cache": document.from_cache,
+        }
 
     @app.get("/api/v1/market/quotes")
     async def market_quote(

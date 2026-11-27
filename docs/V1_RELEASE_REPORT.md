@@ -63,3 +63,10 @@ Audit date 2026-11-15. Baseline `origin/main` at `7093314`. The [implementation 
 - **Distribution.** Publish and smoke-test the full native artifact set with checksums, provenance, dependency inventory and applicable signing or notarization evidence.
 
 V1 readiness remains open.
+
+## 1.1.0-rc.1 update (2026-11-27)
+
+The integration branch adds Wave 1 (previously audited), Wave 2's shared data-quality library, keyless Coinbase public REST adapter, Kraken v2 book feed and versioned source registry; Wave 3's SSRF-safe fetch and untrusted-text pipeline wired at READ tier through REST and MCP; and Wave 4's typed MCP outputs with cursors and projection, model catalog, offline eval harness and local-model policy. Full offline suite, lint, strict typing, coverage floors, frontend lint/typecheck/tests/build and onedir/onefile smoke tests are recorded in `gates-report.json` and the CI artifacts of the release-candidate commit.
+
+This is a release candidate, not a stable `v1.x` tag. The following remain open and are listed in [known limitations](KNOWN_LIMITATIONS.md): socket-level DNS pinning for web fetch, operator testnet keys and live venue evidence, chain signing reviews, all external source verification records, the seven-day PAPER soak and independent security review. No live route is enabled by this work and default mode stays PAPER.
+

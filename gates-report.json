@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-11-16T15:49:43.072929+00:00",
-  "git_sha": "a0e7cfe2d0ae2317cab42cb7c1dd7b539228827f",
-  "all_passed": false,
+  "generated_at": "2026-11-27T11:19:50.873811+00:00",
+  "git_sha": "6845eef264a40525dacd840e2b59fc93023b22de",
+  "all_passed": true,
   "gates": [
     {
       "name": "ruff-check",
@@ -13,14 +13,97 @@
         "check",
         "."
       ],
-      "exit_code": 1,
-      "attempts": 3,
+      "exit_code": 0,
+      "attempts": 1,
       "attempt_exit_codes": [
-        1,
-        1,
-        1
+        0
       ],
-      "output_tail": "    |\n1168 |         with self._connect() as connection:\n1169 |             rows = connection.execute(\n1170 |                 \"SELECT client_order_id, fill_id, quantity, price, fee, filled_at, cash_booking \"\n     |                                                                                         ^^^^^^^^^\n1171 |                 \"FROM spot_fills WHERE client_order_id = ? ORDER BY filled_at, fill_id\",\n1172 |                 (client_order_id,),\n     |\n\nE501 Line too long (97 > 88)\n    --> src\\hcs_trader\\storage.py:1190:89\n     |\n1188 |         with self._connect() as connection:\n1189 |             rows = connection.execute(\n1190 |                 \"SELECT f.fill_id, o.market, o.side, f.quantity, f.price, f.fee, f.cash_booking \"\n     |                                                                                         ^^^^^^^^^\n1191 |                 \"FROM spot_fills f JOIN spot_orders o USING (client_order_id) \"\n1192 |                 \"WHERE o.venue = ?\",\n     |\n\nFound 6 errors.\n"
+      "output_tail": "All checks passed!\n"
+    },
+    {
+      "name": "ruff-format",
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "ruff",
+        "format",
+        "--check",
+        "."
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "212 files already formatted\n"
+    },
+    {
+      "name": "mypy",
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "mypy"
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "Success: no issues found in 168 source files\n"
+    },
+    {
+      "name": "pytest",
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--cov-report=term",
+        "--cov-report=xml:coverage.xml"
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "   75%\nsrc\\hcs_trader\\skills\\__init__.py               70      2    97%\nsrc\\hcs_trader\\solana_signing.py               209      4    98%\nsrc\\hcs_trader\\spot_execution.py               153     18    88%\nsrc\\hcs_trader\\spot_port.py                     11      0   100%\nsrc\\hcs_trader\\storage.py                      848     42    95%\nsrc\\hcs_trader\\strategy.py                     185     15    92%\nsrc\\hcs_trader\\utxo_psbt.py                    282     21    93%\nsrc\\hcs_trader\\walk_forward.py                  63      4    94%\nsrc\\hcs_trader\\wallet_addresses.py             123      8    93%\nsrc\\hcs_trader\\wallets.py                      467     43    91%\nsrc\\hcs_trader\\webfetch.py                     181     21    88%\n----------------------------------------------------------------\nTOTAL                                        11474   1140    90%\nCoverage XML written to file coverage.xml\nRequired test coverage of 80% reached. Total coverage: 90.06%\n1240 passed, 6 skipped in 126.55s (0:02:06)\n",
+      "pytest_counts": {
+        "passed": 1240,
+        "skipped": 6
+      }
+    },
+    {
+      "name": "coverage-floors",
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "python",
+        "scripts/check_coverage_floors.py"
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "domain/assets.py              100.00%  floor 90%\ndomain/execution.py            90.12%  floor 90%\ndomain/lifecycle.py           100.00%  floor 90%\ndomain/macro.py               100.00%  floor 90%\ndomain/market_data.py          98.68%  floor 90%\ndomain/markets.py              96.46%  floor 90%\ndomain/news.py                100.00%  floor 90%\ndomain/paper.py                92.75%  floor 90%\ndomain/signing.py              86.47%  floor 86%  (below 90: TODO)\ndomain/wallet.py              100.00%  floor 90%\ndomain/wallet_port.py         100.00%  floor 90%\nevm_signing.py                 85.07%  floor 85%  (below 90: TODO)\npaper_execution.py            100.00%  floor 90%\nrisk.py                        98.95%  floor 90%\nsigning.py                     75.16%  floor 75%  (below 90: TODO)\nsolana_signing.py              98.09%  floor 90%\nspot_execution.py              88.24%  floor 87%  (below 90: TODO)\nutxo_psbt.py                   92.55%  floor 90%\n\nAll per-module coverage floors met.\n"
+    },
+    {
+      "name": "secret-scan",
+      "command": [
+        "internal:secret-scan"
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "clean"
     }
   ]
 }

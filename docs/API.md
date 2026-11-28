@@ -48,6 +48,7 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | POST | `/api/v1/quant/size` | Side-effect-free bounded long-spot sizing preview from explicit Decimal inputs; returns `authorization: NONE` and never submits or authorizes an order |
 | POST | `/api/v1/quant/costs` | Side-effect-free preview of the shared fee/spread/slippage model; returns exact Decimal rates, execution price and `authorization: NONE` |
 | GET | `/api/v1/quant/regime` | Trailing-only regime slope points from stored closed candles (`interval`, `limit`, `lookback`, optional `market`); no future data can affect earlier points |
+| GET | `/api/v1/export/audit` | Downloadable JSON attachment of recent audit events (`limit`); no secrets, no-store |
 | GET | `/api/v1/orders/{order_id}` | One spot order or paper fill by identifier |
 | POST | `/api/v1/orders/live` | Alias of `/api/v1/orders/spot`; same gates and risk path |
 | GET | `/api/v1/orders/spot` | Spot order list and lifecycle states |

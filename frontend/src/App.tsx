@@ -7,6 +7,7 @@ import {
 } from "./api";
 import { MarketChart } from "./CandleChart";
 import { GlobalHeader } from "./GlobalHeader";
+import { readLocale, saveLocale, t, type LabelKey, type Locale } from "./i18n";
 import { NewsTimeline } from "./NewsTimeline";
 import { OrderPreview } from "./OrderPreview";
 import { PaperPortfolio } from "./PaperPortfolio";
@@ -45,6 +46,7 @@ export function App() {
   const [screen, setScreen] = useState<ScreenId>(screenFromHash);
   const [snapshot, setSnapshot] = useState<Snapshot>({ state: "loading" });
   const [refresh, setRefresh] = useState(0);
+  const [locale, setLocale] = useState<Locale>(readLocale);
 
   useEffect(() => {
     const onHash = () => setScreen(screenFromHash());
@@ -161,7 +163,14 @@ export function App() {
   return (
     <>
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <GlobalHeader refreshKey={refresh} />
+      <GlobalHeader
+        refreshKey={refresh}
+        locale={locale}
+        onLocaleChange={(next) => {
+          setLocale(next);
+          saveLocale(next);
+        }}
+      />
       <nav aria-label="Primary" className="primary-nav">
         <ul>
           {screens.map((s) => (
@@ -174,14 +183,14 @@ export function App() {
                   navigate(s.id);
                 }}
               >
-                {s.label}
+                {t(locale, s.id as LabelKey)}
               </a>
             </li>
           ))}
         </ul>
       </nav>
       <main id="main-content" tabIndex={-1}>
-        <h1>{screens.find((s) => s.id === screen)?.label}</h1>
+        <h1>{t(locale, screen as LabelKey)}</h1>
         {content}
       </main>
     </>

@@ -7,6 +7,7 @@ import {
   type RiskStatus,
   type SystemStatus,
 } from "./api";
+import { t, type Locale } from "./i18n";
 
 const modeIcons: Record<Mode, string> = {
   OFFLINE: "○",
@@ -15,14 +16,13 @@ const modeIcons: Record<Mode, string> = {
   LIVE: "●",
 };
 
-const modeText: Record<Mode, string> = {
-  OFFLINE: "Offline",
-  DATA_ONLY: "Data only",
-  PAPER: "Paper (simulated)",
-  LIVE: "LIVE (real funds)",
-};
-
-export function ModeBadge({ mode }: { mode: Mode | null }) {
+export function ModeBadge({
+  mode,
+  locale = "en",
+}: {
+  mode: Mode | null;
+  locale?: Locale;
+}) {
   if (mode === null) {
     return (
       <span className="mode-badge" data-badge="UNKNOWN">
@@ -30,14 +30,29 @@ export function ModeBadge({ mode }: { mode: Mode | null }) {
       </span>
     );
   }
+  const translated: Record<Mode, string> = {
+    OFFLINE: t(locale, "offline"),
+    DATA_ONLY: t(locale, "data_only"),
+    PAPER: t(locale, "paper"),
+    LIVE: t(locale, "live"),
+  };
   return (
     <span className="mode-badge" data-badge={mode}>
-      <span aria-hidden="true">{modeIcons[mode]}</span> <span>Mode: {modeText[mode]}</span>
+      <span aria-hidden="true">{modeIcons[mode]}</span>{" "}
+      <span>{t(locale, "mode")}: {translated[mode]}</span>
     </span>
   );
 }
 
-export function GlobalHeader({ refreshKey = 0 }: { refreshKey?: number }) {
+export function GlobalHeader({
+  refreshKey = 0,
+  locale = "en",
+  onLocaleChange,
+}: {
+  refreshKey?: number;
+  locale?: Locale;
+  onLocaleChange?: (locale: Locale) => void;
+}) {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [risk, setRisk] = useState<RiskStatus | null>(null);
   const [unavailable, setUnavailable] = useState(false);
@@ -94,7 +109,22 @@ export function GlobalHeader({ refreshKey = 0 }: { refreshKey?: number }) {
       <div className="header-inner">
         <span className="brand">HCS<span>.media</span></span>
         <ul className="header-status" aria-label="System state">
-          <li><ModeBadge mode={status?.mode ?? null} /></li>
+          <li><ModeBadge mode={status?.mode ?? null} locale={locale} /></li>
+          <li>
+            <label>
+              {t(locale, "language")}{" "}
+              <select
+                aria-label={t(locale, "language")}
+                value={locale}
+                onChange={(event) =>
+                  onLocaleChange?.(event.target.value as Locale)
+                }
+              >
+                <option value="en">English</option>
+                <option value="de">Deutsch</option>
+              </select>
+            </label>
+          </li>
           <li>
             Network:{" "}
             <strong>

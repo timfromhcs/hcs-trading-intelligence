@@ -825,6 +825,32 @@ def create_app(
             ingestion_mode=ingestion.network_policy.mode if ingestion else None,
         )
 
+    @app.get("/api/v1/export/audit")
+    def export_audit(
+        limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+    ) -> Response:
+        """Download audit events as a JSON attachment (no secrets included)."""
+        try:
+            events = store.list_audit_events(limit=limit)
+            payload = [
+                {
+                    "event_id": event.event_id,
+                    "recorded_at": event.recorded_at,
+                    "kind": event.kind,
+                }
+                for event in events
+            ]
+        except sqlite3.Error as error:
+            raise HTTPException(503, "Audit event storage unavailable") from error
+        return Response(
+            content=json.dumps(payload, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": 'attachment; filename="hcs-audit.json"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     @app.get("/api/v1/webfetch/sources")
     def registered_web_sources(response: Response) -> list[dict[str, Any]]:
         """List registered external sources with their verification state."""

@@ -13,8 +13,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hcs_trader.backtest import BacktestResult, run_backtest
-from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.kraken import SOURCE
 from hcs_trader.domain.market_data import Candle
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID
 from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.holdout import CANDIDATE_JSON, RESULT_JSON, HoldoutResult
 from hcs_trader.walk_forward import PeriodPair, WalkForwardResult
@@ -380,7 +381,7 @@ def _record_shadow_replay(
     available_candles = (
         candles
         if candles is not None
-        else store.candle_history(BTC_USD, SOURCE, 60, limit=1000)
+        else store.candle_history(DEFAULT_MARKET_ID, SOURCE, 60, limit=1000)
     )
     filtered = [c for c in available_candles if c.closed_at <= now]
     start = next(
@@ -435,7 +436,7 @@ def run_forward_shadow_observation(
         candidates = store.list_strategy_candidates(stage=PromotionStage.PAPER_SHADOW)
 
     now = at or datetime.now(UTC)
-    candles = store.candle_history(BTC_USD, SOURCE, 60, limit=1000)
+    candles = store.candle_history(DEFAULT_MARKET_ID, SOURCE, 60, limit=1000)
     results: list[tuple[str, str, BacktestResult]] = []
     for cand in candidates:
         if cand.stage != PromotionStage.PAPER_SHADOW:

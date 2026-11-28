@@ -1,9 +1,11 @@
 ---
 name: strategy-lab
-version: 1.0.0
-purpose: Deterministic technical indicator calculation, realistic backtesting, and walk-forward candidate evaluation
-capability_tier: RESEARCH
-required_tools: quant.get_indicators, market.get_candles
+description: Calculate technical indicators, run realistic backtests and evaluate walk-forward strategy candidates. Use for strategy research and candidate comparison.
+metadata:
+  version: "1.0.0"
+  purpose: "Deterministic technical indicator calculation, realistic backtesting, and walk-forward candidate evaluation"
+  capability_tier: RESEARCH
+  required_tools: "quant.get_indicators, market.get_candles"
 ---
 
 # Strategy Lab Skill

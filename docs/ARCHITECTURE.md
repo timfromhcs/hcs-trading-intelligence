@@ -45,6 +45,10 @@ HCS Trading Intelligence is built as a local-first, modular monolith designed fo
 +------------------------------------+ +---------------------------------+
 ```
 
+## Ingestion runtime
+
+`data/runtime.py` builds the default feed jobs and an `IngestionService` that owns the scheduler task for the app lifespan (opt-in). `data/ingestion.py` runs each source under a retry budget and circuit breaker and writes its state through `AuditStore` (`ingest_state`, schema version 20). `data/source_status.py` derives the `SourceStatus` read model that the REST, MCP and UI surfaces share.
+
 ## Architectural principles
 
 1. **Local-First & Loopback Binding:** The application runs on the operator's machine and binds strictly to `127.0.0.1`. All mutating state endpoints require a matching local origin to prevent cross-site request forgery.
@@ -80,6 +84,10 @@ flowchart TD
 ```
 
 Transports hold no business logic. The risk engine imports neither a model client nor a network adapter, and the signer is not reachable from MCP or from a model.
+
+### Market registry
+
+`domain/markets.py` is pure data: per market it holds the venue pair, accepted response names, price and quantity precision, minimum size and a status (`read_only`, `paper`, `live_allowed`). Quotes, candles, indicators and the REST and MCP read paths take a registry symbol and default to BTC/USD. The registry never authorises an action. Live submission requires `live_allowed` in the registry, the risk policy allowlist and the existing gates, and only BTC/USD carries that status. Paper execution and the paper ledger are still BTC/USD only; ETH, SOL and LTC are read-only until the ledger becomes multi-asset.
 
 ## Trading and research loop
 

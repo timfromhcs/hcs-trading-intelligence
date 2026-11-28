@@ -88,10 +88,33 @@ class CircuitBreaker:
             self._state = CircuitState.HALF_OPEN
             self._probe_in_flight = True
 
+    def release_probe(self) -> None:
+        """Free a HALF_OPEN probe slot after a call that neither succeeded nor failed.
+
+        Used when the call was cancelled or died with an unexpected error, so
+        the breaker stays HALF_OPEN and the next caller may probe again.
+        """
+        self._probe_in_flight = False
+
     def record_success(self) -> None:
         self._failures = 0
         self._probe_in_flight = False
         self._state = CircuitState.CLOSED
+
+    @property
+    def retry_in(self) -> float:
+        """Seconds until a call is permitted again (0 unless OPEN)."""
+        if self.state is not CircuitState.OPEN:
+            return 0.0
+        return max(0.0, self._reset - (self._clock() - self._opened_at))
+
+    def force_open(self, remaining: float) -> None:
+        """Restore an OPEN breaker after a restart with ``remaining`` seconds left."""
+        if remaining <= 0:
+            return
+        self._state = CircuitState.OPEN
+        self._probe_in_flight = False
+        self._opened_at = self._clock() - max(0.0, self._reset - remaining)
 
     def record_failure(self) -> None:
         self._probe_in_flight = False

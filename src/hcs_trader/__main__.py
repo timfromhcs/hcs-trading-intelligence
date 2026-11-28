@@ -18,6 +18,7 @@ from getpass import GetPassWarning, getpass
 from importlib.metadata import version
 from pathlib import Path
 from time import monotonic_ns
+from typing import Any
 from uuid import uuid4
 
 import httpx2
@@ -32,16 +33,17 @@ from hcs_trader.data.ecb import MacroUnavailable, fetch_ecb_rates
 from hcs_trader.data.fed_news import NewsUnavailable, fetch_fed_news
 from hcs_trader.data.fred import fetch_fred_cpi
 from hcs_trader.data.kraken import (
-    BTC_USD,
     CANDLE_INTERVALS,
     SOURCE,
     KrakenQuoteProvider,
 )
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.data.runtime import IngestionService
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import DataQuality
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID, MARKET_REGISTRY
 from hcs_trader.domain.paper import PaperRejected
 from hcs_trader.domain.wallet import (
     SolanaBalance,
@@ -89,6 +91,7 @@ from hcs_trader.local_research import (
 )
 from hcs_trader.mcp_server import create_mcp_server
 from hcs_trader.model_manifest import verify_model_manifest
+from hcs_trader.network_policy import NetworkPolicy, SystemMode, build_http_client
 from hcs_trader.promotion import (
     CandidateNotFound,
     PromotionRejected,
@@ -156,9 +159,10 @@ async def probe_kraken_validate() -> dict[str, object]:
         return await kraken_validate_probe(key, secret, client)
 
 
-async def import_candles(interval: int) -> int:
+async def import_candles(interval: int, market: str | None = None) -> int:
+    market_id = MARKET_REGISTRY.resolve(market).market_id
     async with httpx2.AsyncClient(trust_env=False) as client:
-        candles = await KrakenQuoteProvider(client).get_candles(BTC_USD, interval)
+        candles = await KrakenQuoteProvider(client).get_candles(market_id, interval)
     store = local_store()
     store.initialize()
     return store.record_candles(candles)
@@ -213,7 +217,7 @@ def freeze_research(
         config = TypeAdapter(WalkForwardConfig).validate_json(model)
     store = local_store()
     store.initialize()
-    development = store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
+    development = store.candle_history(DEFAULT_MARKET_ID, SOURCE, interval, limit=limit)
     candidate = freeze_candidate(development, config, commitment)
     payload = CANDIDATE_JSON.dump_json(candidate).decode("utf-8")
     store.freeze_holdout(commitment, payload)
@@ -253,7 +257,7 @@ async def market_research(
     store = local_store()
     store.initialize()
     evidence = calculate_indicators(
-        store.candle_history(BTC_USD, SOURCE, interval, limit=720)
+        store.candle_history(DEFAULT_MARKET_ID, SOURCE, interval, limit=720)
     )
     if alias is None and token_file is None and manifest_path is None:
         report = await research_report(evidence, NoneModelProvider())
@@ -469,7 +473,9 @@ async def submit_canary_order(
             live_policy=lambda: require_runtime_live_policy(store),
         )
         quotes = QuoteService(
-            KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+            KrakenQuoteProvider(client),
+            DEFAULT_MARKET_ID,
+            record_quote=store.record_quote,
         )
         snap = await quotes.snapshot()
         if snap.quality is not DataQuality.FRESH or snap.quote is None:
@@ -551,6 +557,39 @@ async def utxo_balance(
         return await LocalWalletRpc(client, port).utxo_balance(address, network)
 
 
+def ingestion_network_policy(
+    *, paper_mode: bool, live: bool = False, offline: bool = False
+) -> NetworkPolicy:
+    """The one policy shared by background ingestion and /system/status."""
+    if offline:
+        return NetworkPolicy(SystemMode.OFFLINE)
+    if live:
+        return NetworkPolicy(SystemMode.LIVE)
+    return NetworkPolicy(SystemMode.PAPER if paper_mode else SystemMode.DATA_ONLY)
+
+
+def _build_app(
+    store: AuditStore,
+    ingestion: IngestionService | None,
+    network_policy: NetworkPolicy | None,
+    quotes: QuoteService | None,
+    paper_mode: bool,
+    recovery: Any,
+    spot_exec: Any,
+) -> Any:
+    return create_app(
+        store,
+        Path(__file__).with_name("ui_assets"),
+        ingestion=ingestion,
+        network_policy=network_policy,
+        quote_service=quotes,
+        paper_mode=paper_mode,
+        kraken_reconciliation=recovery,
+        spot_execution=spot_exec,
+        bound_port=LOCAL_PORT,
+    )
+
+
 async def serve(
     market_data: bool,
     paper_mode: bool = False,
@@ -559,12 +598,17 @@ async def serve(
     open_browser: bool = False,
     kraken_reconcile_credentials: Path | None = None,
     kraken_live_credentials: Path | None = None,
+    ingest_feeds: bool = False,
+    ingest_offline: bool = False,
 ) -> None:
     store = local_store() if data_dir is None else AuditStore(data_dir / "audit.sqlite")
     async with httpx2.AsyncClient(trust_env=False) as client:
         quotes = (
             QuoteService(
-                KrakenQuoteProvider(client), BTC_USD, record_quote=store.record_quote
+                KrakenQuoteProvider(client),
+                DEFAULT_MARKET_ID,
+                record_quote=store.record_quote,
+                record_state=store.save_ingest_state,
             )
             if market_data or paper_mode or kraken_live_credentials is not None
             else None
@@ -591,14 +635,33 @@ async def serve(
                 RiskEngine(RiskPolicy()),
             )
             recovery = execution.reconcile_startup
-        app = create_app(
-            store,
-            Path(__file__).with_name("ui_assets"),
-            quote_service=quotes,
-            paper_mode=paper_mode,
-            kraken_reconciliation=recovery,
-            spot_execution=spot_exec,
-        )
+        ingestion = None
+        feed_policy: NetworkPolicy | None = None
+        feed_client: httpx2.AsyncClient | None = None
+        if ingest_feeds:
+            feed_policy = ingestion_network_policy(
+                paper_mode=paper_mode,
+                live=kraken_live_credentials is not None,
+                offline=ingest_offline,
+            )
+            feed_client = build_http_client(feed_policy, follow_redirects=False)
+            ingestion = IngestionService(
+                store, feed_client, feed_policy, own_client=True
+            )
+        try:
+            app = _build_app(
+                store,
+                ingestion,
+                feed_policy,
+                quotes,
+                paper_mode,
+                recovery,
+                spot_exec,
+            )
+        except BaseException:
+            if ingestion is not None:
+                await ingestion.stop()  # closes the owned client; never started
+            raise
         config = uvicorn.Config(
             app,
             host=LOOPBACK_HOST,
@@ -706,6 +769,32 @@ def live_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def mcp_http_command(arguments: argparse.Namespace) -> None:
+    """Serve MCP over loopback HTTP; the bearer token is printed once."""
+    from hcs_trader import mcp_server  # noqa: PLC0415
+
+    if not 1 <= arguments.port <= 65535:
+        raise SystemExit("--port must be between 1 and 65535")
+    store = (
+        local_store()
+        if arguments.data_dir is None
+        else AuditStore(arguments.data_dir / "audit.sqlite")
+    )
+    if not store.path.exists():
+        store.initialize()
+    tiers = frozenset(
+        mcp_server.CapabilityTier(t) for t in (arguments.tier or ["READ"])
+    )
+    registry = mcp_server.ClientRegistry()
+    token = registry.register(arguments.client_id, tiers)
+    print(f"MCP endpoint: http://127.0.0.1:{arguments.port}/mcp")
+    granted = ", ".join(sorted(t.value for t in tiers))
+    print(f"Client {arguments.client_id} tiers: {granted}")
+    print(f"Bearer token (shown once, not stored): {token}", flush=True)
+    server = create_mcp_server(store.path, granted_tiers=frozenset())
+    mcp_server.run_http(server, registry, port=arguments.port)
+
+
 def release_check_command(arguments: argparse.Namespace) -> int:
     report = evaluate_checklist(
         load_context(arguments.root, arguments.gates_report, arguments.dist)
@@ -734,6 +823,16 @@ def main() -> None:
         "--open-browser", action="store_true", help="Open the dashboard"
     )
     serve_parser.add_argument(
+        "--ingest-feeds",
+        action="store_true",
+        help="Opt in to background Federal Reserve and ECB feed polling",
+    )
+    serve_parser.add_argument(
+        "--ingest-offline",
+        action="store_true",
+        help="With --ingest-feeds, run the scheduler in OFFLINE mode (never polls)",
+    )
+    serve_parser.add_argument(
         "--kraken-reconcile-credentials",
         type=Path,
         help="Opt in to read-only Kraken order recovery on startup",
@@ -749,7 +848,12 @@ def main() -> None:
         help="Enable paper BTC/USD orders using public Kraken quotes",
     )
     import_parser = commands.add_parser(
-        "import-candles", help="Import closed Kraken BTC/USD candles into local history"
+        "import-candles", help="Import closed Kraken candles into local history"
+    )
+    import_parser.add_argument(
+        "--market",
+        choices=[m.symbol for m in MARKET_REGISTRY.markets()],
+        default=MARKET_REGISTRY.default.symbol,
     )
     import_parser.add_argument(
         "--interval", type=int, choices=sorted(CANDLE_INTERVALS), default=60
@@ -783,6 +887,19 @@ def main() -> None:
         mcp_parser.add_argument(
             "--data-dir", type=Path, help="Use a separate local data directory"
         )
+    http_parser = commands.add_parser(
+        "mcp-http",
+        help="Run the local MCP server over Streamable HTTP on 127.0.0.1 only",
+    )
+    http_parser.add_argument("--data-dir", type=Path)
+    http_parser.add_argument("--port", type=int, default=8766)
+    http_parser.add_argument("--client-id", default="local-client")
+    http_parser.add_argument(
+        "--tier",
+        action="append",
+        choices=["READ", "RESEARCH", "PAPER_TRADE"],
+        help="Capability tier granted to the client (repeatable; default READ)",
+    )
     selftest_parser = commands.add_parser(
         "selftest", help="Run the offline installation self-test"
     )
@@ -1030,16 +1147,18 @@ def main() -> None:
                     open_browser=arguments.open_browser,
                     kraken_reconcile_credentials=arguments.kraken_reconcile_credentials,
                     kraken_live_credentials=arguments.kraken_live_credentials,
+                    ingest_feeds=arguments.ingest_feeds,
+                    ingest_offline=arguments.ingest_offline,
                 )
             )
         except (OSError, ValueError, RiskRejected) as error:
             parser.exit(1, f"{error}\n")
     elif arguments.command == "import-candles":
         try:
-            count = asyncio.run(import_candles(arguments.interval))
+            count = asyncio.run(import_candles(arguments.interval, arguments.market))
         except QuoteUnavailable as error:
             parser.exit(1, f"{error}\n")
-        print(f"Imported {count} new BTC/USD candles.")
+        print(f"Imported {count} new {arguments.market} candles.")
     elif arguments.command == "import-news":
         try:
             count = asyncio.run(import_news())
@@ -1104,6 +1223,8 @@ def main() -> None:
             # A fresh install (for example a bundle) needs a migrated database.
             mcp_store.initialize()
         create_mcp_server(mcp_store.path).run(transport="stdio")
+    elif arguments.command == "mcp-http":
+        mcp_http_command(arguments)
     elif arguments.command == "selftest":
         from hcs_trader import selftest
 

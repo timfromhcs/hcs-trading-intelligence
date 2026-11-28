@@ -47,7 +47,7 @@ def test_migration_persists_history_and_backup_restores_it(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("PRAGMA user_version").fetchone() == (19,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (21,)
 
 
 def test_v1_upgrade_retains_audit_and_deduplicates_quotes(tmp_path: Path) -> None:
@@ -640,7 +640,7 @@ def test_health_reports_ok_and_failures_without_raising(tmp_path: Path) -> None:
     store = AuditStore(tmp_path / "h.sqlite")
     store.initialize()
     health = store.health()
-    assert health.ok and health.schema_version == 19
+    assert health.ok and health.schema_version == 21
     assert health.execution_paused is False
     bad = AuditStore(tmp_path / "nowhere" / "missing.sqlite", read_only=True)
     report = bad.health()

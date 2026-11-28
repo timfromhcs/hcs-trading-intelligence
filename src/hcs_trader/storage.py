@@ -16,6 +16,8 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
+from hcs_trader.data.feed_status import IngestRecord
+from hcs_trader.data.news_provenance import enrich, source_language, source_tier
 from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.execution import (
     SpotCanaryApproval,
@@ -28,7 +30,7 @@ from hcs_trader.domain.execution import SpotFill as SpotFill
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
-from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.news import NewsHit, NewsItem, UntrustedEnvelope
 from hcs_trader.domain.paper import (
     PaperBalance,
     PaperConflict,
@@ -40,10 +42,11 @@ from hcs_trader.domain.paper import (
 from hcs_trader.domain.signing import ApprovedRiskDecision, SignedPlanConflict
 from hcs_trader.domain.wallet import WalletSnapshot
 from hcs_trader.local_research import ResearchHistory, ResearchRun, ResearchRunStats
+from hcs_trader.news_safety import sanitize_text
 from hcs_trader.promotion import PromotionStage, StrategyCandidate
 from hcs_trader.risk import RiskEvaluation, RiskRejected
 
-_SCHEMA_VERSION = 19
+_SCHEMA_VERSION = 21
 _SPOT_CASH_TRADE = TypeAdapter(SpotCashTrade)
 _PAPER_FILL = TypeAdapter(PaperFill)
 _RESEARCH_RUN = TypeAdapter(ResearchRun)
@@ -578,7 +581,235 @@ class AuditStore:
                         "ALTER TABLE spot_fills ADD COLUMN cash_booking TEXT"
                     )
                 connection.execute("PRAGMA user_version = 19")
+            if version < 20:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ingest_state (
+                        source_id TEXT PRIMARY KEY NOT NULL,
+                        last_success TEXT,
+                        last_error TEXT,
+                        newest_item_at TEXT,
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        retry_after_until TEXT,
+                        breaker_state TEXT NOT NULL DEFAULT 'CLOSED',
+                        breaker_open_until TEXT,
+                        updated_at TEXT NOT NULL
+                    ) STRICT, WITHOUT ROWID
+                    """
+                )
+                connection.execute("PRAGMA user_version = 20")
+            if version < 21:
+                self._migrate_news_provenance(connection)
+                connection.execute("PRAGMA user_version = 21")
         self._verify_integrity()
+
+    # --- ingestion runtime state (migration 20) ---------------------------
+
+    _INGEST_COLUMNS = (
+        "source_id, last_success, last_error, newest_item_at, "
+        "consecutive_failures, retry_after_until, breaker_state, breaker_open_until"
+    )
+
+    @staticmethod
+    def _ingest_record(row: tuple[Any, ...]) -> IngestRecord:
+        def when(value: str | None) -> datetime | None:
+            return datetime.fromisoformat(value) if value else None
+
+        return IngestRecord(
+            row[0],
+            when(row[1]),
+            row[2],
+            when(row[3]),
+            int(row[4]),
+            when(row[5]),
+            row[6],
+            when(row[7]),
+        )
+
+    def load_ingest_state(self, source_id: str) -> IngestRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {self._INGEST_COLUMNS} FROM ingest_state "  # noqa: S608
+                "WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        return IngestRecord(source_id) if row is None else self._ingest_record(row)
+
+    def list_ingest_state(self) -> list[IngestRecord]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT {self._INGEST_COLUMNS} FROM ingest_state "  # noqa: S608
+                    "ORDER BY source_id"
+                ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error):
+                return []  # database not yet upgraded by the writer process
+            raise
+        return [self._ingest_record(row) for row in rows]
+
+    def save_ingest_state(self, record: IngestRecord) -> None:
+        def text(value: datetime | None) -> str | None:
+            return value.astimezone(UTC).isoformat() if value else None
+
+        with self._connect() as connection, connection:
+            connection.execute(
+                f"INSERT INTO ingest_state ({self._INGEST_COLUMNS}, updated_at) "  # noqa: S608
+                "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET "
+                "last_success=excluded.last_success, last_error=excluded.last_error, "
+                "newest_item_at=excluded.newest_item_at, "
+                "consecutive_failures=excluded.consecutive_failures, "
+                "retry_after_until=excluded.retry_after_until, "
+                "breaker_state=excluded.breaker_state, "
+                "breaker_open_until=excluded.breaker_open_until, "
+                "updated_at=excluded.updated_at",
+                (
+                    record.source_id,
+                    text(record.last_success),
+                    record.last_error,
+                    text(record.newest_item_at),
+                    record.consecutive_failures,
+                    text(record.retry_after_until),
+                    record.breaker_state,
+                    text(record.breaker_open_until),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    @staticmethod
+    def _fts5_supported(connection: sqlite3.Connection) -> bool:
+        try:
+            connection.execute("CREATE VIRTUAL TABLE temp._fts5_probe USING fts5(x)")
+            connection.execute("DROP TABLE temp._fts5_probe")
+        except sqlite3.OperationalError:
+            return False
+        return True
+
+    def _migrate_news_provenance(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(news_items)")
+        }
+        for name in (
+            "article_id",
+            "canonical_url",
+            "language",
+            "region",
+            "content_hash",
+            "duplicate_group_id",
+            "source_reliability",
+            "raw_payload_reference",
+            "snippet",
+        ):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE news_items ADD COLUMN {name} TEXT")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_revisions (
+                article_id TEXT NOT NULL,
+                revision_no INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL,
+                PRIMARY KEY (article_id, revision_no)
+            ) STRICT, WITHOUT ROWID
+            """
+        )
+        rows = connection.execute(
+            "SELECT source, url, title, published_at, received_at FROM news_items "
+            "WHERE article_id IS NULL ORDER BY received_at, source, url"
+        ).fetchall()
+        seen: set[str] = set()
+        for source, url, raw_title, published, received in rows:
+            # Legacy titles predate write-time sanitising; clean them before they
+            # reach the hash, the revision log and the FTS index.
+            title = sanitize_text(raw_title) or "(untitled)"
+            if title != raw_title:
+                connection.execute(
+                    "UPDATE news_items SET title = ? WHERE source = ? AND url = ?",
+                    (title, source, url),
+                )
+            item = NewsItem(
+                source,
+                url,
+                title,
+                datetime.fromisoformat(published),
+                datetime.fromisoformat(received),
+            )
+            enriched = enrich(item, strict=False, language=source_language(source))
+            if enriched.article_id in seen:
+                # Two legacy URLs collapse onto one article; keep the earliest
+                # received_at (rows are read in that order); drop the rest.
+                connection.execute(
+                    "DELETE FROM news_items WHERE source = ? AND url = ?",
+                    (source, url),
+                )
+                continue
+            seen.add(enriched.article_id)
+            connection.execute(
+                "UPDATE news_items SET article_id = ?, canonical_url = ?, "
+                "language = ?, content_hash = ?, duplicate_group_id = ?, "
+                "source_reliability = ? WHERE source = ? AND url = ?",
+                (
+                    enriched.article_id,
+                    enriched.canonical_url,
+                    enriched.language,
+                    enriched.content_hash,
+                    enriched.duplicate_group_id,
+                    source_tier(source),
+                    source,
+                    url,
+                ),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO news_revisions VALUES (?, 1, ?, ?, ?)",
+                (enriched.article_id, title, enriched.content_hash, received),
+            )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS news_items_article "
+            "ON news_items (article_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS news_items_group "
+            "ON news_items (duplicate_group_id)"
+        )
+        if not self._fts5_supported(connection):
+            return  # search falls back to a bounded substring scan
+        connection.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS news_fts "
+            "USING fts5(article_id UNINDEXED, title, snippet)"
+        )
+        connection.execute("DELETE FROM news_fts")
+        connection.execute(
+            "INSERT INTO news_fts (article_id, title, snippet) "
+            "SELECT article_id, title, COALESCE(snippet, '') FROM news_items"
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS news_fts_insert
+            AFTER INSERT ON news_items BEGIN
+                INSERT INTO news_fts (article_id, title, snippet)
+                VALUES (new.article_id, new.title, COALESCE(new.snippet, ''));
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS news_fts_update AFTER UPDATE OF title, snippet
+            ON news_items BEGIN
+                DELETE FROM news_fts WHERE article_id = old.article_id;
+                INSERT INTO news_fts (article_id, title, snippet)
+                VALUES (new.article_id, new.title, COALESCE(new.snippet, ''));
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS news_fts_delete
+            AFTER DELETE ON news_items BEGIN
+                DELETE FROM news_fts WHERE article_id = old.article_id;
+            END
+            """
+        )
 
     def _verify_integrity(self) -> None:
         try:
@@ -1421,25 +1652,197 @@ class AuditStore:
             for day, received, value, vintage in reversed(rows)
         ]
 
-    def record_news(self, items: list[NewsItem]) -> int:
+    def record_news(
+        self,
+        items: list[NewsItem],
+        *,
+        snippets: dict[str, str] | None = None,
+        raw_payload_reference: str | None = None,
+    ) -> int:
+        """Store items with provenance; return rows inserted or revised.
+
+        Tracking-parameter URL variants collapse onto one article. A changed
+        title for the same article is stored as a new revision, never dropped.
+        """
+        changed = 0
         with self._connect() as connection, connection:
-            connection.executemany(
-                """
-                INSERT INTO news_items VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (source, url) DO NOTHING
-                """,
-                (
-                    (
-                        item.source,
-                        item.url,
-                        item.title,
-                        item.published_at.isoformat(timespec="microseconds"),
-                        item.received_at.isoformat(timespec="microseconds"),
+            for raw in items:
+                title = sanitize_text(raw.title)
+                if not title:
+                    continue
+                item = NewsItem(
+                    raw.source, raw.url, title, raw.published_at, raw.received_at
+                )
+                enriched = enrich(
+                    item,
+                    strict=False,
+                    language=source_language(item.source),
+                    raw_payload_reference=raw_payload_reference,
+                )
+                snippet = (snippets or {}).get(raw.url)
+                snippet = sanitize_text(snippet) if snippet else None
+                existing = connection.execute(
+                    "SELECT content_hash FROM news_items WHERE article_id = ?",
+                    (enriched.article_id,),
+                ).fetchone()
+                retrieved = item.received_at.isoformat(timespec="microseconds")
+                if existing is None:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO news_items (
+                            source, url, title, published_at, received_at,
+                            article_id, canonical_url, language, region,
+                            content_hash, duplicate_group_id, source_reliability,
+                            raw_payload_reference, snippet
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (source, url) DO NOTHING
+                        """,
+                        (
+                            item.source,
+                            item.url,
+                            title,
+                            item.published_at.isoformat(timespec="microseconds"),
+                            retrieved,
+                            enriched.article_id,
+                            enriched.canonical_url,
+                            enriched.language,
+                            enriched.region,
+                            enriched.content_hash,
+                            enriched.duplicate_group_id,
+                            source_tier(item.source),
+                            raw_payload_reference,
+                            snippet,
+                        ),
                     )
-                    for item in items
-                ),
+                    if cursor.rowcount:
+                        connection.execute(
+                            "INSERT INTO news_revisions VALUES (?, 1, ?, ?, ?)",
+                            (
+                                enriched.article_id,
+                                title,
+                                enriched.content_hash,
+                                retrieved,
+                            ),
+                        )
+                        changed += 1
+                    continue
+                if existing[0] == enriched.content_hash:
+                    continue
+                connection.execute(
+                    "UPDATE news_items SET title = ?, content_hash = ?, "
+                    "duplicate_group_id = ?, snippet = COALESCE(?, snippet) "
+                    "WHERE article_id = ?",
+                    (
+                        title,
+                        enriched.content_hash,
+                        enriched.duplicate_group_id,
+                        snippet,
+                        enriched.article_id,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO news_revisions SELECT ?, "
+                    "COALESCE(MAX(revision_no), 0) + 1, ?, ?, ? "
+                    "FROM news_revisions WHERE article_id = ?",
+                    (
+                        enriched.article_id,
+                        title,
+                        enriched.content_hash,
+                        retrieved,
+                        enriched.article_id,
+                    ),
+                )
+                changed += 1
+        return changed
+
+    def news_revisions(self, article_id: str) -> list[tuple[int, str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT revision_no, title, content_hash FROM news_revisions "
+                "WHERE article_id = ? ORDER BY revision_no",
+                (article_id,),
+            ).fetchall()
+        return [(int(n), str(t), str(h)) for n, t, h in rows]
+
+    def search_news(self, query: str, *, limit: int) -> list[NewsHit]:
+        """Search titles and snippets (FTS5 when present) plus source ids.
+
+        The query is tokenised and each token quoted, so it can never be
+        interpreted as FTS syntax. Results carry provenance and an
+        untrusted-content envelope.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("News limit must be between 1 and 100")
+        needle = query.strip().casefold()
+        tokens = re.findall(r"\w+", needle)
+        with self._connect() as connection:
+            has_fts = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'news_fts'"
+                ).fetchone()
+                is not None
             )
-            return connection.total_changes
+            rows: list[tuple[Any, ...]] = []
+            if has_fts and tokens:
+                match = " ".join(f'"{token}"*' for token in tokens)
+                try:
+                    rows = connection.execute(
+                        "SELECT source, url, title, published_at, received_at, "
+                        "article_id, "
+                        "canonical_url, language, region, content_hash, "
+                        "duplicate_group_id, source_reliability, "
+                        "raw_payload_reference, snippet FROM news_items "
+                        "WHERE article_id IN "
+                        "(SELECT article_id FROM news_fts WHERE news_fts MATCH ?) "
+                        "OR instr(lower(source), ?) > 0 "
+                        "ORDER BY published_at DESC, source, url LIMIT ?",
+                        (match, needle, limit),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    has_fts = False
+            if not has_fts or not tokens:
+                candidates = connection.execute(
+                    "SELECT source, url, title, published_at, received_at, "
+                    "article_id, "
+                    "canonical_url, language, region, content_hash, "
+                    "duplicate_group_id, source_reliability, "
+                    "raw_payload_reference, snippet FROM news_items "
+                    "ORDER BY published_at DESC, source, url LIMIT 1000"
+                ).fetchall()
+                rows = [
+                    row
+                    for row in candidates
+                    if needle in str(row[2]).casefold()
+                    or needle in str(row[13] or "").casefold()
+                    or needle in str(row[0]).casefold()
+                ][:limit]
+            revision_counts = dict(
+                connection.execute(
+                    "SELECT article_id, COUNT(*) FROM news_revisions "
+                    "GROUP BY article_id"
+                ).fetchall()
+            )
+        return [
+            NewsHit(
+                source=row[0],
+                url=row[1],
+                title=sanitize_text(row[2]),
+                published_at=datetime.fromisoformat(row[3]),
+                received_at=datetime.fromisoformat(row[4]),
+                article_id=row[5],
+                canonical_url=row[6],
+                language=row[7] or "en",
+                region=row[8],
+                content_hash=row[9],
+                duplicate_group_id=row[10],
+                source_reliability=row[11] or "unverified",
+                revision_count=int(revision_counts.get(row[5], 1)),
+                snippet=sanitize_text(row[13]) if row[13] else None,
+                raw_payload_reference=row[12],
+                envelope=UntrustedEnvelope(row[0], row[11] or "unverified"),
+            )
+            for row in rows
+        ]
 
     def news(self, *, limit: int) -> list[NewsItem]:
         if not 1 <= limit <= 100:

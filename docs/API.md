@@ -1,6 +1,6 @@
 # Local REST API
 
-The service binds to `127.0.0.1:8765` only. The schema is at `/openapi.json`. Requests must carry an accepted loopback `Host` header, and state-changing requests (`POST`) must come from a matching local origin, which blocks cross-site requests from other browser tabs. There is no remote access mode. The API has no generic key export, seed export, arbitrary transfer, arbitrary signing, withdrawal or risk-limit mutation endpoint, and none may be added.
+The service binds to `127.0.0.1:8765` only. The schema is at `/openapi.json`. Requests must carry a `Host` of `localhost`, `127.0.0.1` or `[::1]` on the bound port (400 otherwise, which stops DNS rebinding; extra names via `create_app(extra_allowed_hosts=...)`). State-changing requests must have no `Origin` or a local http origin on the bound port, and `Sec-Fetch-Site` must be absent, `same-origin` or `none` (403 otherwise). Writes with a body need `application/json` (415) and at most 1 MiB (413). Every response, including rejections and the static UI, carries a Content-Security-Policy (`default-src 'self'`, `connect-src 'self'`, no inline script, `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`. The checks live in `loopback.py` and are shared with MCP HTTP. There is no remote access mode. The API has no generic key export, seed export, arbitrary transfer, arbitrary signing, withdrawal or risk-limit mutation endpoint, and none may be added.
 
 Money and prices are returned as decimal strings. Times are UTC. Endpoints that read stored data work with provider access disabled and return the original observation times.
 
@@ -19,9 +19,9 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | POST | `/api/v1/system/resume` | Alias of `/api/v1/risk/resume` (brief naming; local operator action) |
 | GET | `/api/v1/risk/policy` | Read-only risk policy summary |
 | GET | `/api/v1/system/chains` | Per-chain capability matrix derived from the signer report |
-| GET | `/api/v1/market/quotes` | Live BTC/USD book when public data is enabled, otherwise 503 |
-| GET | `/api/v1/market/quotes/history` | Stored quotes, `limit` up to 500 |
-| GET | `/api/v1/market/candles` | Stored candles, `interval`, `limit` |
+| GET | `/api/v1/market/quotes` | Live BTC/USD book when public data is enabled, otherwise 503. `market` (registry symbol, for example `ETH/USD`) selects an archived quote for other markets, flagged `provider_issue: archived_only`; unknown markets return 422 |
+| GET | `/api/v1/market/quotes/history` | Stored quotes, `limit` up to 500, optional `market` |
+| GET | `/api/v1/market/candles` | Stored candles, `interval`, `limit`, optional `market` |
 | GET | `/api/v1/market/candles.csv` | Same candles as CSV |
 | GET | `/api/v1/market/indicators` | Offline indicators over the latest contiguous candles |
 | POST | `/api/v1/backtests` | Run the SMA research simulation and store a report |
@@ -34,9 +34,11 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | GET | `/api/v1/paper/fills` | Simulated fills |
 | POST | `/api/v1/orders/paper` | Simulated BTC/USD order (needs `--paper-market-data`) |
 | GET | `/api/v1/wallets` | Stored read-only wallet snapshots |
-| GET | `/api/v1/market/assets` | Asset registry |
-| GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote |
-| GET | `/api/v1/news/search` | Search stored news titles and sources, `q` and `limit` |
+| GET | `/api/v1/market/assets` | Asset registry with status and quote assets |
+| GET | `/api/v1/market/markets` | Market registry: venue pair, precision, minimum size, `status` (`read_only`, `paper`, `live_allowed`) |
+| GET | `/api/v1/market/orderbook` | Top-of-book snapshot from the latest stored quote, optional `market` |
+| GET | `/api/v1/data/sources` | Per-source freshness (`FRESH`, `STALE`, `DEGRADED`, `MISSING`, `INVALID`), circuit breaker state, `retry_in_seconds` and whether background ingestion is on. Read from the audit database, so it works with ingestion off |
+| GET | `/api/v1/news/search` | Search stored news (FTS5 over title and snippet, plus source id), `q` and `limit`. Existing fields are kept; additive provenance fields (`article_id`, `canonical_url`, `language`, `content_hash`, `duplicate_group_id`, `source_reliability`, `revision_count`, `snippet`) and an `envelope` (`source`, `trust_tier`, `untrusted: true`) mark the text as untrusted data |
 | GET | `/api/v1/portfolio/positions` | Simulated positions |
 | GET | `/api/v1/wallets/{wallet_id}/balances` | Stored balance snapshots for one public address |
 | GET | `/api/v1/wallets/{wallet_id}/transactions` | Reports that no history is stored locally |
@@ -77,4 +79,4 @@ Errors use FastAPI's JSON `detail`. Typical codes: 403 foreign origin, 404 unkno
 
 ## Auth scopes
 
-The REST API relies on loopback binding and origin checks. Per-client scopes and tokens exist only for MCP, where tiers are enforced at tool execution (see [MCP](MCP.md)). Streamable HTTP and remote access are not supported.
+The REST API relies on loopback binding and origin checks. Per-client scopes and tokens exist only for MCP, where tiers are enforced at tool execution (see [MCP](MCP.md)). Remote access is not supported.

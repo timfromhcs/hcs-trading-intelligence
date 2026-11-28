@@ -19,14 +19,12 @@ from hashlib import sha256
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from hcs_trader.application import (
     ApplicationError,
@@ -39,24 +37,29 @@ from hcs_trader.application import (
 )
 from hcs_trader.application.service import (
     AssetInfo,
+    MarketInfo,
     OrderBookSnapshot,
     OrderPreview,
     Position,
     StrategyMetrics,
+    Unavailable,
     WalletBalanceView,
     WalletTransactions,
     spot_order_dict,
 )
 from hcs_trader.backtest import BacktestConfig, BacktestResult
 from hcs_trader.data import ecb, fred
-from hcs_trader.data.kraken import BTC_USD, SOURCE
+from hcs_trader.data.kraken import SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
+from hcs_trader.data.runtime import IngestionService
+from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality
-from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID
+from hcs_trader.domain.news import NewsHit, NewsItem
 from hcs_trader.domain.paper import (
     PaperBalance,
     PaperFill,
@@ -69,6 +72,7 @@ from hcs_trader.indicators import Indicators
 from hcs_trader.kraken_spot import KrakenAmbiguousExecutionError, KrakenOrderRejected
 from hcs_trader.local_research import ResearchHistory
 from hcs_trader.logging_config import correlation_id
+from hcs_trader.loopback import HostPolicy, fetch_site_allowed
 from hcs_trader.network_policy import NetworkPolicy, SystemMode
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
@@ -102,6 +106,20 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
+SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (
+        b"content-security-policy",
+        b"default-src 'self'; script-src 'self'; style-src 'self'; "
+        b"img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+        b"object-src 'none'; base-uri 'none'; form-action 'self'; "
+        b"frame-ancestors 'none'",
+    ),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-frame-options", b"DENY"),
+)
+
+
 def generate_api_token() -> str:
     """Random per-run token; the operator shows or stores it locally."""
     return secrets.token_urlsafe(32)
@@ -122,8 +140,10 @@ class _Hardening:
         max_body: int,
         rate_limit: int,
         window: float,
+        hosts: HostPolicy | None = None,
     ) -> None:
         self.app = app
+        self.hosts = hosts or HostPolicy()
         self.token = token
         self.max_body = max_body
         self.rate_limit = rate_limit
@@ -143,6 +163,7 @@ class _Hardening:
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
             (b"x-request-id", rid.encode()),
+            *SECURITY_HEADERS,
             *(extra or []),
         ]
         await send(
@@ -187,13 +208,14 @@ class _Hardening:
                     return
             except ValueError:
                 pass  # non-IP peer (in-process test transport)
+        if not self.hosts.host_allowed(headers.get("host")):
+            await self._reject(send, 400, "Invalid host header", rid)
+            return
         mutating = scope["method"] not in SAFE_METHODS
         if mutating:
             origin = headers.get("origin")
-            if headers.get("sec-fetch-site") == "cross-site" or (
-                origin is not None
-                and (urlsplit(origin).hostname or "")
-                not in {LOOPBACK_HOST, "localhost"}
+            if not fetch_site_allowed(headers.get("sec-fetch-site")) or (
+                origin is not None and not self.hosts.origin_allowed(origin)
             ):
                 await self._reject(send, 403, "Local origin required", rid)
                 return
@@ -242,9 +264,11 @@ class _Hardening:
 
         async def tagged_send(message: Any) -> None:
             if message["type"] == "http.response.start":
+                present = {k.lower() for k, _ in message["headers"]}
                 message["headers"] = [
                     *message["headers"],
                     (b"x-request-id", rid.encode()),
+                    *(h for h in SECURITY_HEADERS if h[0] not in present),
                 ]
             await send(message)
 
@@ -281,6 +305,7 @@ class Capabilities(BaseModel):
 
 
 class QuoteResponse(BaseModel):
+    market: str | None = None
     source: str
     base_asset: str
     quote_asset: str
@@ -291,6 +316,11 @@ class QuoteResponse(BaseModel):
     bid_updated_at: datetime | None = None
     ask_updated_at: datetime | None = None
     received_at: datetime | None = None
+
+
+class DataSourcesResponse(DataSourcesReport):
+    ingestion_enabled: bool
+    ingestion_mode: SystemMode | None = None
 
 
 class QuoteRecord(BaseModel):
@@ -407,9 +437,12 @@ def create_app(
     spot_execution: KrakenSpotExecution | None = None,
     api_token: str | None = None,
     network_policy: NetworkPolicy | None = None,
+    ingestion: IngestionService | None = None,
     max_body_bytes: int = MAX_BODY_BYTES,
     write_rate_limit: int = 60,
     rate_window_seconds: float = 60.0,
+    bound_port: int | None = None,
+    extra_allowed_hosts: tuple[str, ...] = (),
 ) -> FastAPI:
     token = api_token if api_token is not None else os.environ.get(API_TOKEN_ENV)
     if token is not None and len(token) < 16:
@@ -430,8 +463,13 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store.initialize()
         if quote_service is not None:
-            for quote in store.quote_history(BTC_USD, limit=1):
+            for quote in store.quote_history(DEFAULT_MARKET_ID, limit=1):
                 quote_service.restore(quote)
+        if quote_service is not None:
+            try:
+                quote_service.restore_state(store.load_ingest_state("kraken"))
+            except sqlite3.Error:
+                pass  # status persistence is best effort; quotes still refresh
         event = store.record_startup()
         # Only allowlisted fields from the local event enter operational logs.
         _logger.info(
@@ -454,7 +492,13 @@ def create_app(
             store.record_audit_event(
                 "spot.recovery.incomplete" if incomplete else "spot.recovery.completed"
             )
-        yield
+        if ingestion is not None:
+            ingestion.start()
+        try:
+            yield
+        finally:
+            if ingestion is not None:
+                await ingestion.stop()
 
     app = FastAPI(
         title="HCS Trading Intelligence",
@@ -462,9 +506,9 @@ def create_app(
         docs_url=None,
         redoc_url=None,
     )
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[LOOPBACK_HOST])
     app.add_middleware(
         _Hardening,
+        hosts=HostPolicy(bound_port, extra_allowed_hosts),
         token=token,
         max_body=max_body_bytes,
         rate_limit=write_rate_limit,
@@ -562,20 +606,63 @@ def create_app(
     def chain_capabilities() -> list[ChainCapability]:
         return service.chain_capabilities()
 
+    @app.get("/api/v1/data/sources")
+    def data_sources(response: Response) -> DataSourcesResponse:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            report = service.data_sources()
+        except Unavailable as error:
+            raise HTTPException(503, "Source status storage unavailable") from error
+        return DataSourcesResponse(
+            generated_at=report.generated_at,
+            sources=report.sources,
+            ingestion_enabled=ingestion is not None,
+            ingestion_mode=ingestion.network_policy.mode if ingestion else None,
+        )
+
     @app.get("/api/v1/market/quotes")
-    async def market_quote(response: Response) -> QuoteResponse:
+    async def market_quote(
+        response: Response,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> QuoteResponse:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            spec = service.resolve_market(market)
+        except ApplicationError as error:
+            raise _http_error(error) from error
         if quote_service is None:
             raise HTTPException(503, "Public market data is disabled")
-        response.headers["Cache-Control"] = "no-store"
+        if spec.market_id != quote_service.market:
+            # Only the configured market has a live refresh; others are archive reads.
+            try:
+                archived = service.latest_quote(spec.symbol)
+            except ApplicationError as error:
+                raise _http_error(error) from error
+            return QuoteResponse(
+                market=spec.symbol,
+                source=archived.source if archived else SOURCE,
+                base_asset=str(spec.base),
+                quote_asset=str(spec.quote),
+                quality=(
+                    service.quote_quality(archived) if archived else DataQuality.MISSING
+                ),
+                provider_issue="archived_only",
+                bid=archived.bid if archived else None,
+                ask=archived.ask if archived else None,
+                bid_updated_at=archived.bid_updated_at if archived else None,
+                ask_updated_at=archived.ask_updated_at if archived else None,
+                received_at=archived.received_at if archived else None,
+            )
         try:
             snapshot = await quote_service.snapshot()
         except sqlite3.Error as error:
             raise HTTPException(503, "Quote storage unavailable") from error
         quote = snapshot.quote
         return QuoteResponse(
+            market=spec.symbol,
             source=SOURCE,
-            base_asset=str(BTC_USD.base),
-            quote_asset=str(BTC_USD.quote),
+            base_asset=str(spec.base),
+            quote_asset=str(spec.quote),
             quality=snapshot.quality,
             provider_issue=snapshot.provider_issue,
             bid=quote.bid if quote else None,
@@ -588,11 +675,12 @@ def create_app(
     @app.get("/api/v1/market/quotes/history")
     def quote_history(
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        market: Annotated[str | None, Query(max_length=16)] = None,
     ) -> list[QuoteRecord]:
         try:
-            quotes = store.quote_history(BTC_USD, limit=limit)
-        except sqlite3.Error as error:
-            raise HTTPException(503, "Quote storage unavailable") from error
+            quotes = service.quote_history(limit, market)
+        except ApplicationError as error:
+            raise _http_error(error) from error
         return [
             QuoteRecord(
                 source=quote.source,
@@ -607,15 +695,19 @@ def create_app(
             for quote in quotes
         ]
 
-    def read_candles(interval: int, limit: int) -> list[Candle]:
+    def read_candles(
+        interval: int, limit: int, market: str | None = None
+    ) -> list[Candle]:
         try:
-            return service.candles(interval, limit)
+            return service.candles(interval, limit, market)
         except ApplicationError as error:
             raise _http_error(error) from error
 
     @app.get("/api/v1/market/candles")
     def candle_history(
-        interval: int = 60, limit: Annotated[int, Query(ge=1, le=1000)] = 720
+        interval: int = 60,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 720,
+        market: Annotated[str | None, Query(max_length=16)] = None,
     ) -> list[CandleRecord]:
         return [
             CandleRecord(
@@ -633,13 +725,16 @@ def create_app(
                 volume=candle.volume,
                 trade_count=candle.trade_count,
             )
-            for candle in read_candles(interval, limit)
+            for candle in read_candles(interval, limit, market)
         ]
 
     @app.get("/api/v1/market/indicators")
-    def indicators(interval: int = 60) -> Indicators:
+    def indicators(
+        interval: int = 60,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> Indicators:
         try:
-            return service.indicators(interval)
+            return service.indicators(interval, market)
         except ApplicationError as error:
             raise _http_error(error) from error
 
@@ -1030,11 +1125,18 @@ def create_app(
     def market_assets() -> list[AssetInfo]:
         return service.list_assets()
 
+    @app.get("/api/v1/market/markets")
+    def market_registry() -> list[MarketInfo]:
+        return service.list_markets()
+
     @app.get("/api/v1/market/orderbook")
-    def market_orderbook(response: Response) -> OrderBookSnapshot:
+    def market_orderbook(
+        response: Response,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> OrderBookSnapshot:
         response.headers["Cache-Control"] = "no-store"
         try:
-            return service.orderbook_snapshot()
+            return service.orderbook_snapshot(market)
         except ApplicationError as error:
             raise _http_error(error) from error
 
@@ -1042,7 +1144,7 @@ def create_app(
     def news_search(
         q: Annotated[str, Query(min_length=1, max_length=100)],
         limit: Annotated[int, Query(ge=1, le=100)] = 25,
-    ) -> list[NewsItem]:
+    ) -> list[NewsHit]:
         try:
             return service.search_news(q, limit)
         except ApplicationError as error:

@@ -43,12 +43,14 @@ from hcs_trader.application.service import (
     spot_order_dict,
 )
 from hcs_trader.backtest import BacktestConfig
+from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, Quote
-from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.news import NewsHit, NewsItem
 from hcs_trader.domain.paper import PaperBalance, PaperOrder, PaperSide
 from hcs_trader.indicators import Indicators
 from hcs_trader.local_research import ResearchHistory
+from hcs_trader.loopback import HostPolicy, fetch_site_allowed
 from hcs_trader.paper_execution import PaperExecution
 from hcs_trader.promotion import (
     ComparisonMetrics,
@@ -106,6 +108,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "strategy.list": _R,
     "risk.get_status": _R,
     "system.get_health": _R,
+    "data.get_source_status": _R,
     "quant.calculate_indicators": _R,
     "quant.compare_strategy_candidates": _R,
     # READ (earlier names; the renamed ones stay registered as aliases)
@@ -377,9 +380,12 @@ class ClientRegistry:
 class BearerTokenMiddleware:
     """ASGI guard: loopback peer plus a registered, unrevoked bearer token."""
 
-    def __init__(self, app: Any, registry: ClientRegistry) -> None:
+    def __init__(
+        self, app: Any, registry: ClientRegistry, hosts: HostPolicy | None = None
+    ) -> None:
         self.app = app
         self.registry = registry
+        self.hosts = hosts or HostPolicy()
 
     @staticmethod
     async def _reject(send: Any, status: int, detail: str) -> None:
@@ -403,6 +409,17 @@ class BearerTokenMiddleware:
         if peer is None or peer[0] not in LOOPBACK_PEERS:
             await self._reject(send, 403, "Loopback clients only")
             return
+        raw = {k.lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        # DNS-rebinding and browser cross-origin defence, before any token check.
+        if not self.hosts.host_allowed(raw.get(b"host")):
+            await self._reject(send, 403, "Host not allowed")
+            return
+        origin = raw.get(b"origin")
+        if not fetch_site_allowed(raw.get(b"sec-fetch-site")) or (
+            origin is not None and not self.hosts.origin_allowed(origin)
+        ):
+            await self._reject(send, 403, "Local origin required")
+            return
         header = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1")
         scheme, _, token = header.partition(" ")
         grant = (
@@ -418,21 +435,45 @@ class BearerTokenMiddleware:
             _ACTIVE_CLIENT.reset(reset)
 
 
-def create_http_app(server: MCPServer, registry: ClientRegistry) -> Any:
-    """Stateless Streamable HTTP app; each request carries its client identity."""
+def create_http_app(
+    server: MCPServer,
+    registry: ClientRegistry,
+    *,
+    port: int | None = None,
+    extra_hosts: tuple[str, ...] = (),
+) -> Any:
+    """Stateless Streamable HTTP app; each request carries its client identity.
+
+    Host and Origin are validated against the loopback allowlist (pinned to
+    `port` when given) before the bearer token is looked at.
+    """
     inner = server.streamable_http_app(stateless_http=True, json_response=True)
-    return BearerTokenMiddleware(inner, registry)
+    return BearerTokenMiddleware(inner, registry, HostPolicy(port, extra_hosts))
 
 
 def run_http(server: MCPServer, registry: ClientRegistry, port: int = 8766) -> None:
     """Serve on 127.0.0.1 only. There is no option to bind another address."""
     import uvicorn  # noqa: PLC0415
 
-    uvicorn.run(create_http_app(server, registry), host="127.0.0.1", port=port)
+    uvicorn.run(
+        create_http_app(server, registry, port=port),
+        host="127.0.0.1",
+        port=port,
+        access_log=False,
+        proxy_headers=False,
+    )
 
 
 def _percent(basis_points: Decimal) -> str:
     return str((basis_points / Decimal(100)).quantize(Decimal("0.01")))
+
+
+_MarketParam = Annotated[
+    str | None,
+    Field(
+        max_length=16, description="Registry symbol such as ETH/USD; default BTC/USD"
+    ),
+]
 
 
 def _local_read[T](read: Callable[[], T]) -> T:
@@ -497,8 +538,10 @@ def create_mcp_server(
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
         return guard.tool(server, name, tool_tier(name), annotations=annotations)
 
-    def read_candles(interval: int, limit: int) -> list[Candle]:
-        return _local_read(lambda: service.candles(interval, limit))
+    def read_candles(
+        interval: int, limit: int, market: str | None = None
+    ) -> list[Candle]:
+        return _local_read(lambda: service.candles(interval, limit, market))
 
     def need_writer() -> ApplicationService:
         if writer is None:
@@ -516,21 +559,26 @@ def create_mcp_server(
     )
 
     @read_tool("market.get_quotes")
-    def quotes(limit: Annotated[int, Field(ge=1, le=100)] = 25) -> list[Quote]:
-        """Read archived BTC/USD books and original observation times."""
-        return _local_read(lambda: service.quote_history(limit))
+    def quotes(
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+        market: _MarketParam = None,
+    ) -> list[Quote]:
+        """Read archived books and original observation times (default BTC/USD)."""
+        return _local_read(lambda: service.quote_history(limit, market))
 
     @read_tool("market.get_candles")
     def candles(
-        interval: int = 60, limit: Annotated[int, Field(ge=1, le=1000)] = 200
+        interval: int = 60,
+        limit: Annotated[int, Field(ge=1, le=1000)] = 200,
+        market: _MarketParam = None,
     ) -> list[Candle]:
-        """Read archived Kraken BTC/USD candles in chronological order."""
-        return read_candles(interval, limit)
+        """Read archived Kraken candles in chronological order (default BTC/USD)."""
+        return read_candles(interval, limit, market)
 
     @read_tool("quant.calculate_indicators", "quant.get_indicators")
-    def indicators(interval: int = 60) -> Indicators:
+    def indicators(interval: int = 60, market: _MarketParam = None) -> Indicators:
         """Calculate indicators from contiguous stored candles."""
-        return _local_read(lambda: service.indicators(interval))
+        return _local_read(lambda: service.indicators(interval, market))
 
     @read_tool("research.get_runs")
     def research_runs(
@@ -722,24 +770,24 @@ def create_mcp_server(
         return _local_read(_read_approval)
 
     @read_tool("market.get_quote")
-    def latest_quote_tool() -> Quote:
-        """Read the most recent archived BTC/USD best bid and ask."""
-        quote = _local_read(service.latest_quote)
+    def latest_quote_tool(market: _MarketParam = None) -> Quote:
+        """Read the most recent archived best bid and ask (default BTC/USD)."""
+        quote = _local_read(lambda: service.latest_quote(market))
         if quote is None:
-            raise ToolError("No BTC/USD quote is archived")
+            raise ToolError("No quote is archived for this market")
         return quote
 
     @read_tool("market.get_orderbook_snapshot")
-    def orderbook_tool() -> OrderBookSnapshot:
+    def orderbook_tool(market: _MarketParam = None) -> OrderBookSnapshot:
         """Read the top of book from the latest archived quote, with freshness."""
-        return _local_read(service.orderbook_snapshot)
+        return _local_read(lambda: service.orderbook_snapshot(market))
 
     @read_tool("news.search")
     def news_search_tool(
         query: Annotated[str, Field(min_length=1, max_length=100)],
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
-    ) -> list[NewsItem]:
-        """Search saved news titles and sources. Titles are untrusted text."""
+    ) -> list[NewsHit]:
+        """Search saved news (FTS5) with provenance. All text is untrusted data."""
         return _local_read(lambda: service.search_news(query, limit))
 
     @read_tool("news.get_event_timeline")
@@ -774,6 +822,11 @@ def create_mcp_server(
     def wallet_addresses_tool() -> list[str]:
         """Read public addresses that have stored balance snapshots."""
         return _local_read(service.wallet_addresses)
+
+    @read_tool("data.get_source_status")
+    def data_source_status_tool() -> DataSourcesReport:
+        """Read per-source freshness, circuit breaker state and retry timing."""
+        return _local_read(service.data_sources)
 
     @read_tool("system.get_health")
     def health_tool() -> dict[str, str]:

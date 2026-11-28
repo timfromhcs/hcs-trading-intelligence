@@ -8,18 +8,21 @@ import httpx2
 from pydantic import BaseModel, Field, ValidationError
 
 from hcs_trader.data.provider import InvalidQuote, QuoteRateLimited, QuoteUnavailable
-from hcs_trader.domain.assets import AssetId, MarketId
+from hcs_trader.domain.assets import MarketId
 from hcs_trader.domain.market_data import Candle, Quote
+from hcs_trader.domain.markets import (
+    DEFAULT_MARKET_ID,
+    MARKET_REGISTRY,
+    MarketSpec,
+    UnknownMarket,
+)
 
 SOURCE = "kraken-spot"
 DEPTH_URL = "https://api.kraken.com/0/public/Depth"
 OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 CANDLE_INTERVALS = frozenset({1, 5, 15, 30, 60, 240, 1440})
-BTC_USD = MarketId(
-    "kraken",
-    AssetId.parse("bitcoin:mainnet/native:BTC"),
-    AssetId.parse("fiat:iso4217/currency:USD"),
-)
+# Kept for callers and tests; the registry owns the definition.
+BTC_USD = DEFAULT_MARKET_ID
 _MAX_RESPONSE_BYTES = 16_384
 
 
@@ -51,6 +54,31 @@ class _Ohlc(BaseModel):
     result: dict[str, list[_OhlcRow] | int] | None = None
 
 
+def _spec(market: MarketId) -> MarketSpec:
+    try:
+        spec = MARKET_REGISTRY.by_market_id(market)
+    except UnknownMarket:
+        raise ValueError("Kraken market is not allowlisted") from None
+    if spec.venue != "kraken":
+        raise ValueError("Kraken market is not allowlisted")
+    return spec
+
+
+def _resolve_key(keys: set[str], spec: MarketSpec, what: str) -> str:
+    """Return the single pair key in a response, which must be a known name.
+
+    Kraken names the result key differently from the request pair (XBTUSD is
+    answered as XXBTZUSD), so the key is read from the response and checked
+    against the names registered for the requested market.
+    """
+    if len(keys) != 1:
+        raise InvalidQuote(f"Kraken did not identify the requested {what}")
+    key = next(iter(keys))
+    if key not in spec.response_keys:
+        raise InvalidQuote(f"Kraken did not identify the requested {what}")
+    return key
+
+
 class KrakenQuoteProvider:
     def __init__(self, client: httpx2.AsyncClient) -> None:
         self._client = client
@@ -75,22 +103,21 @@ class KrakenQuoteProvider:
         return status.status == "online"
 
     async def get_quote(self, market: MarketId) -> Quote:
-        if market != BTC_USD:
-            raise ValueError("Kraken market is not allowlisted")
+        spec = _spec(market)
 
         try:
             payload = await self._read(
-                DEPTH_URL, {"pair": "XBTUSD", "count": "1"}, _MAX_RESPONSE_BYTES
+                DEPTH_URL, {"pair": spec.venue_pair, "count": "1"}, _MAX_RESPONSE_BYTES
             )
             received_at = datetime.now(UTC)
             depth = _Depth.model_validate_json(payload, strict=True)
         except ValidationError as error:
             raise InvalidQuote("Invalid Kraken response envelope") from error
         _check_errors(depth.error)
-        if depth.result is None or set(depth.result) != {"XXBTZUSD"}:
+        if depth.result is None:
             raise InvalidQuote("Kraken did not identify the requested market")
 
-        book = depth.result["XXBTZUSD"]
+        book = depth.result[_resolve_key(set(depth.result), spec, "market")]
         try:
             bid, bid_at = _level(book.bids[0])
             ask, ask_at = _level(book.asks[0])
@@ -101,18 +128,22 @@ class KrakenQuoteProvider:
     async def get_candles(
         self, market: MarketId, interval_minutes: int
     ) -> list[Candle]:
-        if market != BTC_USD or interval_minutes not in CANDLE_INTERVALS:
+        spec = _spec(market)
+        if interval_minutes not in CANDLE_INTERVALS:
             raise ValueError("Kraken market or candle interval is not allowlisted")
         payload = await self._read(
-            OHLC_URL, {"pair": "XBTUSD", "interval": str(interval_minutes)}, 262_144
+            OHLC_URL,
+            {"pair": spec.venue_pair, "interval": str(interval_minutes)},
+            262_144,
         )
         received_at = datetime.now(UTC)
         try:
             ohlc = _Ohlc.model_validate_json(payload, strict=True)
             _check_errors(ohlc.error)
-            if ohlc.result is None or set(ohlc.result) != {"XXBTZUSD", "last"}:
+            if ohlc.result is None or "last" not in ohlc.result:
                 raise InvalidQuote("Kraken did not identify the requested OHLC market")
-            rows = ohlc.result["XXBTZUSD"]
+            pair_key = _resolve_key(set(ohlc.result) - {"last"}, spec, "OHLC market")
+            rows = ohlc.result[pair_key]
             if not isinstance(ohlc.result["last"], int) or not isinstance(rows, list):
                 raise InvalidQuote("Invalid Kraken OHLC rows or cursor")
             # The live endpoint can return 720 committed rows plus the open interval.

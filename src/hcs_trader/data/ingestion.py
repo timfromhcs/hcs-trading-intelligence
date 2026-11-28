@@ -1,22 +1,32 @@
-"""Bounded, cancellable per-source ingestion with persisted last-success state."""
+"""Bounded, cancellable per-source ingestion with persisted state.
+
+State (last success, failures, ``Retry-After`` deadline, breaker snapshot) lives in
+the audit database so a restart neither forgets a rate limit nor hammers a provider.
+"""
 
 import asyncio
-import sqlite3
+import logging
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 
-from hcs_trader.data.feed_status import FeedState, assess_feed
+from hcs_trader.data.feed_status import IngestRecord
+from hcs_trader.data.provider import SourceRateLimited
 from hcs_trader.data.resilience import (
     CircuitBreaker,
     CircuitOpen,
     RetryBudgetExhausted,
     call_with_retry,
 )
+from hcs_trader.data.source_status import SourceStatus, build_source_status
 from hcs_trader.data.sources import SourceEntry, SourceRegistry
-from hcs_trader.domain.market_data import DataQuality
+from hcs_trader.network_policy import NetworkPolicy, SystemMode
+
+_logger = logging.getLogger(__name__)
+_RATE_LIMIT_FLOOR = 60.0
+_BACKOFF_CAP = 3600.0
 
 
 def _utc_now() -> datetime:
@@ -24,73 +34,38 @@ def _utc_now() -> datetime:
 
 
 class IngestStateStore:
-    """Own sqlite file/table, created idempotently; ':memory:' for tests."""
+    """In-memory state store (tests, ephemeral runs).
 
-    def __init__(self, path: str = ":memory:") -> None:
-        self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS ingest_state ("
-            "source_id TEXT PRIMARY KEY, last_success TEXT, last_error TEXT, "
-            "newest_item_at TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0, "
-            "cursor TEXT)"
-        )
-        self._db.commit()
+    The application persists the same records in the audit database through
+    ``AuditStore`` (migration 20); both expose ``load`` and ``save``.
+    """
 
-    def load(self, source_id: str) -> FeedState:
-        row = self._db.execute(
-            "SELECT last_success, last_error, newest_item_at, consecutive_failures "
-            "FROM ingest_state WHERE source_id = ?",
-            (source_id,),
-        ).fetchone()
-        if row is None:
-            return FeedState(source_id, None, None)
-        parse = datetime.fromisoformat
-        return FeedState(
-            source_id,
-            parse(row[0]) if row[0] else None,
-            row[1],
-            parse(row[2]) if row[2] else None,
-            row[3],
-        )
+    def __init__(self) -> None:
+        self._records: dict[str, IngestRecord] = {}
 
-    def save(self, state: FeedState) -> None:
-        self._db.execute(
-            "INSERT INTO ingest_state(source_id, last_success, last_error, "
-            "newest_item_at, consecutive_failures) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(source_id) DO UPDATE SET last_success=excluded.last_success, "
-            "last_error=excluded.last_error, newest_item_at=excluded.newest_item_at, "
-            "consecutive_failures=excluded.consecutive_failures",
-            (
-                state.source_id,
-                state.last_success.isoformat() if state.last_success else None,
-                state.last_error,
-                state.newest_item_at.isoformat() if state.newest_item_at else None,
-                state.consecutive_failures,
-            ),
-        )
-        self._db.commit()
+    def load(self, source_id: str) -> IngestRecord:
+        return self._records.get(source_id, IngestRecord(source_id))
+
+    def save(self, state: IngestRecord) -> None:
+        self._records[state.source_id] = state
 
     def close(self) -> None:
-        self._db.close()
+        self._records.clear()
+
+
+class IngestStateBackend(Protocol):
+    def load(self, source_id: str) -> IngestRecord: ...
+
+    def save(self, state: IngestRecord) -> None: ...
 
 
 @dataclass(slots=True)
 class SourceJob:
     entry: SourceEntry
     fetch: Callable[[], Awaitable[Sequence[Any]]]
-    sink: Callable[[Sequence[Any]], None]
+    sink: Callable[[Sequence[Any]], object]
     newest_at: Callable[[Sequence[Any]], datetime | None] = lambda items: None
     breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
-
-
-@dataclass(frozen=True, slots=True)
-class SourceStatus:
-    source_id: str
-    quality: DataQuality
-    last_success: datetime | None
-    last_error: str | None
-    consecutive_failures: int
-    enabled: bool
 
 
 class IngestionScheduler:
@@ -98,12 +73,13 @@ class IngestionScheduler:
         self,
         registry: SourceRegistry,
         jobs: Sequence[SourceJob],
-        store: IngestStateStore,
+        store: IngestStateBackend,
         *,
         utc_now: Callable[[], datetime] = _utc_now,
         clock: Callable[[], float] = monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         max_batch: int = 500,
+        network_policy: NetworkPolicy | None = None,
     ) -> None:
         self._registry = registry
         self._jobs = {j.entry.source_id: j for j in jobs}
@@ -112,46 +88,107 @@ class IngestionScheduler:
         self._clock = clock
         self._sleep = sleep
         self._max_batch = max_batch
+        self._policy = network_policy
         self._next_due: dict[str, float] = {}
+
+    @property
+    def network_allowed(self) -> bool:
+        return self._policy is None or self._policy.mode is not SystemMode.OFFLINE
+
+    def restore(self) -> None:
+        """Re-arm breakers and rate-limit deadlines from persisted state."""
+        now = self._now()
+        for source_id, job in self._jobs.items():
+            record = self._store.load(source_id)
+            if record.breaker_state == "OPEN" and record.breaker_open_until:
+                job.breaker.force_open(
+                    (record.breaker_open_until - now).total_seconds()
+                )
+            if record.retry_after_until and record.retry_after_until > now:
+                wait = (record.retry_after_until - now).total_seconds()
+                self._next_due[source_id] = self._clock() + wait
+
+    def _snapshot(self, job: SourceJob, record: IngestRecord) -> IngestRecord:
+        wait = job.breaker.retry_in
+        return replace(
+            record,
+            breaker_state=job.breaker.state.value,
+            breaker_open_until=(
+                self._now() + timedelta(seconds=wait) if wait > 0 else None
+            ),
+        )
 
     async def run_once(self, source_id: str) -> SourceStatus:
         job = self._jobs[source_id]
         entry = self._registry.get(source_id)
-        state = self._store.load(source_id)
-        if not entry.enabled:
+        if not entry.enabled or not self.network_allowed:
             return self.status(source_id)
+        record = self._store.load(source_id)
+        now = self._now()
+        if record.retry_after_until is not None and record.retry_after_until > now:
+            # A persisted Retry-After / 429 deadline is still in force.
+            wait = (record.retry_after_until - now).total_seconds()
+            self._next_due[source_id] = self._clock() + wait
+            return self.status(source_id)
+        retry_after_until: datetime | None = None
+        items: Sequence[Any] = ()
+        error_name: str | None = None
         try:
             items = await call_with_retry(
                 job.fetch,
                 policy=entry.retry,
                 breaker=job.breaker,
+                non_retryable=(SourceRateLimited,),
                 sleep=self._sleep,
             )
             if len(items) > self._max_batch:
                 raise ValueError("Batch exceeds the configured work bound")
-            job.sink(items)
-        except (CircuitOpen, RetryBudgetExhausted, ValueError, OSError) as error:
-            state = FeedState(
-                source_id,
-                state.last_success,
-                type(error).__name__,
-                state.newest_item_at,
-                state.consecutive_failures + 1,
+            await asyncio.to_thread(job.sink, items)
+        except SourceRateLimited as error:
+            error_name = type(error).__name__
+            pause = error.retry_after if error.retry_after else _RATE_LIMIT_FLOOR
+            retry_after_until = self._now() + timedelta(seconds=pause)
+        except (CircuitOpen, RetryBudgetExhausted) as error:
+            error_name = type(error).__name__
+        except Exception as error:  # noqa: BLE001 - sink faults must not kill the loop
+            error_name = type(error).__name__
+            _logger.warning("ingestion sink or fetch failed: %s", error_name)
+        if error_name is None:
+            record = replace(
+                record,
+                last_success=self._now(),
+                last_error=None,
+                newest_item_at=job.newest_at(items) or record.newest_item_at,
+                consecutive_failures=0,
+                retry_after_until=None,
             )
         else:
-            state = FeedState(
-                source_id,
-                self._now(),
-                None,
-                job.newest_at(items) or state.newest_item_at,
-                0,
+            record = replace(
+                record,
+                last_error=error_name,
+                consecutive_failures=record.consecutive_failures + 1,
+                retry_after_until=retry_after_until,
             )
-        self._store.save(state)
-        self._next_due[source_id] = self._clock() + entry.cadence_seconds
-        return self.status(source_id)
+        delay = float(entry.cadence_seconds)
+        if error_name is not None:
+            delay = min(
+                delay * 2 ** min(record.consecutive_failures, 6),
+                max(_BACKOFF_CAP, delay),
+            )
+        if retry_after_until is not None:
+            delay = max(delay, (retry_after_until - self._now()).total_seconds())
+        self._next_due[source_id] = self._clock() + delay
+        record = self._snapshot(job, record)
+        try:
+            self._store.save(record)
+        except Exception as error:  # noqa: BLE001 - persistence failure is non-fatal
+            _logger.warning("ingestion state not persisted: %s", type(error).__name__)
+        return build_source_status(entry, record, self._now())
 
     async def run_due(self) -> list[SourceStatus]:
-        out = []
+        out: list[SourceStatus] = []
+        if not self.network_allowed:
+            return out
         for entry in self._registry.enabled():
             if entry.source_id in self._jobs and (
                 self._clock() >= self._next_due.get(entry.source_id, float("-inf"))
@@ -160,29 +197,31 @@ class IngestionScheduler:
         return out
 
     async def run_forever(self, stop: asyncio.Event, tick: float = 1.0) -> None:
+        failures = 0
         while not stop.is_set():
-            await self.run_due()
+            pause = tick
             try:
-                await asyncio.wait_for(stop.wait(), timeout=tick)
+                await self.run_due()
+                failures = 0
+            except Exception as error:  # noqa: BLE001 - the loop itself must survive
+                failures += 1
+                pause = min(tick * 2**failures, 60.0)
+                _logger.warning("ingestion cycle failed: %s", type(error).__name__)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=pause)
             except TimeoutError:
                 pass
 
     def status(self, source_id: str) -> SourceStatus:
         entry = self._registry.get(source_id)
-        state = self._store.load(source_id)
-        from datetime import timedelta
-
-        quality = assess_feed(
-            state, self._now(), stale_after=timedelta(seconds=entry.stale_after_seconds)
-        )
-        return SourceStatus(
-            source_id,
-            quality,
-            state.last_success,
-            state.last_error,
-            state.consecutive_failures,
-            entry.enabled,
-        )
+        try:
+            record = self._store.load(source_id)
+        except Exception:  # noqa: BLE001 - status must stay readable
+            record = IngestRecord(source_id)
+        job = self._jobs.get(source_id)
+        if job is not None:
+            record = self._snapshot(job, record)
+        return build_source_status(entry, record, self._now())
 
     def all_status(self) -> list[SourceStatus]:
         return [self.status(e.source_id) for e in self._registry.all()]

@@ -74,3 +74,22 @@ def test_load_skill_file_fails_on_missing_section(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="missing mandatory sections"):
         load_skill_file(bad_skill)
+
+
+def test_parse_frontmatter_nested_metadata_cannot_shadow_top_level() -> None:
+    text = (
+        "---\n"
+        "metadata:\n"
+        "  name: evil\n"
+        "  description: evil description\n"
+        "  version: 1.2.3\n"
+        "name: real\n"
+        "description: real description\n"
+        "---\nbody\n"
+    )
+    fields, body = parse_frontmatter(text)
+    assert fields["name"] == "real"
+    assert fields["description"] == "real description"
+    assert fields["version"] == "1.2.3"
+    assert "metadata" not in fields
+    assert body == "body\n"

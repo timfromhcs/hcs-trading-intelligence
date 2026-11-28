@@ -23,7 +23,24 @@ DEFAULT_GATES: tuple[tuple[str, list[str]], ...] = (
     ("ruff-check", ["uv", "run", "--frozen", "ruff", "check", "."]),
     ("ruff-format", ["uv", "run", "--frozen", "ruff", "format", "--check", "."]),
     ("mypy", ["uv", "run", "--frozen", "mypy"]),
-    ("pytest", ["uv", "run", "--frozen", "pytest", "-q", "-p", "no:cacheprovider"]),
+    (
+        "pytest",
+        [
+            "uv",
+            "run",
+            "--frozen",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--cov-report=term",
+            "--cov-report=xml:coverage.xml",
+        ],
+    ),
+    (
+        "coverage-floors",
+        ["uv", "run", "--frozen", "python", "scripts/check_coverage_floors.py"],
+    ),
     ("secret-scan", ["internal:secret-scan"]),
 )
 

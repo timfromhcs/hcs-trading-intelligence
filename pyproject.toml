@@ -67,6 +67,17 @@ files = ["src", "tests", "scripts"]
 testpaths = ["tests"]
 addopts = "--cov=hcs_trader --cov-fail-under=80"
 markers = [
+    "allow_network: opt out of the default block on non-loopback sockets (tests/conftest.py)",
     "rehearsal: live testnet rehearsal; needs testnet API keys in env, skipped otherwise, never run in CI",
     "regtest: needs a real regtest node binary via HCS_BITCOIND/HCS_LITECOIND/HCS_DIGIBYTED",
 ]
+
+[tool.mutmut]
+# Weekly workflow only (.github/workflows/weekly.yml); not part of the PR gates.
+paths_to_mutate = [
+    "src/hcs_trader/risk.py",
+    "src/hcs_trader/signing.py",
+    "src/hcs_trader/domain/signing.py",
+]
+tests_dir = ["tests/"]
+pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider"]

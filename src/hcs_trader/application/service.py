@@ -21,10 +21,19 @@ from hcs_trader.application.capabilities import (
 )
 from hcs_trader.backtest import BacktestConfig, BacktestResult, run_backtest
 from hcs_trader.data import ecb, fred
-from hcs_trader.data.kraken import BTC_USD, CANDLE_INTERVALS, SOURCE
+from hcs_trader.data.feed_status import IngestRecord
+from hcs_trader.data.kraken import CANDLE_INTERVALS, SOURCE
+from hcs_trader.data.source_status import DataSourcesReport, build_source_status
+from hcs_trader.data.sources import DEFAULT_REGISTRY
 from hcs_trader.domain.macro import MacroObservation
 from hcs_trader.domain.market_data import Candle, DataQuality, Quote
-from hcs_trader.domain.news import NewsItem
+from hcs_trader.domain.markets import (
+    DEFAULT_MARKET_ID,
+    MARKET_REGISTRY,
+    MarketSpec,
+    UnknownMarket,
+)
+from hcs_trader.domain.news import NewsHit, NewsItem
 from hcs_trader.domain.paper import (
     PaperBalance,
     PaperConflict,
@@ -85,6 +94,26 @@ class AssetInfo(BaseModel):
     symbol: str
     kind: str
     role: str
+    # Registry fields are additive; fiat reporting currencies carry no registry entry.
+    status: str | None = None
+    quote_assets: list[str] = []
+    note: str | None = None
+
+
+class MarketInfo(BaseModel):
+    symbol: str
+    venue: str
+    base_asset: str
+    quote_asset: str
+    venue_pair: str
+    price_decimals: int
+    quantity_decimals: int
+    min_quantity: Decimal
+    min_notional: Decimal
+    status: str
+    paper_allowed: bool
+    live_allowed: bool
+    note: str
 
 
 class OrderBookLevel(BaseModel):
@@ -270,12 +299,22 @@ class ApplicationService:
     # --- market -----------------------------------------------------------
 
     def list_assets(self) -> list[AssetInfo]:
+        registered = {spec.symbol: spec for spec in MARKET_REGISTRY.assets()}
         assets = [
             AssetInfo(
                 asset_id=f"{row.signing_namespace}:{row.symbol}",
                 symbol=row.symbol,
                 kind="native",
                 role="traded-or-watched",
+                status=(
+                    registered[row.symbol].status.value
+                    if row.symbol in registered
+                    else None
+                ),
+                quote_assets=list(MARKET_REGISTRY.quote_symbols(row.symbol)),
+                note=registered[row.symbol].note or None
+                if row.symbol in registered
+                else None,
             )
             for row in chain_capability_matrix()
         ]
@@ -289,22 +328,57 @@ class ApplicationService:
         )
         return assets
 
-    def latest_quote(self) -> Quote | None:
+    def list_markets(self) -> list[MarketInfo]:
+        return [
+            MarketInfo(
+                symbol=spec.symbol,
+                venue=spec.venue,
+                base_asset=str(spec.base),
+                quote_asset=str(spec.quote),
+                venue_pair=spec.venue_pair,
+                price_decimals=spec.price_decimals,
+                quantity_decimals=spec.quantity_decimals,
+                min_quantity=spec.min_quantity,
+                min_notional=spec.min_notional,
+                status=spec.status.value,
+                paper_allowed=spec.allows_paper,
+                live_allowed=spec.allows_live,
+                note=spec.note,
+            )
+            for spec in MARKET_REGISTRY.markets()
+        ]
+
+    @staticmethod
+    def resolve_market(market: str | None) -> MarketSpec:
         try:
-            quotes = self.store.quote_history(BTC_USD, limit=1)
+            return MARKET_REGISTRY.resolve(market)
+        except UnknownMarket:
+            raise InvalidRequest("Unknown market") from None
+
+    @staticmethod
+    def quote_quality(quote: Quote) -> DataQuality:
+        return quote.quality_at(
+            datetime.now(UTC), max_age=_MAX_QUOTE_AGE, max_clock_skew=_MAX_CLOCK_SKEW
+        )
+
+    def latest_quote(self, market: str | None = None) -> Quote | None:
+        spec = self.resolve_market(market)
+        try:
+            quotes = self.store.quote_history(spec.market_id, limit=1)
         except _LOCAL_ERRORS:
             raise Unavailable("Quote storage unavailable") from None
         return quotes[0] if quotes else None
 
-    def orderbook_snapshot(self) -> OrderBookSnapshot:
-        quote = self.latest_quote()
+    def orderbook_snapshot(self, market: str | None = None) -> OrderBookSnapshot:
+        spec = self.resolve_market(market)
+        quote = self.latest_quote(spec.symbol)
         note = (
             "Top of book only: the archived feed stores the best bid and ask, "
             "not deeper levels."
         )
         if quote is None:
             return OrderBookSnapshot(
-                market="BTC/USD",
+                market=spec.symbol,
                 source=SOURCE,
                 quality=DataQuality.MISSING,
                 depth_levels=0,
@@ -318,7 +392,7 @@ class ApplicationService:
             datetime.now(UTC), max_age=_MAX_QUOTE_AGE, max_clock_skew=_MAX_CLOCK_SKEW
         )
         return OrderBookSnapshot(
-            market="BTC/USD",
+            market=spec.symbol,
             source=quote.source,
             quality=quality,
             depth_levels=1,
@@ -329,26 +403,53 @@ class ApplicationService:
             note=note,
         )
 
-    def quote_history(self, limit: int) -> list[Quote]:
+    def quote_history(self, limit: int, market: str | None = None) -> list[Quote]:
+        spec = self.resolve_market(market)
         try:
-            return self.store.quote_history(BTC_USD, limit=limit)
+            return self.store.quote_history(spec.market_id, limit=limit)
         except _LOCAL_ERRORS:
             raise Unavailable("Quote storage unavailable") from None
 
-    def candles(self, interval: int, limit: int) -> list[Candle]:
+    def candles(
+        self, interval: int, limit: int, market: str | None = None
+    ) -> list[Candle]:
         if interval not in CANDLE_INTERVALS:
             raise InvalidRequest("Unsupported candle interval")
+        spec = self.resolve_market(market)
         try:
-            return self.store.candle_history(BTC_USD, SOURCE, interval, limit=limit)
+            return self.store.candle_history(
+                spec.market_id, SOURCE, interval, limit=limit
+            )
         except sqlite3.Error:
             raise Unavailable("Candle storage unavailable") from None
 
-    def indicators(self, interval: int = 60) -> Indicators:
-        history = self.candles(interval, 720)
+    def indicators(self, interval: int = 60, market: str | None = None) -> Indicators:
+        history = self.candles(interval, 720, market)
         try:
             return calculate_indicators(history)
         except ValueError:
             raise Unavailable("Local data unavailable") from None
+
+    # --- data sources -----------------------------------------------------
+
+    def data_sources(self) -> DataSourcesReport:
+        """Freshness, breaker state and retry timing per registered source."""
+        try:
+            records = {r.source_id: r for r in self.store.list_ingest_state()}
+        except sqlite3.Error:
+            raise Unavailable("Source status storage unavailable") from None
+        now = datetime.now(UTC)
+        return DataSourcesReport(
+            generated_at=now,
+            sources=[
+                build_source_status(
+                    entry,
+                    records.get(entry.source_id, IngestRecord(entry.source_id)),
+                    now,
+                )
+                for entry in DEFAULT_REGISTRY.all()
+            ],
+        )
 
     # --- news / macro -----------------------------------------------------
 
@@ -358,16 +459,14 @@ class ApplicationService:
         except sqlite3.Error:
             raise Unavailable("News storage unavailable") from None
 
-    def search_news(self, query: str, limit: int) -> list[NewsItem]:
-        needle = query.strip().casefold()
+    def search_news(self, query: str, limit: int) -> list[NewsHit]:
+        needle = query.strip()
         if not needle or len(needle) > 100:
             raise InvalidRequest("Search text must be 1 to 100 characters")
-        hits = [
-            item
-            for item in self.news(100)
-            if needle in item.title.casefold() or needle in item.source.casefold()
-        ]
-        return hits[:limit]
+        try:
+            return self.store.search_news(needle, limit=limit)
+        except sqlite3.Error:
+            raise Unavailable("News storage unavailable") from None
 
     def news_timeline(self, limit: int) -> list[NewsItem]:
         return sorted(self.news(limit), key=lambda item: item.published_at)
@@ -639,7 +738,7 @@ class ApplicationService:
         quality: DataQuality | None = None
         if quote is None:
             reasons.append("No BTC/USD quote is available")
-        elif quote.market != BTC_USD:
+        elif quote.market != DEFAULT_MARKET_ID:
             reasons.append("Paper execution supports BTC/USD only")
         else:
             quality = quote.quality_at(

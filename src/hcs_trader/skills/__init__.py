@@ -34,6 +34,7 @@ class SkillMetadata:
     required_tools: list[str]
     content: str
     path: Path
+    description: str = ""
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -42,14 +43,19 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
         return {}, text
     raw_header = match.group(1)
     body = text[match.end() :]
-    fields: dict[str, str] = {}
-    for line in raw_header.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    top: dict[str, str] = {}
+    nested: dict[str, str] = {}
+    for raw_line in raw_header.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
             continue
-        if ":" in line:
-            key, val = line.split(":", 1)
-            fields[key.strip().lower()] = val.strip().strip("\"'")
+        key, val = line.split(":", 1)
+        target = nested if raw_line[:1] in {" ", "	"} else top
+        target[key.strip().lower()] = val.strip().strip("\"'")
+    # One level of nesting (the Agent Skills `metadata:` map) is flattened, but
+    # a nested key can never shadow a top-level key such as `name`.
+    fields = {**nested, **top}
+    fields.pop("metadata", None)
     return fields, body
 
 
@@ -74,7 +80,8 @@ def load_skill_file(skill_path: Path) -> SkillMetadata:
         )
     name = frontmatter.get("name", skill_path.parent.name)
     version = frontmatter.get("version", "1.0.0")
-    purpose = frontmatter.get("purpose", "")
+    description = frontmatter.get("description", "")
+    purpose = frontmatter.get("purpose", description)
     tier = frontmatter.get("capability_tier", "READ")
     raw_tools = frontmatter.get("required_tools", "")
     tools = [t.strip() for t in raw_tools.split(",") if t.strip()] if raw_tools else []
@@ -86,6 +93,7 @@ def load_skill_file(skill_path: Path) -> SkillMetadata:
         required_tools=tools,
         content=content,
         path=skill_path,
+        description=description,
     )
 
 

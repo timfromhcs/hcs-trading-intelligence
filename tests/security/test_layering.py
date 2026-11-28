@@ -63,10 +63,15 @@ def imported_modules(source: str, module: str = "hcs_trader.x") -> set[str]:
     return found
 
 
-def violations(source: str, module: str = "hcs_trader.x") -> list[str]:
+def violations(
+    source: str, module: str = "hcs_trader.x", allow: frozenset[str] = frozenset()
+) -> list[str]:
+    """Forbidden imports in ``source``; ``allow`` lists exact-prefix exceptions."""
     bad = []
     for name in sorted(imported_modules(source, module)):
         root = name.split(".")[0]
+        if any(name == ok or name.startswith(ok + ".") for ok in allow):
+            continue
         if root in FORBIDDEN_EXTERNAL or any(
             name == target or name.startswith(target + ".")
             for target in FORBIDDEN_INTERNAL
@@ -117,3 +122,87 @@ def test_checker_detects_forbidden_imports(source: str) -> None:
 def test_checker_resolves_relative_imports() -> None:
     assert violations("from . import evm_swap", "hcs_trader.risk")
     assert violations("from .domain import execution", "hcs_trader.risk") == []
+
+
+# Signing, key-handling and execution modules. They are not the pure domain layer: each
+# may import exactly the named dependencies below (measured on the current code) and
+# nothing else from the forbidden set. In particular none may import an HTTP client,
+# the MCP SDK, the local model, the API or the MCP server. Adding an entry here is a
+# security review decision, never a way to make a test pass.
+SIGNING_AND_EXECUTION_ALLOWED: dict[str, frozenset[str]] = {
+    "evm_signing.py": frozenset(),
+    "solana_signing.py": frozenset({"solders"}),  # key and message codec, no network
+    "utxo_psbt.py": frozenset({"hcs_trader.wallets"}),  # network table and RPC port
+    "keystore.py": frozenset(),
+    "spot_port.py": frozenset(),
+    "spot_execution.py": frozenset(
+        {
+            "hcs_trader.data.kraken",
+            "hcs_trader.data.provider",
+            "hcs_trader.kraken_spot",
+            "hcs_trader.storage",
+        }
+    ),
+    "paper_execution.py": frozenset(
+        {"hcs_trader.data.kraken", "hcs_trader.data.quotes", "hcs_trader.storage"}
+    ),
+}
+NEVER_ALLOWED = frozenset(
+    {
+        "httpx",
+        "httpx2",
+        "mcp",
+        "requests",
+        "aiohttp",
+        "hcs_trader.local_research",
+        "hcs_trader.mcp_server",
+        "hcs_trader.api",
+    }
+)
+
+
+def _module_name(path: Path) -> str:
+    return ".".join(["hcs_trader", *path.relative_to(PACKAGE).with_suffix("").parts])
+
+
+@pytest.mark.parametrize("name", sorted(SIGNING_AND_EXECUTION_ALLOWED))
+def test_signing_and_execution_modules_stay_off_network_and_llm_adapters(
+    name: str,
+) -> None:
+    path = PACKAGE / name
+    allow = SIGNING_AND_EXECUTION_ALLOWED[name]
+    assert not allow & NEVER_ALLOWED
+    source = path.read_text(encoding="utf-8")
+    assert violations(source, _module_name(path), allow) == []
+    # Never reachable even through an allowed prefix.
+    for imported in imported_modules(source, _module_name(path)):
+        assert imported.split(".")[0] not in NEVER_ALLOWED
+        assert not any(
+            imported == bad or imported.startswith(bad + ".") for bad in NEVER_ALLOWED
+        )
+
+
+def test_allowance_table_covers_every_signing_and_execution_module() -> None:
+    present = {
+        path.name
+        for path in PACKAGE.glob("*.py")
+        if path.stem.endswith(("_signing", "_execution", "_psbt"))
+        or path.stem in {"signing", "keystore", "spot_port"}
+    }
+    # signing.py is guarded by PROTECTED above; the rest must be in the table.
+    missing = sorted(present - {"signing.py"} - set(SIGNING_AND_EXECUTION_ALLOWED))
+    assert not missing, (
+        f"{missing} not in SIGNING_AND_EXECUTION_ALLOWED "
+        "(tests/security/test_layering.py). "
+        "Add one line per module mapping it to the frozenset of hcs_trader/third-party "
+        "import prefixes it may use (frozenset() if none), and never a network or LLM "
+        "adapter."
+    )
+
+
+def test_allowances_are_effective_and_not_blanket() -> None:
+    assert violations("from hcs_trader.storage import AuditStore")
+    allow = frozenset({"hcs_trader.storage"})
+    assert violations("from hcs_trader.storage import AuditStore", allow=allow) == []
+    assert violations("import httpx2", allow=allow)
+    assert violations("from hcs_trader import mcp_server", allow=allow)

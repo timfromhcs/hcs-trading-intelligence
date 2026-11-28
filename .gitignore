@@ -12,3 +12,5 @@ src/hcs_trader/ui_assets/
 .env.*
 *.sqlite*
 *.db
+coverage.xml
+mutants/

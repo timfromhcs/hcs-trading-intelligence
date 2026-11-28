@@ -923,6 +923,10 @@ def main() -> None:
         help="Fetch one registered source by id (DATA_ONLY, untrusted output)",
     )
     webfetch_parser.add_argument("source_id")
+    commands.add_parser(
+        "sources",
+        help="List registered external sources and verification state (offline)",
+    )
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1244,6 +1248,25 @@ def main() -> None:
         create_mcp_server(mcp_store.path).run(transport="stdio")
     elif arguments.command == "mcp-http":
         mcp_http_command(arguments)
+    elif arguments.command == "sources":
+        registry = load_source_registry()
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": spec.id,
+                        "format": spec.format,
+                        "language": spec.language,
+                        "api_key_required": spec.api_key_required,
+                        "enabled": spec.usable,
+                        "attribution": spec.attribution,
+                        "verification_result": spec.verification.result,
+                    }
+                    for spec in registry.all()
+                ],
+                indent=2,
+            )
+        )
     elif arguments.command == "webfetch":
 
         async def _fetch_registered() -> None:

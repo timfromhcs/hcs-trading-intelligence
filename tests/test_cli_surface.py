@@ -21,6 +21,7 @@ def test_help_lists_only_reviewed_commands() -> None:
         "selftest",
         "eval-model",
         "webfetch",
+        "sources",
         "live-status",
         "live-enable",
         "live-revoke",

@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-11-28T09:17:35.793386+00:00",
-  "git_sha": "97e349a1c64f1b12ff2dbd4d9c430193b3ac7e0e",
+  "generated_at": "2026-11-28T09:21:24.152842+00:00",
+  "git_sha": "0988c059114e53adacaf01b0c80d88546196d91b",
   "all_passed": true,
   "gates": [
     {
@@ -36,7 +36,7 @@
       "attempt_exit_codes": [
         0
       ],
-      "output_tail": "214 files already formatted\n"
+      "output_tail": "215 files already formatted\n"
     },
     {
       "name": "mypy",
@@ -51,7 +51,7 @@
       "attempt_exit_codes": [
         0
       ],
-      "output_tail": "Success: no issues found in 170 source files\n"
+      "output_tail": "Success: no issues found in 171 source files\n"
     },
     {
       "name": "pytest",
@@ -71,9 +71,9 @@
       "attempt_exit_codes": [
         0
       ],
-      "output_tail": "   75%\nsrc\\hcs_trader\\skills\\__init__.py               70      2    97%\nsrc\\hcs_trader\\solana_signing.py               209      4    98%\nsrc\\hcs_trader\\spot_execution.py               153     18    88%\nsrc\\hcs_trader\\spot_port.py                     11      0   100%\nsrc\\hcs_trader\\storage.py                      848     42    95%\nsrc\\hcs_trader\\strategy.py                     185     15    92%\nsrc\\hcs_trader\\utxo_psbt.py                    282     21    93%\nsrc\\hcs_trader\\walk_forward.py                  63      4    94%\nsrc\\hcs_trader\\wallet_addresses.py             123      8    93%\nsrc\\hcs_trader\\wallets.py                      467     43    91%\nsrc\\hcs_trader\\webfetch.py                     181     21    88%\n----------------------------------------------------------------\nTOTAL                                        11555   1150    90%\nCoverage XML written to file coverage.xml\nRequired test coverage of 80% reached. Total coverage: 90.05%\n1247 passed, 6 skipped in 150.24s (0:02:30)\n",
+      "output_tail": "   75%\nsrc\\hcs_trader\\skills\\__init__.py               70      2    97%\nsrc\\hcs_trader\\solana_signing.py               209      4    98%\nsrc\\hcs_trader\\spot_execution.py               153     18    88%\nsrc\\hcs_trader\\spot_port.py                     11      0   100%\nsrc\\hcs_trader\\storage.py                      848     42    95%\nsrc\\hcs_trader\\strategy.py                     185     15    92%\nsrc\\hcs_trader\\utxo_psbt.py                    282     21    93%\nsrc\\hcs_trader\\walk_forward.py                  63      4    94%\nsrc\\hcs_trader\\wallet_addresses.py             123      8    93%\nsrc\\hcs_trader\\wallets.py                      467     43    91%\nsrc\\hcs_trader\\webfetch.py                     181     21    88%\n----------------------------------------------------------------\nTOTAL                                        11582   1158    90%\nCoverage XML written to file coverage.xml\nRequired test coverage of 80% reached. Total coverage: 90.00%\n1249 passed, 6 skipped in 140.29s (0:02:20)\n",
       "pytest_counts": {
-        "passed": 1247,
+        "passed": 1249,
         "skipped": 6
       }
     },

@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
@@ -735,6 +736,52 @@ def create_app(
             paper_orders=paper is not None,
             live_orders=spot_execution is not None,
             chains=service.chain_capabilities(),
+        )
+
+    @app.get("/api/v1/system/stream")
+    async def system_stream(
+        request: Request,
+        max_events: Annotated[int, Query(ge=0, le=100)] = 0,
+    ) -> StreamingResponse:
+        """Loopback SSE for mode, pause state and freshness; no external data."""
+
+        async def events() -> AsyncIterator[str]:
+            emitted = 0
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    payload = {
+                        "status": status().model_dump(mode="json"),
+                        "paused": execution_pause().paused,
+                        "at": datetime.now(UTC).isoformat(),
+                    }
+                    yield "event: snapshot\ndata: "
+                    yield json.dumps(payload, sort_keys=True)
+                    yield "\n\n"
+                except (sqlite3.Error, ValidationError):
+                    yield 'event: error\ndata: {"detail": "status unavailable"}\n\n'
+                emitted += 1
+                if max_events and emitted >= max_events:
+                    return
+                try:
+                    disconnected = await asyncio.wait_for(
+                        request.is_disconnected(), timeout=5
+                    )
+                except TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if disconnected:
+                    return
+                yield "event: ping\ndata: {}\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get("/api/v1/system/chains")

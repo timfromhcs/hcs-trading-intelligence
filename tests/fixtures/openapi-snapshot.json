@@ -4756,6 +4756,47 @@
         "summary": "Status"
       }
     },
+    "/api/v1/system/stream": {
+      "get": {
+        "description": "Loopback SSE for mode, pause state and freshness; no external data.",
+        "operationId": "system_stream_api_v1_system_stream_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "max_events",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Max Events",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "System Stream"
+      }
+    },
     "/api/v1/wallets": {
       "get": {
         "operationId": "wallet_snapshots_api_v1_wallets_get",

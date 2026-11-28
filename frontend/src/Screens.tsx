@@ -183,6 +183,7 @@ export function Settings() {
     "/api/v1/system/config",
   );
   return (
+    <>
     <section className="panel" aria-labelledby="settings-heading">
       <h2 id="settings-heading">Settings</h2>
       <div role="status">
@@ -196,11 +197,24 @@ export function Settings() {
           <div><dt>Default mode</dt><dd>{config.data.default_mode}</dd></div>
         </dl>
       )}
+      <section className="panel" aria-labelledby="downloads-heading">
+        <h2 id="downloads-heading">Downloads</h2>
+        <p>
+          <a href="/api/v1/export/audit" download="hcs-audit.json">
+            Download audit events (JSON)
+          </a>
+        </p>
+        <p className="muted">
+          Reports are deterministic and exported without secrets. OpenAPI snapshot and
+          release checksums are available in the repository and release assets.
+        </p>
+      </section>
       <Unavailable>
         provider and API-key status, model path, retention, backup and network allowlists
         are managed through local configuration and are not exposed by the service. Secrets
         are never shown in this interface.
       </Unavailable>
     </section>
+    </>
   );
 }

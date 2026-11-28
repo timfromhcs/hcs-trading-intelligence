@@ -34,7 +34,7 @@ read-only/verification surface, and report the blocker each cycle.
 2. Generate the TypeScript client from `tests/fixtures/openapi-snapshot.json`
    (`openapi-typescript`) and make it the single HTTP layer; delete hand-written
    duplicate request types.
-3. Add German/English locale switching with no hardcoded financial advice.
+3. German/English navigation and mode labels are implemented with a persisted locale switch and no hardcoded financial advice; reports remain English and deeper screen translation is still open.
 4. Deepen Overview (equity, drawdown, hot/cold, freshness), World Monitor,
    Markets and Wallets screens using only verified API fields.
 5. Add Playwright end-to-end tests with an axe accessibility gate on Windows,

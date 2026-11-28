@@ -93,6 +93,7 @@ from hcs_trader.promotion import (
     promote_strategy_candidate,
 )
 from hcs_trader.risk import RiskRejected
+from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
 from hcs_trader.skills import list_skills
 from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import AuditStore, ExecutionPause
@@ -406,6 +407,18 @@ class OrderPreviewRequest(BaseModel):
     side: PaperSide
     quantity: Decimal
     idempotency_key: str | None = None
+
+
+class SizingRequest(BaseModel):
+    hot_equity: Decimal
+    entry_price: Decimal
+    invalidation_price: Decimal
+    risk_fraction: Decimal
+    max_position_notional: Decimal
+    available_quote: Decimal
+    estimated_cost_per_unit: Decimal = Decimal("0")
+    min_quantity: Decimal = Decimal("0")
+    quantity_decimals: int = 8
 
 
 class SystemCapabilities(Capabilities):
@@ -1394,6 +1407,22 @@ def create_app(
             return page
         except ApplicationError as error:
             raise _http_error(error) from error
+
+    @app.post("/api/v1/quant/size")
+    def size_position(payload: SizingRequest) -> dict[str, Any]:
+        """Side-effect-free bounded sizing preview; never authorizes an order."""
+        try:
+            result = size_long_position(SizingInput(**payload.model_dump()))
+        except SizingRejected as error:
+            raise HTTPException(422, str(error)) from error
+        return {
+            "quantity": str(result.quantity),
+            "notional": str(result.notional),
+            "risk_amount": str(result.risk_amount),
+            "risk_per_unit": str(result.risk_per_unit),
+            "bounds": list(result.bounds),
+            "authorization": "NONE",
+        }
 
     @app.get("/api/v1/portfolio/positions")
     def portfolio_positions() -> list[Position]:

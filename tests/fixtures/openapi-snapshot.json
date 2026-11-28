@@ -2061,6 +2061,115 @@
         "title": "SimulatedFill",
         "type": "object"
       },
+      "SizingRequest": {
+        "properties": {
+          "available_quote": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Available Quote"
+          },
+          "entry_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Entry Price"
+          },
+          "estimated_cost_per_unit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "default": "0",
+            "title": "Estimated Cost Per Unit"
+          },
+          "hot_equity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Hot Equity"
+          },
+          "invalidation_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Invalidation Price"
+          },
+          "max_position_notional": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Max Position Notional"
+          },
+          "min_quantity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "default": "0",
+            "title": "Min Quantity"
+          },
+          "quantity_decimals": {
+            "default": 8,
+            "title": "Quantity Decimals",
+            "type": "integer"
+          },
+          "risk_fraction": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Risk Fraction"
+          }
+        },
+        "required": [
+          "hot_equity",
+          "entry_price",
+          "invalidation_price",
+          "risk_fraction",
+          "max_position_notional",
+          "available_quote"
+        ],
+        "title": "SizingRequest",
+        "type": "object"
+      },
       "SkillResponse": {
         "properties": {
           "capability_tier": {
@@ -4134,6 +4243,47 @@
           }
         },
         "summary": "Portfolio Summary"
+      }
+    },
+    "/api/v1/quant/size": {
+      "post": {
+        "description": "Side-effect-free bounded sizing preview; never authorizes an order.",
+        "operationId": "size_position_api_v1_quant_size_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SizingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Size Position Api V1 Quant Size Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Size Position"
       }
     },
     "/api/v1/research/runs": {

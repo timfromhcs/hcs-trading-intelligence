@@ -3,6 +3,8 @@
 from decimal import Decimal
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from hcs_trader.backtest import BacktestConfig
 from hcs_trader.cost_model import CostModel
@@ -59,3 +61,30 @@ def test_invalid_prices_and_quantities_are_rejected() -> None:
         model.fee(Decimal("-1"))
     with pytest.raises(ValueError):
         model.slippage_cost(Decimal("-1"), Decimal("100"))
+
+
+@given(
+    fee=st.decimals(min_value="0", max_value="500", places=2),
+    spread=st.decimals(min_value="0", max_value="500", places=2),
+    slippage=st.decimals(min_value="0", max_value="500", places=2),
+    price=st.decimals(min_value="0.01", max_value="1000000", places=2),
+    quantity=st.decimals(min_value="0", max_value="100000", places=4),
+    notional=st.decimals(min_value="0", max_value="1000000", places=2),
+)
+def test_costs_are_non_negative_and_adverse(
+    fee: Decimal,
+    spread: Decimal,
+    slippage: Decimal,
+    price: Decimal,
+    quantity: Decimal,
+    notional: Decimal,
+) -> None:
+    model = CostModel(fee_bps=fee, spread_bps=spread, slippage_bps=slippage)
+    buy = model.execution_price(price, "buy")
+    sell = model.execution_price(price, "sell")
+    assert buy >= price >= sell
+    assert model.fee(notional) >= 0
+    assert model.slippage_cost(quantity, price) >= 0
+    if fee == spread == slippage == 0:
+        assert buy == sell == price
+        assert model.fee(notional) == 0

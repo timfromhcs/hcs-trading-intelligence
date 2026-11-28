@@ -42,7 +42,12 @@ async def test_structured_tools_declare_output_schema(tmp_path: Path) -> None:
         create_mcp_server(_store(tmp_path / "audit.sqlite").path)
     ) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    for name in ("webfetch.list_sources", "webfetch.get", "news.search_page"):
+    for name in (
+        "webfetch.list_sources",
+        "webfetch.get",
+        "news.search_page",
+        "quant.size_position",
+    ):
         assert tools[name].output_schema is not None
         assert tools[name].annotations is not None
 
@@ -99,6 +104,30 @@ async def test_news_page_projects_fields_and_rejects_bad_cursor(tmp_path: Path) 
             "news.search_page", {"query": "Bitcoin", "cursor": "nope"}
         )
         assert bad.is_error is True
+
+
+@pytest.mark.anyio
+async def test_sizing_tool_returns_typed_no_authorization_preview(
+    tmp_path: Path,
+) -> None:
+    async with Client(
+        create_mcp_server(_store(tmp_path / "audit.sqlite").path)
+    ) as client:
+        result = await client.call_tool(
+            "quant.size_position",
+            {
+                "hot_equity": "10000",
+                "entry_price": "100",
+                "invalidation_price": "95",
+                "risk_fraction": "0.0025",
+                "max_position_notional": "2000",
+                "available_quote": "5000",
+            },
+        )
+    assert result.structured_content is not None
+    preview = result.structured_content
+    assert preview["authorization"] == "NONE"
+    assert float(preview["quantity"]) > 0
 
 
 @pytest.mark.anyio

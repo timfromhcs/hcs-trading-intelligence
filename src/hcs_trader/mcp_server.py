@@ -61,6 +61,7 @@ from hcs_trader.promotion import (
     list_shadow_runs_for_candidate,
 )
 from hcs_trader.risk import RiskPolicy
+from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
 from hcs_trader.skills import list_skills
 from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.webfetch import SafeFetcher, SafeFetchError, SourceDisabled
@@ -104,6 +105,14 @@ class NewsPage(BaseModel):
     items: list[dict[str, Any]]
     next_cursor: str | None = None
     has_more: bool = False
+
+
+class SizingPreview(BaseModel):
+    quantity: str
+    notional: str
+    risk_amount: str
+    risk_per_unit: str
+    authorization: Literal["NONE"] = "NONE"
 
 
 class WebFetchResult(BaseModel):
@@ -192,6 +201,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "webfetch.list_sources": _R,
     "webfetch.get": _R,
     "news.search_page": _R,
+    "quant.size_position": _R,
     "quant.calculate_indicators": _R,
     "quant.compare_strategy_candidates": _R,
     # READ (earlier names; the renamed ones stay registered as aliases)
@@ -901,6 +911,42 @@ def create_mcp_server(
         )
         items, next_cursor, has_more = _page(hits, start, limit, fields)
         return NewsPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+    @structured_tool("quant.size_position")
+    def size_position_tool(
+        hot_equity: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=40)],
+        entry_price: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=40)],
+        invalidation_price: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=40)],
+        risk_fraction: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=40)],
+        max_position_notional: Annotated[
+            str, Field(pattern=r"^[0-9.]+$", max_length=40)
+        ],
+        available_quote: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=40)],
+        estimated_cost_per_unit: str = "0",
+        min_quantity: str = "0",
+    ) -> SizingPreview:
+        """Bound a long spot preview by risk, cap and cash; never authorizes one."""
+        try:
+            result = size_long_position(
+                SizingInput(
+                    hot_equity=Decimal(hot_equity),
+                    entry_price=Decimal(entry_price),
+                    invalidation_price=Decimal(invalidation_price),
+                    risk_fraction=Decimal(risk_fraction),
+                    max_position_notional=Decimal(max_position_notional),
+                    available_quote=Decimal(available_quote),
+                    estimated_cost_per_unit=Decimal(estimated_cost_per_unit),
+                    min_quantity=Decimal(min_quantity),
+                )
+            )
+        except (SizingRejected, ValueError, ArithmeticError) as error:
+            raise ToolError(f"Sizing rejected: {error}") from error
+        return SizingPreview(
+            quantity=str(result.quantity),
+            notional=str(result.notional),
+            risk_amount=str(result.risk_amount),
+            risk_per_unit=str(result.risk_per_unit),
+        )
 
     @read_tool("news.get_event_timeline")
     def news_timeline_tool(

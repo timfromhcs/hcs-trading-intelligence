@@ -37,7 +37,7 @@ Tools use the names from the product brief. Earlier names stay registered as ali
 
 | Tier | Tools |
 |---|---|
-| `READ` | `market.get_quote`, `market.get_candles`, `market.get_orderbook_snapshot`, `news.search`, `news.get_event_timeline`, `macro.get_series`, `portfolio.get_snapshot`, `wallet.get_addresses`, `wallet.get_balances`, `strategy.list`, `risk.get_status`, `system.get_health`, `data.get_source_status` (per-source freshness, breaker state and retry timing from the audit database), `quant.calculate_indicators`, `quant.compare_strategy_candidates`, `news.search_page`, `webfetch.list_sources`, `webfetch.get` and the earlier read tools above |
+| `READ` | `market.get_quote`, `market.get_candles`, `market.get_orderbook_snapshot`, `news.search`, `news.get_event_timeline`, `macro.get_series`, `portfolio.get_snapshot`, `wallet.get_addresses`, `wallet.get_balances`, `strategy.list`, `risk.get_status`, `system.get_health`, `data.get_source_status` (per-source freshness, breaker state and retry timing from the audit database), `quant.calculate_indicators`, `quant.compare_strategy_candidates`, `quant.size_position` (read-only bounded sizing preview, `authorization: NONE`), `news.search_page`, `webfetch.list_sources`, `webfetch.get` and the earlier read tools above |
 | `RESEARCH` | `quant.run_backtest`, `research.create_candidate` (needs an `idempotency_key`; registers a `RESEARCH` stage candidate only) |
 | `PAPER_TRADE` | `orders.preview` (writes nothing), `orders.place_paper` (needs an `idempotency_key`; repeats return the first fill) |
 | `ADMIN_LOCAL` | `system.pause` (sets the durable pause; there is no resume tool) |

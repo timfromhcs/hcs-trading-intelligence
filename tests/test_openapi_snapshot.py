@@ -39,4 +39,4 @@ def test_snapshot_contains_wave3_and_wave5_routes() -> None:
     assert "/api/v1/news/search" in paths
     search = paths["/api/v1/news/search"]["get"]["parameters"]
     assert {parameter["name"] for parameter in search} >= {"q", "limit", "cursor"}
-    assert schema["info"]["version"] == "1.1.0rc2"
+    assert schema["info"]["version"] == "1.1.0rc3"

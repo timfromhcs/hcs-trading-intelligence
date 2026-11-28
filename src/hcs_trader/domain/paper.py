@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from decimal import Context, Decimal, localcontext
 from enum import StrEnum
 
+from hcs_trader.cost_model import CostModel
 from hcs_trader.domain.market_data import DataQuality, Quote
 
 _ZERO = Decimal(0)
@@ -72,7 +73,8 @@ def simulated_terms(order: PaperOrder, quote: Quote) -> tuple[Decimal, Decimal]:
         notional = price * order.quantity
         if not 10 <= notional <= 1000:
             raise PaperRejected("Paper order notional must be between 10 and 1000 USD")
-        return price, notional * Decimal("0.0025")
+        # Same fee formula as the backtester and risk pre-trade gate.
+        return price, CostModel().fee(notional)
 
 
 def book_fill(

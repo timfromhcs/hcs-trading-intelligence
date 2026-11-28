@@ -1,5 +1,6 @@
 """Shared deterministic transaction-cost model."""
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -8,6 +9,9 @@ from hypothesis import strategies as st
 
 from hcs_trader.backtest import BacktestConfig
 from hcs_trader.cost_model import CostModel
+from hcs_trader.domain.market_data import Quote
+from hcs_trader.domain.markets import DEFAULT_MARKET_ID
+from hcs_trader.domain.paper import PaperOrder, PaperSide, simulated_terms
 
 
 def test_default_costs_match_the_backtest_formulas() -> None:
@@ -27,6 +31,25 @@ def test_config_bridge_uses_the_same_values() -> None:
     model = CostModel.from_config(config)
     assert model.fee_bps == config.fee_bps
     assert model.impact_rate == (Decimal("6") + Decimal("8")) / Decimal(10_000)
+
+
+def test_paper_fee_matches_the_shared_model() -> None:
+    now = datetime.now(UTC)
+    quote = Quote(
+        DEFAULT_MARKET_ID,
+        "fixture",
+        Decimal("100"),
+        Decimal("100.1"),
+        now - timedelta(seconds=1),
+        now - timedelta(seconds=1),
+        now,
+    )
+    price, fee = simulated_terms(
+        PaperOrder("paper-1", PaperSide.BUY, Decimal("1")), quote
+    )
+    assert price == quote.ask
+    assert fee == CostModel().fee(price)
+    assert fee == price * Decimal("0.0025")
 
 
 def test_zero_costs_are_allowed() -> None:

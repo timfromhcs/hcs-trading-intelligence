@@ -2,7 +2,7 @@
 
 Made with ❤️ by HCS.media.
 
-Version 1.1.0-rc.1 is a release candidate. It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work.
+Version 1.1.0-rc.1 is a release candidate, merged to `main` through [PR #6](https://github.com/timfromhcs/hcs-trading-intelligence/pull/6) and [PR #7](https://github.com/timfromhcs/hcs-trading-intelligence/pull/7), with the tag `v1.1.0-rc.1` triggering the draft release workflow. It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work. A static UI preview can be deployed to Vercel via `vercel.json`; it contains no backend and never exposes wallet, API or MCP functions.
 
 ## 1. What it is, and what it is not
 

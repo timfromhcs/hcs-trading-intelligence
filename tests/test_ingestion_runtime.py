@@ -331,13 +331,17 @@ def test_lifespan_runs_and_cancels_ingestion_end_to_end(tmp_path: Path) -> None:
     with TestClient(
         create_app(store, ingestion=service), base_url="http://127.0.0.1"
     ) as api:
-        for _ in range(100):
+        import time
+
+        deadline = time.monotonic() + 30
+        while True:
             body = api.get("/api/v1/data/sources").json()
             ecb = next(s for s in body["sources"] if s["source_id"] == "ecb-sdmx")
-            if ecb["retry_in_seconds"]:
+            if ecb["retry_in_seconds"] is not None:
                 break
-            import time
-
+            assert time.monotonic() < deadline, (
+                "ECB rate-limit deadline was not persisted"
+            )
             time.sleep(0.05)
         assert (
             body["ingestion_enabled"] is True and body["ingestion_mode"] == "DATA_ONLY"

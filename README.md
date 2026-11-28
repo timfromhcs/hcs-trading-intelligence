@@ -2,7 +2,7 @@
 
 Made with ❤️ by HCS.media.
 
-Version 1.1.0-rc.1 is a release candidate, merged to `main` through [PR #6](https://github.com/timfromhcs/hcs-trading-intelligence/pull/6) and [PR #7](https://github.com/timfromhcs/hcs-trading-intelligence/pull/7), with the tag `v1.1.0-rc.1` triggering the draft release workflow. It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work. A static UI preview can be deployed to Vercel via `vercel.json`; it contains no backend and never exposes wallet, API or MCP functions.
+Version 1.1.0-rc.1 is a release candidate, merged to `main` through [PR #6](https://github.com/timfromhcs/hcs-trading-intelligence/pull/6), [PR #7](https://github.com/timfromhcs/hcs-trading-intelligence/pull/7), [PR #8](https://github.com/timfromhcs/hcs-trading-intelligence/pull/8) and [PR #9](https://github.com/timfromhcs/hcs-trading-intelligence/pull/9). The tag `v1.1.0-rc.1` produced a [draft release](https://github.com/timfromhcs/hcs-trading-intelligence/releases/tag/untagged-6f4fb381221bb393c562) with native single-file executables, MCPB bundles, wheel, sdist, SBOM, provenance and checksums; the static UI preview is deployed at [hcs-trading-intelligence-ui.vercel.app](https://hcs-trading-intelligence-ui.vercel.app). It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work. A static UI preview can be deployed to Vercel via `vercel.json`; it contains no backend and never exposes wallet, API or MCP functions.
 
 ## 1. What it is, and what it is not
 

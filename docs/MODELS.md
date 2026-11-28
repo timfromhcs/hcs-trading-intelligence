@@ -49,5 +49,7 @@ computed deterministically from candles and passed to the model as structured
 evidence. The model is not the source of those values.
 
 `hcs_trader.agents.eval` provides offline release-blocking tests for schema
-validity, citation faithfulness and injection resistance. Run them before
-promoting any model or prompt change; a failing injection case blocks release.
+validity, citation faithfulness and injection resistance. Run
+`hcs-trader eval-model` before promoting any model or prompt change; the command
+prints a JSON report and exits non-zero when a release gate fails. A failing
+injection case always blocks release.

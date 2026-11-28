@@ -914,6 +914,10 @@ def main() -> None:
         "selftest", help="Run the offline installation self-test"
     )
     selftest_parser.add_argument("--trip-and-die", type=Path, help=argparse.SUPPRESS)
+    commands.add_parser(
+        "eval-model",
+        help="Run offline model-boundary release gates (schema, citation, injection)",
+    )
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1235,6 +1239,33 @@ def main() -> None:
         create_mcp_server(mcp_store.path).run(transport="stdio")
     elif arguments.command == "mcp-http":
         mcp_http_command(arguments)
+    elif arguments.command == "eval-model":
+        from hcs_trader.agents.eval import EvalNotReady, assert_release_ready, run_eval
+
+        eval_report = run_eval()
+        print(
+            json.dumps(
+                {
+                    "passed": eval_report.passed,
+                    "ratio": eval_report.ratio,
+                    "threshold": eval_report.threshold,
+                    "results": [
+                        {
+                            "name": result.name,
+                            "category": result.category.value,
+                            "passed": result.passed,
+                        }
+                        for result in eval_report.results
+                    ],
+                },
+                indent=2,
+            )
+        )
+        try:
+            assert_release_ready(eval_report)
+        except EvalNotReady as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
     elif arguments.command == "selftest":
         from hcs_trader import selftest
 

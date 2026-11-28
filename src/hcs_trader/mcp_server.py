@@ -613,6 +613,7 @@ def create_mcp_server(
     writable_store: AuditStore | None = None,
     paper_execution: PaperExecution | None = None,
     webfetch: SafeFetcher | None = None,
+    include_legacy_aliases: bool = True,
 ) -> MCPServer:
     """Build the MCP server.
 
@@ -638,7 +639,11 @@ def create_mcp_server(
         name: str, *aliases: str
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
         return guard.tool(
-            server, name, tool_tier(name), annotations=_READ, aliases=aliases
+            server,
+            name,
+            tool_tier(name),
+            annotations=_READ,
+            aliases=aliases if include_legacy_aliases else (),
         )
 
     def structured_tool[**P, R](

@@ -33,7 +33,7 @@ Initialize the local database once by starting the dashboard or running an impor
 
 ### Tool catalogue and tiers
 
-Tools use the names from the product brief. Earlier names stay registered as aliases (`quant.get_indicators` = `quant.calculate_indicators`, `wallets.get_snapshots` = `wallet.get_balances`, `strategies.get_candidates` = `strategy.list`) and have their own audit entries.
+Tools use the names from the product brief. Earlier names stay registered as aliases for compatibility (`quant.get_indicators` = `quant.calculate_indicators`, `wallets.get_snapshots` = `wallet.get_balances`, `strategies.get_candidates` = `strategy.list`) and have their own audit entries. Pass `include_legacy_aliases=False` to `create_mcp_server` to hide them; the aliases are deprecated and will be removed in 1.2.0.
 
 | Tier | Tools |
 |---|---|

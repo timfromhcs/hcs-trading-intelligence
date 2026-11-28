@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+Release candidate `1.1.0-rc.1` (Waves 1–3 and the core of Wave 4). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open.
+
+- Wave 2 data quality: shared deterministic checks for quotes, candles and order books (`data/quality.py`), a keyless Coinbase Exchange public REST adapter behind a strict host allowlist (`data/public_venues.py`), a transport-injected Kraken v2 book feed with sequence-gap detection, cursor resubscription and bounded jittered backoff (`data/kraken_ws.py`), and a versioned source registry with conditional GET and request budgets (`data/source_registry.py`, `data/sources.json`). Every shipped source is disabled until a verification record exists; Binance market data stays disabled pending a jurisdiction check.
+- Wave 3 untrusted pipeline: `webfetch.py` refuses caller-supplied URLs, non-global addresses, redirects and DNS rebinding, applies robots.txt with a 24-hour cache, per-source budgets, conditional GET and size caps. `data/untrusted.py` sanitizes markup, removes hidden/bidirectional characters and instruction-like lines, and marks all output with an `UNTRUSTED` envelope. New READ-scoped REST endpoints `/api/v1/webfetch/sources` and `/api/v1/webfetch/{source_id}` plus MCP tools `webfetch.list_sources` and `webfetch.get`.
+- Wave 4 core: typed MCP outputs with declared `outputSchema` and `structuredContent` for `news.search_page` and the webfetch tools, opaque cursor pagination and field projection, a permissive-license model catalog with SHA-256 gating (`model_catalog.py`), an offline release-blocking eval harness for schema, citation and injection cases (`agents/eval.py`), and local model policy documentation (`docs/MODELS.md`).
+- The offline model-boundary eval (`hcs-trader eval-model`) is now a release gate in `scripts/run_gates.py`; a failing schema, citation or injection case fails the build.
+- Wave 5 CLI: read-only `hcs-trader size`, `hcs-trader costs`, `hcs-trader sources` and `hcs-trader webfetch` commands, plus `hcs-trader eval-model` as a release gate. The CLI surface is guarded by a test against dangerous commands.
+- Wave 5 quant: `POST /api/v1/quant/costs` exposes the shared fee/spread/slippage model as a side-effect-free preview with exact Decimal output and `authorization: NONE`.
+- Wave 5 risk: opt-in correlation-cluster exposure caps in the deterministic risk engine (`correlation_clusters`, `max_cluster_exposure_fraction`). No cluster is configured by default, so existing limits and verdicts are unchanged; configured clusters reject a buy that would exceed the cluster cap.
+- Wave 5 quant: `quant.size_position` exposes the deterministic sizing preview as a typed MCP read tool with `outputSchema` and `authorization: NONE`.
+- Wave 5 quant: shared deterministic cost model (`cost_model.py`) for fee, half-spread and slippage impact; the backtester now uses it instead of duplicating the formulas, with tests proving identical results.
+- Wave 5 quant: deterministic long-spot sizing preview (`sizing.py`) bounded by risk, notional cap and available cash, rounding down to venue precision and exposed as the side-effect-free `POST /api/v1/quant/size` with `authorization: NONE`.
+- Wave 5 start: content ETags with conditional GET (`304`) on read endpoints, opaque cursor pagination on `GET /api/v1/news/search` and `GET /api/v1/audit/events` (`X-Next-Cursor`, `X-Total-Count`), a committed OpenAPI snapshot with a drift test, the installed package version in the OpenAPI document, and a bounded loopback SSE stream at `GET /api/v1/system/stream` (mode, pause state and timestamp, no external data).
+- Version bumped to `1.1.0-rc.1`; Python and frontend lockfiles updated.
+
 - CI tiers: nightly and weekly workflows (full suite with the Hypothesis nightly profile, packaging smoke, mutation testing of risk and signing code, chaos, dependency audits), Hypothesis profiles dev/ci/nightly, per-module coverage floors (`scripts/check_coverage_floors.py`, in `run_gates.py` and CI; the global 80% gate is unchanged), an invariant map (`docs/INVARIANTS.md`) checked by tests, a stricter layering test for signing and execution modules, and a default test block on non-loopback sockets (`allow_network`, `rehearsal` and `regtest` markers opt out).
 - Loopback hardening (W1-D): Host allowlist pinned to the bound port, Origin and `Sec-Fetch-Site` checks on writes, JSON content type on writes, and CSP, `nosniff` and `no-referrer` headers on every API and UI response. The MCP Streamable HTTP path validates Host and Origin before the bearer token. New `hcs-trader mcp-http` command (127.0.0.1 only, token printed once).
 - Skills follow the Agent Skills frontmatter (`name`, `description`, `metadata`); skill directories are hyphenated to match their names; a test checks every `required_tools` entry against the registered MCP tools and the declared tier.
@@ -20,7 +35,7 @@
 - Gate the Kraken CLI and HTTP serving paths on the persisted operator policy and security-critical limitations. Recheck approval before submission.
 - Verify denied paper writes in the installed MCP smoke test and run frontend tests in CI.
 
-Changes since 0.2.0 on `main`. No release candidate has been cut and the version is still 0.2.0.
+Changes since 0.2.0 on `main`. A `1.1.0-rc.1` release candidate has been cut; it is not a stable `v1.x` tag.
 
 ### Added
 
@@ -100,3 +115,4 @@ Changes since 0.2.0 on `main`. No release candidate has been cut and the version
 
 - Added the installable CLI with default mode and capability reporting.
 - Added locked development tooling and a three-platform verification workflow.
+

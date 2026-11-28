@@ -52,6 +52,9 @@ class RiskPolicy:
     max_positions: int = 2
     max_asset_exposure_fraction: Decimal = Decimal("0.5")
     max_total_exposure_fraction: Decimal = Decimal("1.0")
+    # Correlation clusters are opt-in and code-defined, never agent-configurable.
+    correlation_clusters: tuple[tuple[str, ...], ...] = ()
+    max_cluster_exposure_fraction: Decimal = Decimal("0.75")
     max_consecutive_losses: int = 3
     estimated_fee_bps: Decimal = Decimal("40")
     max_fee_bps: Decimal = Decimal("100")
@@ -318,6 +321,16 @@ class RiskEngine:
         total_cap = pf.hot_equity_usd * pol.max_total_exposure_fraction
         if pf.total_exposure_usd + notional > total_cap:
             return "Projected total exposure exceeds cap"
+        for cluster in pol.correlation_clusters:
+            if base not in cluster:
+                continue
+            cluster_held = sum(
+                (pf.exposure_usd.get(asset, Decimal(0)) for asset in cluster),
+                Decimal(0),
+            )
+            cluster_cap = pf.hot_equity_usd * pol.max_cluster_exposure_fraction
+            if cluster_held + notional > cluster_cap:
+                return f"Projected {base} cluster exposure exceeds cap"
         if invalidation is None or invalidation <= 0:
             return "Buy requires a valid invalidation price for risk sizing"
         risk_per_unit = price - invalidation + price * fee_bps / _BPS

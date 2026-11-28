@@ -41,6 +41,10 @@ DEFAULT_GATES: tuple[tuple[str, list[str]], ...] = (
         "coverage-floors",
         ["uv", "run", "--frozen", "python", "scripts/check_coverage_floors.py"],
     ),
+    (
+        "eval-model",
+        ["uv", "run", "--frozen", "python", "-m", "hcs_trader", "eval-model"],
+    ),
     ("secret-scan", ["internal:secret-scan"]),
 )
 

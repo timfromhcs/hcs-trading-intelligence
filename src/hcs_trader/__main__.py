@@ -40,6 +40,7 @@ from hcs_trader.data.kraken import (
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.data.runtime import IngestionService
+from hcs_trader.data.source_registry import load_source_registry
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
 from hcs_trader.domain.market_data import DataQuality
@@ -114,6 +115,7 @@ from hcs_trader.wallets import (
     UtxoNetwork,
     WalletUnavailable,
 )
+from hcs_trader.webfetch import SafeFetcher, SafeFetchError
 
 
 def local_store() -> AuditStore:
@@ -577,9 +579,17 @@ def _build_app(
     recovery: Any,
     spot_exec: Any,
 ) -> Any:
+    fetcher = None
+    if network_policy is not None and network_policy.mode is not SystemMode.OFFLINE:
+        fetcher = SafeFetcher(
+            build_http_client(network_policy, follow_redirects=False),
+            load_source_registry(),
+            contact_url="https://hcs.media/contact",
+        )
     return create_app(
         store,
         Path(__file__).with_name("ui_assets"),
+        webfetch=fetcher,
         ingestion=ingestion,
         network_policy=network_policy,
         quote_service=quotes,
@@ -904,6 +914,41 @@ def main() -> None:
         "selftest", help="Run the offline installation self-test"
     )
     selftest_parser.add_argument("--trip-and-die", type=Path, help=argparse.SUPPRESS)
+    commands.add_parser(
+        "eval-model",
+        help="Run offline model-boundary release gates (schema, citation, injection)",
+    )
+    webfetch_parser = commands.add_parser(
+        "webfetch",
+        help="Fetch one registered source by id (DATA_ONLY, untrusted output)",
+    )
+    webfetch_parser.add_argument("source_id")
+    commands.add_parser(
+        "sources",
+        help="List registered external sources and verification state (offline)",
+    )
+    size_parser = commands.add_parser(
+        "size", help="Side-effect-free bounded long-spot sizing preview"
+    )
+    for argument in (
+        "hot-equity",
+        "entry-price",
+        "invalidation-price",
+        "risk-fraction",
+        "max-position-notional",
+        "available-quote",
+    ):
+        size_parser.add_argument(f"--{argument}", required=True)
+    size_parser.add_argument("--cost-per-unit", default="0")
+    size_parser.add_argument("--min-quantity", default="0")
+    costs_parser = commands.add_parser(
+        "costs", help="Side-effect-free shared cost-model preview"
+    )
+    costs_parser.add_argument("--reference-price", required=True)
+    costs_parser.add_argument("--side", choices=["buy", "sell"], required=True)
+    costs_parser.add_argument("--fee-bps", default="25")
+    costs_parser.add_argument("--spread-bps", default="10")
+    costs_parser.add_argument("--slippage-bps", default="5")
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1225,6 +1270,136 @@ def main() -> None:
         create_mcp_server(mcp_store.path).run(transport="stdio")
     elif arguments.command == "mcp-http":
         mcp_http_command(arguments)
+    elif arguments.command == "costs":
+        from hcs_trader.cost_model import CostModel
+
+        try:
+            model = CostModel(
+                fee_bps=Decimal(arguments.fee_bps),
+                spread_bps=Decimal(arguments.spread_bps),
+                slippage_bps=Decimal(arguments.slippage_bps),
+            )
+            price = model.execution_price(
+                Decimal(arguments.reference_price), arguments.side
+            )
+        except (ValueError, ArithmeticError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
+        print(
+            json.dumps(
+                {
+                    "fee_rate": str(model.fee_rate),
+                    "impact_rate": str(model.impact_rate),
+                    "execution_price": str(price),
+                    "authorization": "NONE",
+                },
+                indent=2,
+            )
+        )
+    elif arguments.command == "size":
+        from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
+
+        try:
+            result = size_long_position(
+                SizingInput(
+                    hot_equity=Decimal(arguments.hot_equity),
+                    entry_price=Decimal(arguments.entry_price),
+                    invalidation_price=Decimal(arguments.invalidation_price),
+                    risk_fraction=Decimal(arguments.risk_fraction),
+                    max_position_notional=Decimal(arguments.max_position_notional),
+                    available_quote=Decimal(arguments.available_quote),
+                    estimated_cost_per_unit=Decimal(arguments.cost_per_unit),
+                    min_quantity=Decimal(arguments.min_quantity),
+                )
+            )
+        except (SizingRejected, ArithmeticError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
+        print(
+            json.dumps(
+                {
+                    "quantity": str(result.quantity),
+                    "notional": str(result.notional),
+                    "risk_amount": str(result.risk_amount),
+                    "risk_per_unit": str(result.risk_per_unit),
+                    "authorization": "NONE",
+                },
+                indent=2,
+            )
+        )
+    elif arguments.command == "sources":
+        registry = load_source_registry()
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": spec.id,
+                        "format": spec.format,
+                        "language": spec.language,
+                        "api_key_required": spec.api_key_required,
+                        "enabled": spec.usable,
+                        "attribution": spec.attribution,
+                        "verification_result": spec.verification.result,
+                    }
+                    for spec in registry.all()
+                ],
+                indent=2,
+            )
+        )
+    elif arguments.command == "webfetch":
+
+        async def _fetch_registered() -> None:
+            policy = NetworkPolicy(SystemMode.DATA_ONLY)
+            async with SafeFetcher(
+                build_http_client(policy, follow_redirects=False),
+                load_source_registry(),
+                contact_url="https://hcs.media/contact",
+            ) as fetcher:
+                document = await fetcher.fetch(arguments.source_id)
+                print(
+                    json.dumps(
+                        {
+                            **fetcher.document_envelope(document),
+                            "url": document.url,
+                            "fetched_at": document.fetched_at.isoformat(),
+                            "from_cache": document.from_cache,
+                        },
+                        indent=2,
+                    )
+                )
+
+        try:
+            asyncio.run(_fetch_registered())
+        except SafeFetchError as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
+    elif arguments.command == "eval-model":
+        from hcs_trader.agents.eval import EvalNotReady, assert_release_ready, run_eval
+
+        eval_report = run_eval()
+        print(
+            json.dumps(
+                {
+                    "passed": eval_report.passed,
+                    "ratio": eval_report.ratio,
+                    "threshold": eval_report.threshold,
+                    "results": [
+                        {
+                            "name": result.name,
+                            "category": result.category.value,
+                            "passed": result.passed,
+                        }
+                        for result in eval_report.results
+                    ],
+                },
+                indent=2,
+            )
+        )
+        try:
+            assert_release_ready(eval_report)
+        except EvalNotReady as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
     elif arguments.command == "selftest":
         from hcs_trader import selftest
 

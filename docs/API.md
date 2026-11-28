@@ -45,6 +45,8 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | GET | `/api/v1/strategies` | Strategy candidates (alias view of the candidate list) |
 | GET | `/api/v1/strategies/{strategy_id}/metrics` | Latest shadow-run metrics for a candidate |
 | POST | `/api/v1/orders/preview` | Side-effect-free paper order preview using the submission rules |
+| POST | `/api/v1/quant/size` | Side-effect-free bounded long-spot sizing preview from explicit Decimal inputs; returns `authorization: NONE` and never submits or authorizes an order |
+| POST | `/api/v1/quant/costs` | Side-effect-free preview of the shared fee/spread/slippage model; returns exact Decimal rates, execution price and `authorization: NONE` |
 | GET | `/api/v1/orders/{order_id}` | One spot order or paper fill by identifier |
 | POST | `/api/v1/orders/live` | Alias of `/api/v1/orders/spot`; same gates and risk path |
 | GET | `/api/v1/orders/spot` | Spot order list and lifecycle states |
@@ -60,6 +62,11 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | POST | `/api/v1/strategies/candidates/{candidate_id}/shadow-run` | Run a shadow replay |
 | GET | `/api/v1/strategies/candidates/{candidate_id}/shadow-runs` | Shadow run history |
 | GET | `/api/v1/strategies/candidates/{candidate_id}/canary-approval` | Canary authorization state |
+| GET | `/api/v1/system/stream` | Loopback Server-Sent Events for the current mode, pause state and UTC timestamp. `max_events` bounds the stream for tests and clients; no external data is fetched |
+| GET | `/api/v1/webfetch/sources` | Registered external sources with verification state; all shipped sources start disabled |
+| GET | `/api/v1/webfetch/{source_id}` | Fetch one registered source by id. The caller cannot supply a URL or path; results are marked `UNTRUSTED`, raw markup is never returned and unverified sources return 403 |
+
+`GET /api/v1/news/search` and `GET /api/v1/audit/events` accept an opaque `cursor` and return `X-Next-Cursor` plus `X-Total-Count`. All `GET` responses under `/api/v1/` carry a content `ETag`; sending `If-None-Match` returns `304` without a body. Streaming responses are excluded. The committed OpenAPI snapshot is checked by `tests/test_openapi_snapshot.py`.
 
 Live order submission passes the same deterministic risk engine as every other path and is off by default.
 

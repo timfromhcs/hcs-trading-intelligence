@@ -37,11 +37,13 @@ Tools use the names from the product brief. Earlier names stay registered as ali
 
 | Tier | Tools |
 |---|---|
-| `READ` | `market.get_quote`, `market.get_candles`, `market.get_orderbook_snapshot`, `news.search`, `news.get_event_timeline`, `macro.get_series`, `portfolio.get_snapshot`, `wallet.get_addresses`, `wallet.get_balances`, `strategy.list`, `risk.get_status`, `system.get_health`, `data.get_source_status` (per-source freshness, breaker state and retry timing from the audit database), `quant.calculate_indicators`, `quant.compare_strategy_candidates` and the earlier read tools above |
+| `READ` | `market.get_quote`, `market.get_candles`, `market.get_orderbook_snapshot`, `news.search`, `news.get_event_timeline`, `macro.get_series`, `portfolio.get_snapshot`, `wallet.get_addresses`, `wallet.get_balances`, `strategy.list`, `risk.get_status`, `system.get_health`, `data.get_source_status` (per-source freshness, breaker state and retry timing from the audit database), `quant.calculate_indicators`, `quant.compare_strategy_candidates`, `quant.size_position` (read-only bounded sizing preview, `authorization: NONE`), `quant.cost_preview` (read-only shared fee/spread/slippage preview), `news.search_page`, `webfetch.list_sources`, `webfetch.get` and the earlier read tools above |
 | `RESEARCH` | `quant.run_backtest`, `research.create_candidate` (needs an `idempotency_key`; registers a `RESEARCH` stage candidate only) |
 | `PAPER_TRADE` | `orders.preview` (writes nothing), `orders.place_paper` (needs an `idempotency_key`; repeats return the first fill) |
 | `ADMIN_LOCAL` | `system.pause` (sets the durable pause; there is no resume tool) |
 | `LIVE_TRADE` | none. `orders.place_live` and `swaps.*` do not exist on this server |
+
+Typed read tools (`news.search_page`, `webfetch.list_sources`, `webfetch.get`) declare an output schema and return `structuredContent`. `news.search_page` and `webfetch.list_sources` take an opaque cursor plus a bounded `limit`; `news.search_page` also supports `fields` projection. Web fetch tools accept only a registered `source_id` — callers cannot supply a URL or path — and always mark returned text as untrusted. All shipped sources are disabled until verified.
 
 The server opens the database read-only. `research.create_candidate`, `orders.place_paper`, `system.pause` and the persistence step of `quant.run_backtest` need a writable store (and, for paper orders, a quote feed) passed to `create_mcp_server`; without them they fail with `Write access is not configured for this MCP server`. REST and MCP call the same `ApplicationService` in `src/hcs_trader/application/`.
 

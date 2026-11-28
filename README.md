@@ -2,7 +2,7 @@
 
 Made with ❤️ by HCS.media.
 
-Version 0.2.0 is a pre-release. It is not `v1.0.0`. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work.
+Version 1.1.0-rc.1 is a release candidate. It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work.
 
 ## 1. What it is, and what it is not
 
@@ -101,7 +101,7 @@ The wheel is published through GitHub releases only. A PyPI release has not been
 
 ```sh
 python -m venv .venv
-python -m pip install ./hcs_trader-0.2.0-py3-none-any.whl
+python -m pip install ./hcs_trader-1.1.0rc1-py3-none-any.whl
 hcs-trader serve
 ```
 
@@ -131,7 +131,7 @@ Build the frontend before `uv build` so the dashboard is packaged with the wheel
 
 ## 7. Command line
 
-Common commands: `serve`, `import-candles`, `import-news`, `import-macro`, `import-fred`, `research-brief`, `research-history`, `research-watch`, `freeze-research`, `score-holdout`, `strategy-list`, `strategy-show`, `strategy-promote`, `strategy-shadow-run`, `strategy-shadow-history`, `strategy-shadow-watch`, `pause-execution`, `resume-execution`, `eth-balance`, `sol-balance`, `btc-balance`, `ltc-balance`, `dgb-balance`, `tx-status`, `kraken-validate`, `spot-canary-allow`, `spot-canary-submit`, `spot-canary-revoke` and `mcp`. Run `hcs-trader --help` for the current list.
+Common commands: `serve`, `import-candles`, `import-news`, `import-macro`, `import-fred`, `research-brief`, `research-history`, `research-watch`, `freeze-research`, `score-holdout`, `strategy-list`, `strategy-show`, `strategy-promote`, `strategy-shadow-run`, `strategy-shadow-history`, `strategy-shadow-watch`, `pause-execution`, `resume-execution`, `eth-balance`, `sol-balance`, `btc-balance`, `ltc-balance`, `dgb-balance`, `tx-status`, `kraken-validate`, `spot-canary-allow`, `spot-canary-submit`, `spot-canary-revoke`, `mcp`, `mcp-http`, `selftest`, `eval-model`, `sources`, `webfetch`, `size`, `costs`, `live-status`, `live-enable` and `live-revoke`. Run `hcs-trader --help` for the current list. The `size`, `costs`, `sources` and `eval-model` commands are side-effect-free; `size` and `costs` return `authorization: NONE`.
 
 ## 8. API and MCP
 
@@ -250,3 +250,4 @@ Licensed under Apache-2.0. Runtime dependencies include cryptography, defusedxml
 ## 20. Credits
 
 Made with love by timfromhcs and hcsmedia.
+

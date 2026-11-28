@@ -17,6 +17,12 @@ Every source has a registry row. A source marked Planned has no adapter, and its
 
 All sources are disabled by default. Feed text is untrusted input. Do not scrape paywalled pages or bypass robots rules.
 
+### Wave 2 registry and web fetch
+
+`src/hcs_trader/data/sources.json` is a versioned machine-readable registry of additional candidates (ECB, FRED, BLS, World Bank, Fed, SEC, CFTC, ESMA, European Commission, BaFin, BEA, Treasury, GDELT and exchange status feeds). Every entry records owner URL, format, language, key requirement, terms URL, attribution, a request budget and a verification block with endpoint, check date, fixture reference and robots result. **All entries ship disabled, `pending` and unverified**: no candidate may be fetched until a recorded fixture and an operator verification exist. The registry is exposed at `GET /api/v1/webfetch/sources` and MCP `webfetch.list_sources`.
+
+`hcs_trader.webfetch` accepts only a registered `source_id`; callers cannot supply URLs or paths. It resolves DNS, requires globally routable addresses, refuses userinfo, non-standard ports and redirects, re-resolves after retrieval to detect rebinding, obeys robots.txt (5xx means disallow), uses conditional GET and enforces hard size and time caps. Fetched text is sanitized by `data/untrusted.py` and marked `UNTRUSTED`. `GET /api/v1/webfetch/{source_id}`, MCP `webfetch.get` and `hcs-trader webfetch <source_id>` expose only metadata and the marked text, never raw markup. The CLI always uses `DATA_ONLY` mode and fails closed for disabled or unknown sources. Coinbase Exchange public REST is implemented behind the same reviewed host policy; Binance market data remains disabled pending a jurisdiction check.
+
 ## Ingestion runtime
 
 - Background polling is opt-in: `hcs-trader serve --ingest-feeds`. The default stays off, so tests and the default PAPER setup make no feed requests. The scheduler runs inside the FastAPI lifespan and is cancelled on shutdown. It polls only the existing Federal Reserve and ECB providers. Mode is `PAPER` with `--paper-market-data`, otherwise `DATA_ONLY`. In `OFFLINE` mode the scheduler never polls. The HTTP client enforces the network allowlist.

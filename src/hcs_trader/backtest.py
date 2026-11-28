@@ -9,6 +9,7 @@ from itertools import pairwise
 from random import Random
 from typing import Literal
 
+from hcs_trader.cost_model import CostModel
 from hcs_trader.domain.market_data import Candle
 
 STRATEGY = "sma-trend-1"
@@ -167,8 +168,8 @@ def _replay(
     equity_curve: list[Decimal] = []
     exposed: list[bool] = []
     closes: list[Decimal] = []
-    fee_rate = config.fee_bps / 10_000
-    impact = (config.spread_bps / 2 + config.slippage_bps) / 10_000
+    costs = CostModel.from_config(config)
+    fee_rate = costs.fee_rate
 
     for index, candle in enumerate(candles):
         if index >= start:
@@ -186,7 +187,7 @@ def _replay(
                     side = "sell"
                 elif candle.low <= stop_price:
                     side, reference = "sell", stop_price
-            price = reference * (1 + impact if side == "buy" else 1 - impact)
+            price = costs.execution_price(reference, side)
             if side == "buy":
                 requested = (
                     cash * config.allocation / (price * (1 + fee_rate))
@@ -201,8 +202,8 @@ def _replay(
             filled = filled.quantize(_QUANTITY_STEP, rounding=ROUND_DOWN)
             notional = filled * price
             if notional >= config.min_notional:
-                fee = notional * fee_rate
-                slippage_cost += filled * reference * impact
+                fee = costs.fee(notional)
+                slippage_cost += costs.slippage_cost(filled, reference)
                 if side == "buy":
                     entry_price = (entry_price * quantity + price * filled) / (
                         quantity + filled

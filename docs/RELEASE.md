@@ -28,7 +28,7 @@ CodeQL runs on release branches and again on the tagged source before draft asse
 
 Tag a commit on `main` as `vX.Y.Z` (or `vX.Y.Z-rc.N`, which is marked pre-release). `.github/workflows/release.yml` then:
 
-1. re-runs every gate in `ci.yml` (lint, types, tests, security scans, native desktop builds) on the tagged commit,
+1. re-runs every gate in `ci.yml` (lint, types, tests, security scans, native desktop builds) on the tagged commit. The local gate runner `scripts/run_gates.py` also executes `hcs-trader eval-model`; a failing schema, citation or injection case blocks the release,
 2. checks that the tag equals the `pyproject.toml` version and is reachable from `main`,
 3. builds the wheel and sdist, a CycloneDX SBOM (`scripts/generate_sbom.py`) and smoke-tests both distributions in clean environments, including a Unicode and space data path, the OpenAPI schema and an MCP stdio tool listing,
 4. writes `SHA256SUMS` and rejects any wheel or sdist that contains databases, keystores, model files, `.env` files or private-key content (`scripts/verify_release.py`),

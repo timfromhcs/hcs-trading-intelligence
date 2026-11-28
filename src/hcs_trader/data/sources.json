@@ -1,0 +1,310 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-27",
+  "sources": [
+    {
+      "id": "ecb-sdmx",
+      "url": "https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A",
+      "format": "sdmx",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://data.ecb.europa.eu/help/terms-conditions",
+      "attribution": "European Central Bank, ECB Data Portal (SDMX)",
+      "requests_per_minute": 10,
+      "verification": {
+        "endpoint": "ECB Data Portal SDMX EXR",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/ecb-sdmx-2026-11-22.json",
+        "robots": "pending",
+        "note": "Candidate only; no fixture or operator approval recorded."
+      }
+    },
+    {
+      "id": "fred-fredgraph",
+      "url": "https://fred.stlouisfed.org/graph/fredgraph.csv",
+      "format": "csv",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://fred.stlouisfed.org/docs/api/terms_of_use.html",
+      "attribution": "FRED, Federal Reserve Bank of St. Louis",
+      "requests_per_minute": 10,
+      "verification": {
+        "endpoint": "fredgraph.csv keyless series",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/fred-fredgraph-2026-11-22.csv",
+        "robots": "pending",
+        "note": "Keyless CSV form; attribution and retention terms to be rechecked."
+      }
+    },
+    {
+      "id": "fred-api",
+      "url": "https://api.stlouisfed.org/fred/series/observations",
+      "format": "json",
+      "language": "en",
+      "api_key_required": true,
+      "enabled": false,
+      "terms_url": "https://fred.stlouisfed.org/docs/api/terms_of_use.html",
+      "attribution": "FRED, Federal Reserve Bank of St. Louis",
+      "requests_per_minute": 10,
+      "verification": {
+        "endpoint": "FRED API observations",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/fred-api-2026-11-22.json",
+        "robots": "pending",
+        "note": "Bring-your-own operator key; never stored in the registry."
+      }
+    },
+    {
+      "id": "bls-v2",
+      "url": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
+      "format": "json",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.bls.gov/developers/api_terms.htm",
+      "attribution": "U.S. Bureau of Labor Statistics, public API v2",
+      "requests_per_minute": 10,
+      "verification": {
+        "endpoint": "BLS public API v2",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/bls-v2-2026-11-22.json",
+        "robots": "pending",
+        "note": "Keyless candidate; daily limits to be verified."
+      }
+    },
+    {
+      "id": "world-bank",
+      "url": "https://api.worldbank.org/v2/country/DEU/indicator/FP.CPI.TOTL",
+      "format": "json",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://datahelpdesk.worldbank.org/knowledgebase/articles/889392",
+      "attribution": "World Bank Open Data",
+      "requests_per_minute": 10,
+      "verification": {
+        "endpoint": "World Bank indicator API",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/world-bank-2026-11-22.json",
+        "robots": "pending",
+        "note": "Keyless candidate."
+      }
+    },
+    {
+      "id": "fed-press",
+      "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.federalreserve.gov/aboutthefed.htm",
+      "attribution": "Board of Governors of the Federal Reserve System",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "Federal Reserve press RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/fed-press-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate."
+      }
+    },
+    {
+      "id": "sec-press",
+      "url": "https://www.sec.gov/news/pressreleases.rss",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.sec.gov/about/privacy-statement",
+      "attribution": "U.S. Securities and Exchange Commission",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "SEC press releases RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/sec-press-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate; honest user agent required."
+      }
+    },
+    {
+      "id": "cftc-press",
+      "url": "https://www.cftc.gov/PressRoom/PressReleases/rss",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.cftc.gov/about",
+      "attribution": "U.S. Commodity Futures Trading Commission",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "CFTC press releases RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/cftc-press-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate."
+      }
+    },
+    {
+      "id": "esma-news",
+      "url": "https://www.esma.europa.eu/rss/news",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.esma.europa.eu/about-esma/legal-information",
+      "attribution": "European Securities and Markets Authority",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "ESMA news RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/esma-news-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate."
+      }
+    },
+    {
+      "id": "eu-commission",
+      "url": "https://ec.europa.eu/commission/presscorner/api/rss?language=en",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://commission.europa.eu/legal-notice_en",
+      "attribution": "European Commission, Press Corner",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "European Commission Press Corner RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/eu-commission-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate."
+      }
+    },
+    {
+      "id": "bafin",
+      "url": "https://www.bafin.de/SharedDocs/Downloads/DE/Meldungen/meldungen_de.rss",
+      "format": "rss",
+      "language": "de",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.bafin.de/DE/Service/impressum/impressum_node.html",
+      "attribution": "Bundesanstalt für Finanzdienstleistungsaufsicht (BaFin)",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "BaFin messages RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/bafin-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official German regulator feed candidate."
+      }
+    },
+    {
+      "id": "bea-news",
+      "url": "https://www.bea.gov/news/rss.xml",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.bea.gov/about/policies-and-disclaimers",
+      "attribution": "U.S. Bureau of Economic Analysis",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "BEA news RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/bea-news-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate."
+      }
+    },
+    {
+      "id": "us-treasury",
+      "url": "https://home.treasury.gov/rss/press/releases.xml",
+      "format": "rss",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://home.treasury.gov/about/site-policies",
+      "attribution": "U.S. Department of the Treasury",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "Treasury press releases RSS",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/us-treasury-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Official release feed candidate."
+      }
+    },
+    {
+      "id": "gdelt-doc",
+      "url": "https://api.gdeltproject.org/api/v2/doc/doc",
+      "format": "json",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://www.gdeltproject.org/about.html#terms",
+      "attribution": "GDELT Project, DOC 2.0 (discovery only)",
+      "requests_per_minute": 10,
+      "verification": {
+        "endpoint": "GDELT DOC 2.0",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/gdelt-doc-2026-11-22.json",
+        "robots": "pending",
+        "note": "At most one request per 6 seconds; discovery, not verified truth."
+      }
+    },
+    {
+      "id": "kraken-status",
+      "url": "https://status.kraken.io/api/v2/status.json",
+      "format": "json",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://status.kraken.io/",
+      "attribution": "Kraken status page",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "Kraken status JSON",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/kraken-status-2026-11-22.json",
+        "robots": "pending",
+        "note": "Structured venue state only; never a trading endpoint."
+      }
+    },
+    {
+      "id": "hcs-releases",
+      "url": "https://github.com/timfromhcs/hcs-trading-intelligence/releases.atom",
+      "format": "atom",
+      "language": "en",
+      "api_key_required": false,
+      "enabled": false,
+      "terms_url": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+      "attribution": "HCS Trading Intelligence GitHub releases",
+      "requests_per_minute": 6,
+      "verification": {
+        "endpoint": "GitHub releases Atom feed",
+        "checked_at": "2026-11-22",
+        "result": "pending",
+        "fixture_ref": "fixtures/sources/hcs-releases-2026-11-22.xml",
+        "robots": "pending",
+        "note": "Release notes feed; untrusted text."
+      }
+    }
+  ]
+}

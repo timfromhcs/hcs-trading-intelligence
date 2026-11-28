@@ -6,6 +6,7 @@ from zipfile import ZipFile
 import generate_sbom
 import license_inventory
 import pytest
+import run_gates
 import smoke_desktop
 import verify_release
 from collect_release import collect, collect_extras
@@ -18,6 +19,20 @@ from hcs_trader.live_readiness import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_default_gates_include_the_model_boundary_eval() -> None:
+    names = [name for name, _ in run_gates.DEFAULT_GATES]
+    assert len(names) == len(set(names))
+    for required in (
+        "ruff-check",
+        "mypy",
+        "pytest",
+        "coverage-floors",
+        "eval-model",
+        "secret-scan",
+    ):
+        assert required in names
 
 
 @pytest.mark.parametrize("persistent", [False, True])

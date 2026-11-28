@@ -1,6 +1,7 @@
 """Read-only status endpoints for the loopback application."""
 
 import asyncio
+import base64
 import csv
 import ipaddress
 import json
@@ -16,6 +17,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
@@ -23,6 +26,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as PathParameter
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
@@ -48,11 +52,13 @@ from hcs_trader.application.service import (
     spot_order_dict,
 )
 from hcs_trader.backtest import BacktestConfig, BacktestResult
+from hcs_trader.cost_model import CostModel
 from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
 from hcs_trader.data.quotes import QuoteService
 from hcs_trader.data.runtime import IngestionService
+from hcs_trader.data.source_registry import load_source_registry
 from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.execution import SpotOrder, SpotOrderType, SpotSide
 from hcs_trader.domain.lifecycle import OrderState
@@ -88,10 +94,12 @@ from hcs_trader.promotion import (
     promote_strategy_candidate,
 )
 from hcs_trader.risk import RiskRejected
+from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
 from hcs_trader.skills import list_skills
 from hcs_trader.spot_execution import KrakenSpotExecution
 from hcs_trader.storage import AuditStore, ExecutionPause
 from hcs_trader.walk_forward import WalkForwardConfig, WalkForwardResult
+from hcs_trader.webfetch import SafeFetcher, SafeFetchError, SourceDisabled
 
 _logger = logging.getLogger(__name__)
 LOOPBACK_HOST = "127.0.0.1"
@@ -402,8 +410,153 @@ class OrderPreviewRequest(BaseModel):
     idempotency_key: str | None = None
 
 
+class CostRequest(BaseModel):
+    fee_bps: Decimal = Decimal("25")
+    spread_bps: Decimal = Decimal("10")
+    slippage_bps: Decimal = Decimal("5")
+    reference_price: Decimal
+    side: Literal["buy", "sell"]
+
+
+class SizingRequest(BaseModel):
+    hot_equity: Decimal
+    entry_price: Decimal
+    invalidation_price: Decimal
+    risk_fraction: Decimal
+    max_position_notional: Decimal
+    available_quote: Decimal
+    estimated_cost_per_unit: Decimal = Decimal("0")
+    min_quantity: Decimal = Decimal("0")
+    quantity_decimals: int = 8
+
+
 class SystemCapabilities(Capabilities):
     chains: list[ChainCapability]
+
+
+def _app_version() -> str:
+    """Report the installed package version in OpenAPI; never hard-code it."""
+    try:
+        return package_version("hcs-trader")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
+def _cursor_offset(cursor: str | None) -> int:
+    """Decode an opaque pagination cursor; malformed values fail closed."""
+    if cursor is None:
+        return 0
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(422, "Invalid cursor") from error
+    if not decoded.startswith("o:") or not decoded[2:].isdigit():
+        raise HTTPException(422, "Invalid cursor")
+    offset = int(decoded[2:])
+    if offset < 0 or offset > 100_000:
+        raise HTTPException(422, "Invalid cursor")
+    return offset
+
+
+def _set_page_headers(
+    response: Response, *, offset: int, returned: int, has_more: bool
+) -> None:
+    response.headers["X-Total-Count"] = str(offset + returned + (1 if has_more else 0))
+    if has_more:
+        end = offset + returned
+        response.headers["X-Next-Cursor"] = base64.urlsafe_b64encode(
+            f"o:{end}".encode("ascii")
+        ).decode("ascii")
+
+
+class _ConditionalGet:
+    """Add a content ETag to GET responses and answer matching 304s.
+
+    Streaming responses and bodies above the cap are passed through untouched.
+    The hardening middleware still runs for every request.
+    """
+
+    def __init__(self, app: Any, *, max_bytes: int = 524_288) -> None:
+        self._app = app
+        self._max_bytes = max_bytes
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") != "GET"
+            or not str(scope.get("path", "")).startswith("/api/v1/")
+        ):
+            await self._app(scope, receive, send)
+            return
+        request_headers = {
+            key.decode("ascii").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        if_none_match = request_headers.get("if-none-match")
+        start: dict[str, Any] | None = None
+        body = bytearray()
+        passthrough = False
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal start, passthrough
+            if message["type"] == "http.response.start":
+                content_type = next(
+                    (
+                        value.decode("latin-1")
+                        for key, value in message.get("headers", [])
+                        if key.decode("ascii").lower() == "content-type"
+                    ),
+                    "",
+                )
+                if message["status"] != 200 or "text/event-stream" in content_type:
+                    passthrough = True
+                    await send(message)
+                    return
+                start = message
+                return
+            if message["type"] == "http.response.body" and not passthrough:
+                chunk = message.get("body", b"")
+                body.extend(chunk)
+                if len(body) > self._max_bytes or message.get("more_body"):
+                    passthrough = True
+                    if start is not None:
+                        await send(start)
+                    await send(message)
+                    return
+                if start is None:
+                    await send(message)
+                    return
+                etag = '"' + sha256(bytes(body)).hexdigest() + '"'
+                headers = [
+                    (key, value)
+                    for key, value in start.get("headers", [])
+                    if key.decode("ascii").lower() not in ("etag", "content-length")
+                ]
+                if if_none_match is not None and if_none_match == etag:
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 304,
+                            "headers": headers + [(b"etag", etag.encode("ascii"))],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": b""})
+                    return
+                await send(
+                    {
+                        **start,
+                        "headers": headers
+                        + [
+                            (b"etag", etag.encode("ascii")),
+                            (b"content-length", str(len(body)).encode("ascii")),
+                        ],
+                    }
+                )
+                await send(message)
+                return
+            await send(message)
+
+        await self._app(scope, receive, send_wrapper)
 
 
 def _http_error(error: ApplicationError) -> HTTPException:
@@ -443,6 +596,7 @@ def create_app(
     rate_window_seconds: float = 60.0,
     bound_port: int | None = None,
     extra_allowed_hosts: tuple[str, ...] = (),
+    webfetch: SafeFetcher | None = None,
 ) -> FastAPI:
     token = api_token if api_token is not None else os.environ.get(API_TOKEN_ENV)
     if token is not None and len(token) < 16:
@@ -499,9 +653,12 @@ def create_app(
         finally:
             if ingestion is not None:
                 await ingestion.stop()
+            if webfetch is not None:
+                await webfetch.aclose()
 
     app = FastAPI(
         title="HCS Trading Intelligence",
+        version=_app_version(),
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -514,6 +671,7 @@ def create_app(
         rate_limit=write_rate_limit,
         window=rate_window_seconds,
     )
+    app.add_middleware(_ConditionalGet)
 
     @app.get("/api/v1/health")
     def health() -> Health:
@@ -602,6 +760,52 @@ def create_app(
             chains=service.chain_capabilities(),
         )
 
+    @app.get("/api/v1/system/stream")
+    async def system_stream(
+        request: Request,
+        max_events: Annotated[int, Query(ge=0, le=100)] = 0,
+    ) -> StreamingResponse:
+        """Loopback SSE for mode, pause state and freshness; no external data."""
+
+        async def events() -> AsyncIterator[str]:
+            emitted = 0
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    payload = {
+                        "status": status().model_dump(mode="json"),
+                        "paused": execution_pause().paused,
+                        "at": datetime.now(UTC).isoformat(),
+                    }
+                    yield "event: snapshot\ndata: "
+                    yield json.dumps(payload, sort_keys=True)
+                    yield "\n\n"
+                except (sqlite3.Error, ValidationError):
+                    yield 'event: error\ndata: {"detail": "status unavailable"}\n\n'
+                emitted += 1
+                if max_events and emitted >= max_events:
+                    return
+                try:
+                    disconnected = await asyncio.wait_for(
+                        request.is_disconnected(), timeout=5
+                    )
+                except TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if disconnected:
+                    return
+                yield "event: ping\ndata: {}\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.get("/api/v1/system/chains")
     def chain_capabilities() -> list[ChainCapability]:
         return service.chain_capabilities()
@@ -619,6 +823,53 @@ def create_app(
             ingestion_enabled=ingestion is not None,
             ingestion_mode=ingestion.network_policy.mode if ingestion else None,
         )
+
+    @app.get("/api/v1/webfetch/sources")
+    def registered_web_sources(response: Response) -> list[dict[str, Any]]:
+        """List registered external sources with their verification state."""
+        response.headers["Cache-Control"] = "no-store"
+        registry = load_source_registry()
+        return [
+            {
+                "id": spec.id,
+                "url": spec.url,
+                "format": spec.format,
+                "language": spec.language,
+                "api_key_required": spec.api_key_required,
+                "enabled": spec.usable,
+                "terms_url": spec.terms_url,
+                "attribution": spec.attribution,
+                "requests_per_minute": spec.requests_per_minute,
+                "verification_result": spec.verification.result,
+            }
+            for spec in registry.all()
+        ]
+
+    @app.get("/api/v1/webfetch/{source_id}")
+    async def fetch_registered_source(
+        source_id: Annotated[str, PathParameter(min_length=1, max_length=64)],
+        response: Response,
+    ) -> dict[str, Any]:
+        """Fetch a registered source; URLs and paths are never caller-supplied."""
+        response.headers["Cache-Control"] = "no-store"
+        if webfetch is None:
+            raise HTTPException(503, "Web fetch is not configured")
+        try:
+            document = await webfetch.fetch(source_id)
+        except SourceDisabled as error:
+            raise HTTPException(403, str(error)) from error
+        except SafeFetchError as error:
+            raise HTTPException(422, str(error)) from error
+        # Only metadata and marked text leave the fetch boundary; raw HTML is
+        # never returned to a client or model.
+        return {
+            **webfetch.document_envelope(document),
+            "url": document.url,
+            "status_code": document.status_code,
+            "content_type": document.content_type,
+            "fetched_at": document.fetched_at.isoformat(),
+            "from_cache": document.from_cache,
+        }
 
     @app.get("/api/v1/market/quotes")
     async def market_quote(
@@ -966,17 +1217,24 @@ def create_app(
     def list_audit_events(
         response: Response,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        cursor: Annotated[str | None, Query(max_length=256)] = None,
     ) -> list[AuditEventResponse]:
         response.headers["Cache-Control"] = "no-store"
+        offset = _cursor_offset(cursor)
         try:
-            events = store.list_audit_events(limit=limit)
+            events = store.list_audit_events(limit=min(offset + limit + 1, 1000))
+            page = events[offset : offset + limit]
+            has_more = len(events) > offset + limit
+            _set_page_headers(
+                response, offset=offset, returned=len(page), has_more=has_more
+            )
             return [
                 AuditEventResponse(
                     event_id=e.event_id,
                     recorded_at=e.recorded_at,
                     kind=e.kind,
                 )
-                for e in events
+                for e in page
             ]
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Audit event storage unavailable") from error
@@ -1142,13 +1400,60 @@ def create_app(
 
     @app.get("/api/v1/news/search")
     def news_search(
+        response: Response,
         q: Annotated[str, Query(min_length=1, max_length=100)],
         limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=256)] = None,
     ) -> list[NewsHit]:
+        offset = _cursor_offset(cursor)
         try:
-            return service.search_news(q, limit)
+            hits = service.search_news(q, min(offset + limit + 1, 1000))
+            page = hits[offset : offset + limit]
+            has_more = len(hits) > offset + limit
+            _set_page_headers(
+                response, offset=offset, returned=len(page), has_more=has_more
+            )
+            return page
         except ApplicationError as error:
             raise _http_error(error) from error
+
+    @app.post("/api/v1/quant/costs")
+    def cost_preview(payload: CostRequest) -> dict[str, Any]:
+        """Side-effect-free shared cost preview used by backtest and risk."""
+        try:
+            model = CostModel(
+                fee_bps=payload.fee_bps,
+                spread_bps=payload.spread_bps,
+                slippage_bps=payload.slippage_bps,
+            )
+            execution_price = model.execution_price(
+                payload.reference_price, payload.side
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        return {
+            "fee_rate": str(model.fee_rate),
+            "impact_rate": str(model.impact_rate),
+            "execution_price": str(execution_price),
+            "fee_on_notional": str(model.fee(execution_price)),
+            "authorization": "NONE",
+        }
+
+    @app.post("/api/v1/quant/size")
+    def size_position(payload: SizingRequest) -> dict[str, Any]:
+        """Side-effect-free bounded sizing preview; never authorizes an order."""
+        try:
+            result = size_long_position(SizingInput(**payload.model_dump()))
+        except SizingRejected as error:
+            raise HTTPException(422, str(error)) from error
+        return {
+            "quantity": str(result.quantity),
+            "notional": str(result.notional),
+            "risk_amount": str(result.risk_amount),
+            "risk_per_unit": str(result.risk_per_unit),
+            "bounds": list(result.bounds),
+            "authorization": "NONE",
+        }
 
     @app.get("/api/v1/portfolio/positions")
     def portfolio_positions() -> list[Position]:

@@ -1,6 +1,8 @@
+import json
 import re
 import shutil
 import subprocess  # noqa: S404
+import tomllib
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -33,6 +35,17 @@ def test_tracked_files_contain_no_secret_like_names() -> None:
 
 
 @pytest.mark.skipif(UV is None, reason="uv is required")
+def test_frontend_version_matches_python_version() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        python_version = str(tomllib.load(handle)["project"]["version"])
+    frontend = json.loads((ROOT / "frontend" / "package.json").read_text("utf-8"))
+
+    def normalize(value: str) -> str:
+        return re.sub(r"-rc\.(\d+)$", r"rc\1", value)
+
+    assert normalize(str(frontend["version"])) == normalize(python_version)
+
+
 @pytest.mark.skipif(UV is None, reason="uv is required")
 def test_built_wheel_contains_runtime_data(tmp_path: Path) -> None:
     assert UV is not None

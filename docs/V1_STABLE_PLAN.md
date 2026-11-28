@@ -1,7 +1,8 @@
 # Path to the next stable release
 
-Status: 2026-11-28. Current release candidate: **1.1.0-rc.2** (draft GitHub
-release, 16 verified assets, Vercel static UI preview). This document is the
+Status: 2026-11-28. Current release candidate: **1.1.0-rc.3** (draft GitHub
+release, 16 verified assets, Vercel static UI preview). Milestones C1–C4 are
+merged; A and B remain blocked as described below. This document is the
 execution plan from the RC to a stable `v1.1.0` tag. It does **not** relax any
 gate from [AGENTS.md](../AGENTS.md#18-v100-definition-of-done) or
 [the release assessment](V1_RELEASE_REPORT.md).

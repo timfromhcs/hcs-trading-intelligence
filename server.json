@@ -6,28 +6,29 @@
     "url": "https://github.com/timfromhcs/hcs-trading-intelligence",
     "source": "github"
   },
-  "version": "1.1.0-rc.2",
+  "version": "1.1.0-rc.3",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v1.1.0-rc.2/HCS-Trading-Intelligence-1.1.0-rc.2-windows-x64.mcpb",
+      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v1.1.0-rc.3/HCS-Trading-Intelligence-1.1.0-rc.3-windows-x64.mcpb",
       "fileSha256": "${SHA256_WINDOWS_X64}",
       "transport": { "type": "stdio" }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v1.1.0-rc.2/HCS-Trading-Intelligence-1.1.0-rc.2-macos-arm64.mcpb",
+      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v1.1.0-rc.3/HCS-Trading-Intelligence-1.1.0-rc.3-macos-arm64.mcpb",
       "fileSha256": "${SHA256_MACOS_ARM64}",
       "transport": { "type": "stdio" }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v1.1.0-rc.2/HCS-Trading-Intelligence-1.1.0-rc.2-linux-x64.mcpb",
+      "identifier": "https://github.com/timfromhcs/hcs-trading-intelligence/releases/download/v1.1.0-rc.3/HCS-Trading-Intelligence-1.1.0-rc.3-linux-x64.mcpb",
       "fileSha256": "${SHA256_LINUX_X64}",
       "transport": { "type": "stdio" }
     }
   ]
 }
+
 
 
 

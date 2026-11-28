@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Release candidate `1.1.0-rc.2` (Waves 1–5 foundations). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open. The next stable version plan is in [docs/V1_STABLE_PLAN.md](docs/V1_STABLE_PLAN.md).
+Release candidate `1.1.0-rc.3` (Waves 1–5 foundations, shared cost model, regime features, DNS pinning). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open. The next stable version plan is in [docs/V1_STABLE_PLAN.md](docs/V1_STABLE_PLAN.md).
 
 - Wave 3 security: optional DNS pinning in `webfetch` (enabled in app/CLI) connects to the validated IP with original Host/SNI; the network policy authorises from the original registry hostname. Offline integration tests cover both sides; KL-006 stays open until a live endpoint rehearsal.
 - Wave 4/5 MCP: duplicate legacy aliases can be hidden with `include_legacy_aliases=False`; they are deprecated and slated for removal in 1.2.0.

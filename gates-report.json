@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-11-28T09:31:33.074773+00:00",
-  "git_sha": "66a2ad51992d3ce972ef48c048852951e4ab87e3",
-  "all_passed": false,
+  "generated_at": "2026-11-28T09:34:36.874132+00:00",
+  "git_sha": "14444cbb5796c52d244f9e27cd36a548b95cc0de",
+  "all_passed": true,
   "gates": [
     {
       "name": "ruff-check",
@@ -66,19 +66,44 @@
         "--cov-report=term",
         "--cov-report=xml:coverage.xml"
       ],
-      "exit_code": 1,
-      "attempts": 3,
+      "exit_code": 0,
+      "attempts": 1,
       "attempt_exit_codes": [
-        1,
-        1,
-        1
+        0
       ],
-      "output_tail": "53     18    88%\nsrc\\hcs_trader\\spot_port.py                     11      0   100%\nsrc\\hcs_trader\\storage.py                      848     42    95%\nsrc\\hcs_trader\\strategy.py                     185     15    92%\nsrc\\hcs_trader\\utxo_psbt.py                    282     21    93%\nsrc\\hcs_trader\\walk_forward.py                  63      4    94%\nsrc\\hcs_trader\\wallet_addresses.py             123      8    93%\nsrc\\hcs_trader\\wallets.py                      467     43    91%\nsrc\\hcs_trader\\webfetch.py                     181     21    88%\n----------------------------------------------------------------\nTOTAL                                        11661   1162    90%\nCoverage XML written to file coverage.xml\nRequired test coverage of 80% reached. Total coverage: 90.04%\n=========================== short test summary info ===========================\nFAILED tests/security/test_forbidden_surface.py::test_rest_mutations_are_an_explicit_allowlist\n1 failed, 1261 passed, 6 skipped in 152.11s (0:02:32)\n",
+      "output_tail": "   92%\nsrc\\hcs_trader\\skills\\__init__.py               70      2    97%\nsrc\\hcs_trader\\solana_signing.py               209      4    98%\nsrc\\hcs_trader\\spot_execution.py               153     18    88%\nsrc\\hcs_trader\\spot_port.py                     11      0   100%\nsrc\\hcs_trader\\storage.py                      848     42    95%\nsrc\\hcs_trader\\strategy.py                     185     15    92%\nsrc\\hcs_trader\\utxo_psbt.py                    282     21    93%\nsrc\\hcs_trader\\walk_forward.py                  63      4    94%\nsrc\\hcs_trader\\wallet_addresses.py             123      8    93%\nsrc\\hcs_trader\\wallets.py                      467     43    91%\nsrc\\hcs_trader\\webfetch.py                     181     21    88%\n----------------------------------------------------------------\nTOTAL                                        11661   1163    90%\nCoverage XML written to file coverage.xml\nRequired test coverage of 80% reached. Total coverage: 90.03%\n1262 passed, 6 skipped in 143.71s (0:02:23)\n",
       "pytest_counts": {
-        "failed": 1,
-        "passed": 1261,
+        "passed": 1262,
         "skipped": 6
       }
+    },
+    {
+      "name": "coverage-floors",
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "python",
+        "scripts/check_coverage_floors.py"
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "domain/assets.py              100.00%  floor 90%\ndomain/execution.py            90.12%  floor 90%\ndomain/lifecycle.py           100.00%  floor 90%\ndomain/macro.py               100.00%  floor 90%\ndomain/market_data.py          98.68%  floor 90%\ndomain/markets.py              96.46%  floor 90%\ndomain/news.py                100.00%  floor 90%\ndomain/paper.py                92.75%  floor 90%\ndomain/signing.py              86.47%  floor 86%  (below 90: TODO)\ndomain/wallet.py              100.00%  floor 90%\ndomain/wallet_port.py         100.00%  floor 90%\nevm_signing.py                 85.07%  floor 85%  (below 90: TODO)\npaper_execution.py            100.00%  floor 90%\nrisk.py                        98.95%  floor 90%\nsigning.py                     75.16%  floor 75%  (below 90: TODO)\nsolana_signing.py              98.09%  floor 90%\nspot_execution.py              88.24%  floor 87%  (below 90: TODO)\nutxo_psbt.py                   92.55%  floor 90%\n\nAll per-module coverage floors met.\n"
+    },
+    {
+      "name": "secret-scan",
+      "command": [
+        "internal:secret-scan"
+      ],
+      "exit_code": 0,
+      "attempts": 1,
+      "attempt_exit_codes": [
+        0
+      ],
+      "output_tail": "clean"
     }
   ]
 }

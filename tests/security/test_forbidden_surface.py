@@ -54,6 +54,8 @@ def test_rest_mutations_are_an_explicit_allowlist(tmp_path: Path) -> None:
         "/api/v1/orders/spot",
         "/api/v1/orders/live",
         "/api/v1/orders/preview",
+        # Side-effect-free deterministic preview (no state write, authorization NONE).
+        "/api/v1/quant/size",
         "/api/v1/system/pause",
         "/api/v1/system/resume",
         "/api/v1/strategies/candidates",

@@ -7,7 +7,7 @@ The policy is enforced by a request event hook installed through
 from __future__ import annotations
 
 from enum import StrEnum
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 
@@ -72,7 +72,22 @@ def build_http_client(policy: NetworkPolicy, **kwargs: object) -> httpx2.AsyncCl
     """Create an AsyncClient that refuses requests the policy does not allow."""
 
     async def _guard(request: httpx2.Request) -> None:
-        policy.check(str(request.url))
+        pinned_host = request.extensions.get("hcs_pinned_host")
+        url = str(request.url)
+        if pinned_host:
+            # A pinned transport connects to a validated IP. Authorisation is
+            # still decided from the original, registry-controlled hostname.
+            parts = urlsplit(url)
+            url = urlunsplit(
+                (
+                    parts.scheme,
+                    str(pinned_host),
+                    parts.path,
+                    parts.query,
+                    parts.fragment,
+                )
+            )
+        policy.check(url)
 
     hooks = dict(kwargs.pop("event_hooks", {}) or {})  # type: ignore[call-overload]
     hooks["request"] = [_guard, *hooks.get("request", [])]

@@ -78,6 +78,7 @@ def _fetcher(
     *,
     resolver: Resolver = _global_resolver,
     max_bytes: int = 1_048_576,
+    pin_dns: bool = False,
     **source: object,
 ) -> SafeFetcher:
     return SafeFetcher(
@@ -86,6 +87,7 @@ def _fetcher(
         contact_url="https://hcs.media/contact",
         resolver=resolver,
         max_bytes=max_bytes,
+        pin_dns=pin_dns,
     )
 
 
@@ -148,6 +150,32 @@ def test_decimal_ip_host_is_refused(tmp_path: Path) -> None:
                 await fetcher.fetch("test-source")
 
     asyncio.run(exercise())
+
+
+def test_pinned_dns_connects_to_validated_ip_with_original_host(tmp_path: Path) -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, text="ok")
+
+    async def exercise_pinned() -> None:
+        fetcher = SafeFetcher(
+            httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+            _registry(tmp_path),
+            contact_url="https://hcs.media/contact",
+            resolver=_global_resolver,
+            pin_dns=True,
+        )
+        async with fetcher:
+            await fetcher.fetch("test-source")
+
+    asyncio.run(exercise_pinned())
+    target = next(request for request in seen if request.url.path == "/news")
+    assert target.url.host == _GLOBAL_IP
+    assert target.headers["host"] == "example.org"
+    assert target.extensions["sni_hostname"] == "example.org"
+    assert target.extensions["hcs_pinned_host"] == "example.org"
 
 
 def test_redirect_is_refused(tmp_path: Path) -> None:

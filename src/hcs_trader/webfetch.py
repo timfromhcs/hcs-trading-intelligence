@@ -123,6 +123,7 @@ class SafeFetcher:
         max_bytes: int = _DEFAULT_MAX_BYTES,
         timeout: float = _DEFAULT_TIMEOUT,
         source_path: Path | None = None,
+        pin_dns: bool = False,
     ) -> None:
         if max_bytes < 1024 or timeout <= 0:
             raise ValueError("Invalid fetch limits")
@@ -138,6 +139,28 @@ class SafeFetcher:
         self._robots: dict[str, tuple[datetime, bool]] = {}
         self._budgets: dict[str, RequestBudget] = {}
         self._source_path = source_path
+        self._pin_dns = pin_dns
+
+    def _pinned_target(
+        self,
+        url: str,
+        host: str,
+        port: int,
+        path: str,
+        address: str,
+        headers: dict[str, str],
+    ) -> tuple[str, dict[str, str], dict[str, str]]:
+        """Connect to the validated IP while keeping TLS and Host on the name."""
+        if not self._pin_dns or urlsplit(url).scheme != "https":
+            return url, headers, {}
+        display_host = f"[{address}]" if ":" in address else address
+        authority = display_host if port == 443 else f"{display_host}:{port}"
+        original_authority = host if port == 443 else f"{host}:{port}"
+        return (
+            f"https://{authority}{path}",
+            {**headers, "Host": original_authority},
+            {"sni_hostname": host, "hcs_pinned_host": host},
+        )
 
     async def __aenter__(self) -> "SafeFetcher":
         return self
@@ -227,10 +250,14 @@ class SafeFetcher:
         cached = self._cache.get(spec.id)
         headers = dict(conditional_headers(cached.cache if cached else None))
         headers["User-Agent"] = self.user_agent
+        request_url, request_headers, extensions = self._pinned_target(
+            spec.url, host, port, path, addresses[0], headers
+        )
         try:
             response = await self._client.get(
-                spec.url,
-                headers=headers,
+                request_url,
+                headers=request_headers,
+                extensions=extensions,
                 timeout=self._timeout,
                 follow_redirects=False,
             )

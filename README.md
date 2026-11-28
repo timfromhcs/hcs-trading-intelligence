@@ -2,7 +2,7 @@
 
 Made with ❤️ by HCS.media.
 
-Version 1.1.0-rc.3 is a release candidate, merged to `main` through [PR #6](https://github.com/timfromhcs/hcs-trading-intelligence/pull/6), [PR #7](https://github.com/timfromhcs/hcs-trading-intelligence/pull/7), [PR #8](https://github.com/timfromhcs/hcs-trading-intelligence/pull/8) and [PR #9](https://github.com/timfromhcs/hcs-trading-intelligence/pull/9), [PR #10](https://github.com/timfromhcs/hcs-trading-intelligence/pull/10), [PR #11](https://github.com/timfromhcs/hcs-trading-intelligence/pull/11), [PR #12](https://github.com/timfromhcs/hcs-trading-intelligence/pull/12), [PR #13](https://github.com/timfromhcs/hcs-trading-intelligence/pull/13) and [PR #15](https://github.com/timfromhcs/hcs-trading-intelligence/pull/15), [PR #16](https://github.com/timfromhcs/hcs-trading-intelligence/pull/16), [PR #17](https://github.com/timfromhcs/hcs-trading-intelligence/pull/17), [PR #18](https://github.com/timfromhcs/hcs-trading-intelligence/pull/18), [PR #19](https://github.com/timfromhcs/hcs-trading-intelligence/pull/19), [PR #20](https://github.com/timfromhcs/hcs-trading-intelligence/pull/20) and [PR #21](https://github.com/timfromhcs/hcs-trading-intelligence/pull/21). The tag `v1.1.0-rc.3` produced a [draft release](https://github.com/timfromhcs/hcs-trading-intelligence/releases/tag/v1.1.0-rc.3) with native single-file executables, MCPB bundles, wheel, sdist, SBOM, provenance and checksums; the static UI preview is deployed at [hcs-trading-intelligence-ui.vercel.app](https://hcs-trading-intelligence-ui.vercel.app). It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work and the [stable-release plan](docs/V1_STABLE_PLAN.md) defines the path and gates to the next stable tag. A static UI preview can be deployed to Vercel via `vercel.json`; it contains no backend and never exposes wallet, API or MCP functions.
+Version 1.1.0-rc.4 is a release candidate, merged to `main` through [PR #6](https://github.com/timfromhcs/hcs-trading-intelligence/pull/6), [PR #7](https://github.com/timfromhcs/hcs-trading-intelligence/pull/7), [PR #8](https://github.com/timfromhcs/hcs-trading-intelligence/pull/8) and [PR #9](https://github.com/timfromhcs/hcs-trading-intelligence/pull/9), [PR #10](https://github.com/timfromhcs/hcs-trading-intelligence/pull/10), [PR #11](https://github.com/timfromhcs/hcs-trading-intelligence/pull/11), [PR #12](https://github.com/timfromhcs/hcs-trading-intelligence/pull/12), [PR #13](https://github.com/timfromhcs/hcs-trading-intelligence/pull/13) and [PR #15](https://github.com/timfromhcs/hcs-trading-intelligence/pull/15), [PR #16](https://github.com/timfromhcs/hcs-trading-intelligence/pull/16), [PR #17](https://github.com/timfromhcs/hcs-trading-intelligence/pull/17), [PR #18](https://github.com/timfromhcs/hcs-trading-intelligence/pull/18), [PR #19](https://github.com/timfromhcs/hcs-trading-intelligence/pull/19), [PR #20](https://github.com/timfromhcs/hcs-trading-intelligence/pull/20) and [PR #21](https://github.com/timfromhcs/hcs-trading-intelligence/pull/21). The tag `v1.1.0-rc.4` produced a [draft release](https://github.com/timfromhcs/hcs-trading-intelligence/releases/tag/v1.1.0-rc.4) with native single-file executables, MCPB bundles, wheel, sdist, SBOM, provenance and checksums; the static UI preview is deployed at [hcs-trading-intelligence-ui.vercel.app](https://hcs-trading-intelligence-ui.vercel.app). It is not a stable `v1.x` tag. The [release assessment](docs/V1_RELEASE_REPORT.md) lists what has and has not been verified, and the [implementation plan](docs/ROADMAP.md) lists remaining work and the [stable-release plan](docs/V1_STABLE_PLAN.md) defines the path and gates to the next stable tag. A static UI preview can be deployed to Vercel via `vercel.json`; it contains no backend and never exposes wallet, API or MCP functions.
 
 ## 1. What it is, and what it is not
 
@@ -101,7 +101,7 @@ The wheel is published through GitHub releases only. A PyPI release has not been
 
 ```sh
 python -m venv .venv
-python -m pip install ./hcs_trader-1.1.0rc3-py3-none-any.whl
+python -m pip install ./hcs_trader-1.1.0rc4-py3-none-any.whl
 hcs-trader serve
 ```
 
@@ -250,6 +250,7 @@ Licensed under Apache-2.0. Runtime dependencies include cryptography, defusedxml
 ## 20. Credits
 
 Made with love by timfromhcs and hcsmedia.
+
 
 
 

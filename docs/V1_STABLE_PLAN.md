@@ -1,6 +1,6 @@
 # Path to the next stable release
 
-Status: 2026-11-28. Current release candidate: **1.1.0-rc.3** (draft GitHub
+Status: 2026-11-28. Current release candidate: **1.1.0-rc.4** (draft GitHub
 release, 16 verified assets, Vercel static UI preview). Milestones C1–C4 are
 merged; A and B remain blocked as described below. This document is the
 execution plan from the RC to a stable `v1.1.0` tag. It does **not** relax any
@@ -77,3 +77,4 @@ highest-priority open milestone → write acceptance test first → implement �
 run narrow tests → run full gates → PR → wait for all CI checks → merge →
 update docs/evidence. On a red gate: capture the exact failure, fix once,
 re-run; after three failed attempts on one failure class, stop and report.
+

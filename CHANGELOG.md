@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Release candidate `1.1.0-rc.3` (Waves 1–5 foundations, shared cost model, regime features, DNS pinning). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open. The next stable version plan is in [docs/V1_STABLE_PLAN.md](docs/V1_STABLE_PLAN.md).
+Release candidate `1.1.0-rc.4` (Waves 1–5 foundations, shared cost model, regime features, DNS pinning). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open. The next stable version plan is in [docs/V1_STABLE_PLAN.md](docs/V1_STABLE_PLAN.md).
 
 - Wave 3 security: optional DNS pinning in `webfetch` (enabled in app/CLI) connects to the validated IP with original Host/SNI; the network policy authorises from the original registry hostname. Offline integration tests cover both sides; KL-006 stays open until a live endpoint rehearsal.
 - Web preview: German/English navigation and mode labels with a persisted locale switch (reports remain English), and a downloadable secret-free audit JSON export at `GET /api/v1/export/audit` linked from Settings.
@@ -119,4 +119,5 @@ Changes since 0.2.0 on `main`. A `1.1.0-rc.1` release candidate has been cut; it
 
 - Added the installable CLI with default mode and capability reporting.
 - Added locked development tooling and a three-platform verification workflow.
+
 

@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-Release candidate `1.1.0-rc.1` (Waves 1–3 and the core of Wave 4). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open.
+Release candidate `1.1.0-rc.2` (Waves 1–5 foundations). This is not a stable tag: the seven-day PAPER soak, operator testnet evidence, signing identities and independent security review remain open. The next stable version plan is in [docs/V1_STABLE_PLAN.md](docs/V1_STABLE_PLAN.md).
 
+- Wave 4/5 MCP: duplicate legacy aliases can be hidden with `include_legacy_aliases=False`; they are deprecated and slated for removal in 1.2.0.
+- Wave 5 quant: trailing regime features (`regime.py`) with a future-candle invariance test and the read-only `GET /api/v1/quant/regime` endpoint.
 - Wave 2 data quality: shared deterministic checks for quotes, candles and order books (`data/quality.py`), a keyless Coinbase Exchange public REST adapter behind a strict host allowlist (`data/public_venues.py`), a transport-injected Kraken v2 book feed with sequence-gap detection, cursor resubscription and bounded jittered backoff (`data/kraken_ws.py`), and a versioned source registry with conditional GET and request budgets (`data/source_registry.py`, `data/sources.json`). Every shipped source is disabled until a verification record exists; Binance market data stays disabled pending a jurisdiction check.
 - Wave 3 untrusted pipeline: `webfetch.py` refuses caller-supplied URLs, non-global addresses, redirects and DNS rebinding, applies robots.txt with a 24-hour cache, per-source budgets, conditional GET and size caps. `data/untrusted.py` sanitizes markup, removes hidden/bidirectional characters and instruction-like lines, and marks all output with an `UNTRUSTED` envelope. New READ-scoped REST endpoints `/api/v1/webfetch/sources` and `/api/v1/webfetch/{source_id}` plus MCP tools `webfetch.list_sources` and `webfetch.get`.
 - Wave 4 core: typed MCP outputs with declared `outputSchema` and `structuredContent` for `news.search_page` and the webfetch tools, opaque cursor pagination and field projection, a permissive-license model catalog with SHA-256 gating (`model_catalog.py`), an offline release-blocking eval harness for schema, citation and injection cases (`agents/eval.py`), and local model policy documentation (`docs/MODELS.md`).

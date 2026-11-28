@@ -37,6 +37,23 @@ def _store(path: Path) -> AuditStore:
 
 
 @pytest.mark.anyio
+async def test_legacy_aliases_can_be_disabled(tmp_path: Path) -> None:
+    async with Client(
+        create_mcp_server(
+            _store(tmp_path / "audit.sqlite").path, include_legacy_aliases=False
+        )
+    ) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+    assert "quant.calculate_indicators" in names
+    for alias in (
+        "quant.get_indicators",
+        "wallets.get_snapshots",
+        "strategies.get_candidates",
+    ):
+        assert alias not in names
+
+
+@pytest.mark.anyio
 async def test_structured_tools_declare_output_schema(tmp_path: Path) -> None:
     async with Client(
         create_mcp_server(_store(tmp_path / "audit.sqlite").path)

@@ -313,6 +313,44 @@ def test_exposure_cash_and_position_limits() -> None:
     assert not d.allowed and "positions" in (d.reason or "")
 
 
+def test_correlation_cluster_cap_is_opt_in_and_enforced() -> None:
+    portfolio = _pf(exposure_usd={"BTC": Decimal("1900"), "ETH": Decimal("100")})
+    order = _sample_order(quantity="0.001")
+    common = dict(
+        allowed_markets=frozenset({"BTC/USD"}),
+        live_mode_enabled=True,
+    )
+    baseline = RiskEngine(RiskPolicy(**common)).evaluate_order(  # type: ignore[arg-type]
+        order,
+        _sample_quote(),
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        datetime.now(UTC),
+        portfolio=portfolio,
+        invalidation_price=Decimal("49000"),
+    )
+    assert baseline.allowed
+    clustered = RiskEngine(
+        RiskPolicy(
+            **common,  # type: ignore[arg-type]
+            correlation_clusters=(("BTC", "ETH"),),
+            max_cluster_exposure_fraction=Decimal("0.2"),
+        )
+    ).evaluate_order(
+        order,
+        _sample_quote(),
+        DataQuality.FRESH,
+        0,
+        "v1.0.0",
+        datetime.now(UTC),
+        portfolio=portfolio,
+        invalidation_price=Decimal("49000"),
+    )
+    assert not clustered.allowed
+    assert "cluster" in (clustered.reason or "")
+
+
 def test_sell_requires_inventory() -> None:
     sell = _sample_order(quantity="0.01", side=SpotSide.SELL)
     d = _eval(sell, portfolio=_pf(base_balances={"BTC": Decimal("0")}))

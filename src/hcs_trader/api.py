@@ -52,6 +52,7 @@ from hcs_trader.application.service import (
     spot_order_dict,
 )
 from hcs_trader.backtest import BacktestConfig, BacktestResult
+from hcs_trader.cost_model import CostModel
 from hcs_trader.data import ecb, fred
 from hcs_trader.data.kraken import SOURCE
 from hcs_trader.data.provider import QuoteUnavailable
@@ -407,6 +408,14 @@ class OrderPreviewRequest(BaseModel):
     side: PaperSide
     quantity: Decimal
     idempotency_key: str | None = None
+
+
+class CostRequest(BaseModel):
+    fee_bps: Decimal = Decimal("25")
+    spread_bps: Decimal = Decimal("10")
+    slippage_bps: Decimal = Decimal("5")
+    reference_price: Decimal
+    side: Literal["buy", "sell"]
 
 
 class SizingRequest(BaseModel):
@@ -1407,6 +1416,28 @@ def create_app(
             return page
         except ApplicationError as error:
             raise _http_error(error) from error
+
+    @app.post("/api/v1/quant/costs")
+    def cost_preview(payload: CostRequest) -> dict[str, Any]:
+        """Side-effect-free shared cost preview used by backtest and risk."""
+        try:
+            model = CostModel(
+                fee_bps=payload.fee_bps,
+                spread_bps=payload.spread_bps,
+                slippage_bps=payload.slippage_bps,
+            )
+            execution_price = model.execution_price(
+                payload.reference_price, payload.side
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        return {
+            "fee_rate": str(model.fee_rate),
+            "impact_rate": str(model.impact_rate),
+            "execution_price": str(execution_price),
+            "fee_on_notional": str(model.fee(execution_price)),
+            "authorization": "NONE",
+        }
 
     @app.post("/api/v1/quant/size")
     def size_position(payload: SizingRequest) -> dict[str, Any]:

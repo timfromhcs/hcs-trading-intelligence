@@ -46,6 +46,7 @@ Money and prices are returned as decimal strings. Times are UTC. Endpoints that 
 | GET | `/api/v1/strategies/{strategy_id}/metrics` | Latest shadow-run metrics for a candidate |
 | POST | `/api/v1/orders/preview` | Side-effect-free paper order preview using the submission rules |
 | POST | `/api/v1/quant/size` | Side-effect-free bounded long-spot sizing preview from explicit Decimal inputs; returns `authorization: NONE` and never submits or authorizes an order |
+| POST | `/api/v1/quant/costs` | Side-effect-free preview of the shared fee/spread/slippage model; returns exact Decimal rates, execution price and `authorization: NONE` |
 | GET | `/api/v1/orders/{order_id}` | One spot order or paper fill by identifier |
 | POST | `/api/v1/orders/live` | Alias of `/api/v1/orders/spot`; same gates and risk path |
 | GET | `/api/v1/orders/spot` | Spot order list and lifecycle states |

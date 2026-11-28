@@ -461,6 +461,71 @@
         "title": "ChainCapability",
         "type": "object"
       },
+      "CostRequest": {
+        "properties": {
+          "fee_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "default": "25",
+            "title": "Fee Bps"
+          },
+          "reference_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Reference Price"
+          },
+          "side": {
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "slippage_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "default": "5",
+            "title": "Slippage Bps"
+          },
+          "spread_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "default": "10",
+            "title": "Spread Bps"
+          }
+        },
+        "required": [
+          "reference_price",
+          "side"
+        ],
+        "title": "CostRequest",
+        "type": "object"
+      },
       "CreateCandidateRequest": {
         "properties": {
           "dataset_hash": {
@@ -4243,6 +4308,47 @@
           }
         },
         "summary": "Portfolio Summary"
+      }
+    },
+    "/api/v1/quant/costs": {
+      "post": {
+        "description": "Side-effect-free shared cost preview used by backtest and risk.",
+        "operationId": "cost_preview_api_v1_quant_costs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CostRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cost Preview Api V1 Quant Costs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cost Preview"
       }
     },
     "/api/v1/quant/size": {

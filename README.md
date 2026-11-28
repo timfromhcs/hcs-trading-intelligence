@@ -131,7 +131,7 @@ Build the frontend before `uv build` so the dashboard is packaged with the wheel
 
 ## 7. Command line
 
-Common commands: `serve`, `import-candles`, `import-news`, `import-macro`, `import-fred`, `research-brief`, `research-history`, `research-watch`, `freeze-research`, `score-holdout`, `strategy-list`, `strategy-show`, `strategy-promote`, `strategy-shadow-run`, `strategy-shadow-history`, `strategy-shadow-watch`, `pause-execution`, `resume-execution`, `eth-balance`, `sol-balance`, `btc-balance`, `ltc-balance`, `dgb-balance`, `tx-status`, `kraken-validate`, `spot-canary-allow`, `spot-canary-submit`, `spot-canary-revoke` and `mcp`. Run `hcs-trader --help` for the current list.
+Common commands: `serve`, `import-candles`, `import-news`, `import-macro`, `import-fred`, `research-brief`, `research-history`, `research-watch`, `freeze-research`, `score-holdout`, `strategy-list`, `strategy-show`, `strategy-promote`, `strategy-shadow-run`, `strategy-shadow-history`, `strategy-shadow-watch`, `pause-execution`, `resume-execution`, `eth-balance`, `sol-balance`, `btc-balance`, `ltc-balance`, `dgb-balance`, `tx-status`, `kraken-validate`, `spot-canary-allow`, `spot-canary-submit`, `spot-canary-revoke`, `mcp`, `mcp-http`, `selftest`, `eval-model`, `sources`, `webfetch`, `size`, `costs`, `live-status`, `live-enable` and `live-revoke`. Run `hcs-trader --help` for the current list. The `size`, `costs`, `sources` and `eval-model` commands are side-effect-free; `size` and `costs` return `authorization: NONE`.
 
 ## 8. API and MCP
 

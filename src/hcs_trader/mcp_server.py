@@ -44,6 +44,7 @@ from hcs_trader.application.service import (
     spot_order_dict,
 )
 from hcs_trader.backtest import BacktestConfig
+from hcs_trader.cost_model import CostModel
 from hcs_trader.data.source_registry import load_source_registry
 from hcs_trader.data.source_status import DataSourcesReport
 from hcs_trader.domain.macro import MacroObservation
@@ -105,6 +106,13 @@ class NewsPage(BaseModel):
     items: list[dict[str, Any]]
     next_cursor: str | None = None
     has_more: bool = False
+
+
+class CostPreview(BaseModel):
+    fee_rate: str
+    impact_rate: str
+    execution_price: str
+    authorization: Literal["NONE"] = "NONE"
 
 
 class SizingPreview(BaseModel):
@@ -202,6 +210,7 @@ _TOOL_TIERS: Mapping[str, CapabilityTier] = {
     "webfetch.get": _R,
     "news.search_page": _R,
     "quant.size_position": _R,
+    "quant.cost_preview": _R,
     "quant.calculate_indicators": _R,
     "quant.compare_strategy_candidates": _R,
     # READ (earlier names; the renamed ones stay registered as aliases)
@@ -911,6 +920,30 @@ def create_mcp_server(
         )
         items, next_cursor, has_more = _page(hits, start, limit, fields)
         return NewsPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+    @structured_tool("quant.cost_preview")
+    def cost_preview_tool(
+        reference_price: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=40)],
+        side: Annotated[Literal["buy", "sell"], Field()],
+        fee_bps: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=10)] = "25",
+        spread_bps: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=10)] = "10",
+        slippage_bps: Annotated[str, Field(pattern=r"^[0-9.]+$", max_length=10)] = "5",
+    ) -> CostPreview:
+        """Preview the shared fee/spread/slippage model; never authorizes a trade."""
+        try:
+            model = CostModel(
+                fee_bps=Decimal(fee_bps),
+                spread_bps=Decimal(spread_bps),
+                slippage_bps=Decimal(slippage_bps),
+            )
+            price = model.execution_price(Decimal(reference_price), side)
+        except (ValueError, ArithmeticError) as error:
+            raise ToolError(f"Cost preview rejected: {error}") from error
+        return CostPreview(
+            fee_rate=str(model.fee_rate),
+            impact_rate=str(model.impact_rate),
+            execution_price=str(price),
+        )
 
     @structured_tool("quant.size_position")
     def size_position_tool(

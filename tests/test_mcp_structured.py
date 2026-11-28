@@ -47,6 +47,7 @@ async def test_structured_tools_declare_output_schema(tmp_path: Path) -> None:
         "webfetch.get",
         "news.search_page",
         "quant.size_position",
+        "quant.cost_preview",
     ):
         assert tools[name].output_schema is not None
         assert tools[name].annotations is not None
@@ -104,6 +105,20 @@ async def test_news_page_projects_fields_and_rejects_bad_cursor(tmp_path: Path) 
             "news.search_page", {"query": "Bitcoin", "cursor": "nope"}
         )
         assert bad.is_error is True
+
+
+@pytest.mark.anyio
+async def test_cost_preview_tool_is_typed_and_read_only(tmp_path: Path) -> None:
+    async with Client(
+        create_mcp_server(_store(tmp_path / "audit.sqlite").path)
+    ) as client:
+        result = await client.call_tool(
+            "quant.cost_preview", {"reference_price": "100", "side": "buy"}
+        )
+    assert result.structured_content is not None
+    body = result.structured_content
+    assert body["authorization"] == "NONE"
+    assert float(body["execution_price"]) > 100
 
 
 @pytest.mark.anyio

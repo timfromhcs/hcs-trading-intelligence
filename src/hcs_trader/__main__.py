@@ -585,6 +585,7 @@ def _build_app(
             build_http_client(network_policy, follow_redirects=False),
             load_source_registry(),
             contact_url="https://hcs.media/contact",
+            pin_dns=True,
         )
     return create_app(
         store,
@@ -1354,6 +1355,7 @@ def main() -> None:
                 build_http_client(policy, follow_redirects=False),
                 load_source_registry(),
                 contact_url="https://hcs.media/contact",
+                pin_dns=True,
             ) as fetcher:
                 document = await fetcher.fetch(arguments.source_id)
                 print(

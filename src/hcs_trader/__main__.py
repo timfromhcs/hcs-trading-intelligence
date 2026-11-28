@@ -927,6 +927,20 @@ def main() -> None:
         "sources",
         help="List registered external sources and verification state (offline)",
     )
+    size_parser = commands.add_parser(
+        "size", help="Side-effect-free bounded long-spot sizing preview"
+    )
+    for argument in (
+        "hot-equity",
+        "entry-price",
+        "invalidation-price",
+        "risk-fraction",
+        "max-position-notional",
+        "available-quote",
+    ):
+        size_parser.add_argument(f"--{argument}", required=True)
+    size_parser.add_argument("--cost-per-unit", default="0")
+    size_parser.add_argument("--min-quantity", default="0")
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1248,6 +1262,37 @@ def main() -> None:
         create_mcp_server(mcp_store.path).run(transport="stdio")
     elif arguments.command == "mcp-http":
         mcp_http_command(arguments)
+    elif arguments.command == "size":
+        from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
+
+        try:
+            result = size_long_position(
+                SizingInput(
+                    hot_equity=Decimal(arguments.hot_equity),
+                    entry_price=Decimal(arguments.entry_price),
+                    invalidation_price=Decimal(arguments.invalidation_price),
+                    risk_fraction=Decimal(arguments.risk_fraction),
+                    max_position_notional=Decimal(arguments.max_position_notional),
+                    available_quote=Decimal(arguments.available_quote),
+                    estimated_cost_per_unit=Decimal(arguments.cost_per_unit),
+                    min_quantity=Decimal(arguments.min_quantity),
+                )
+            )
+        except (SizingRejected, ArithmeticError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
+        print(
+            json.dumps(
+                {
+                    "quantity": str(result.quantity),
+                    "notional": str(result.notional),
+                    "risk_amount": str(result.risk_amount),
+                    "risk_per_unit": str(result.risk_per_unit),
+                    "authorization": "NONE",
+                },
+                indent=2,
+            )
+        )
     elif arguments.command == "sources":
         registry = load_source_registry()
         print(

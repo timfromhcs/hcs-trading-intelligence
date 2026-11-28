@@ -115,7 +115,7 @@ from hcs_trader.wallets import (
     UtxoNetwork,
     WalletUnavailable,
 )
-from hcs_trader.webfetch import SafeFetcher
+from hcs_trader.webfetch import SafeFetcher, SafeFetchError
 
 
 def local_store() -> AuditStore:
@@ -918,6 +918,11 @@ def main() -> None:
         "eval-model",
         help="Run offline model-boundary release gates (schema, citation, injection)",
     )
+    webfetch_parser = commands.add_parser(
+        "webfetch",
+        help="Fetch one registered source by id (DATA_ONLY, untrusted output)",
+    )
+    webfetch_parser.add_argument("source_id")
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1239,6 +1244,33 @@ def main() -> None:
         create_mcp_server(mcp_store.path).run(transport="stdio")
     elif arguments.command == "mcp-http":
         mcp_http_command(arguments)
+    elif arguments.command == "webfetch":
+
+        async def _fetch_registered() -> None:
+            policy = NetworkPolicy(SystemMode.DATA_ONLY)
+            async with SafeFetcher(
+                build_http_client(policy, follow_redirects=False),
+                load_source_registry(),
+                contact_url="https://hcs.media/contact",
+            ) as fetcher:
+                document = await fetcher.fetch(arguments.source_id)
+                print(
+                    json.dumps(
+                        {
+                            **fetcher.document_envelope(document),
+                            "url": document.url,
+                            "fetched_at": document.fetched_at.isoformat(),
+                            "from_cache": document.from_cache,
+                        },
+                        indent=2,
+                    )
+                )
+
+        try:
+            asyncio.run(_fetch_registered())
+        except SafeFetchError as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
     elif arguments.command == "eval-model":
         from hcs_trader.agents.eval import EvalNotReady, assert_release_ready, run_eval
 

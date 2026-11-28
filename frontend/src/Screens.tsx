@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getJson, requestSignal, type Capabilities, type SystemStatus } from "./api";
 import { AuditLog } from "./AuditLog";
+import { detectRuntimeCapabilities } from "./capabilities";
 import { DataSources } from "./DataSources";
 import { MarketQuote } from "./MarketQuote";
 import { ResearchRuns } from "./ResearchRuns";
@@ -63,6 +64,7 @@ export function Overview({
   status: SystemStatus;
   capabilities: Capabilities;
 }) {
+  const runtime = detectRuntimeCapabilities();
   return (
     <>
       <section className="panel" aria-labelledby="status-heading">
@@ -83,6 +85,21 @@ export function Overview({
       </section>
       {capabilities.market_data && <MarketQuote />}
       <DataSources />
+      <section className="panel" aria-labelledby="runtime-heading">
+        <h2 id="runtime-heading">Browser runtime</h2>
+        <dl className="status-grid">
+          <div><dt>WebGPU</dt><dd>{runtime.webgpu ? "Available" : "Unavailable"}</dd></div>
+          <div><dt>WebAssembly</dt><dd>{runtime.webassembly ? "Available" : "Unavailable"}</dd></div>
+          <div>
+            <dt>SharedArrayBuffer</dt>
+            <dd>{runtime.sharedArrayBuffer ? "Available" : "Unavailable"}</dd>
+          </div>
+        </dl>
+        <p className="muted">
+          Informational only. Browser capabilities never authorize an order or
+          change a risk limit.
+        </p>
+      </section>
       <section className="panel" aria-labelledby="capabilities-heading">
         <h2 id="capabilities-heading">Capabilities</h2>
         <CapabilityList capabilities={capabilities} />

@@ -35,7 +35,7 @@ Release candidate `1.1.0-rc.1` (Waves 1–3 and the core of Wave 4). This is not
 - Gate the Kraken CLI and HTTP serving paths on the persisted operator policy and security-critical limitations. Recheck approval before submission.
 - Verify denied paper writes in the installed MCP smoke test and run frontend tests in CI.
 
-Changes since 0.2.0 on `main`. No release candidate has been cut and the version is still 0.2.0.
+Changes since 0.2.0 on `main`. A `1.1.0-rc.1` release candidate has been cut; it is not a stable `v1.x` tag.
 
 ### Added
 

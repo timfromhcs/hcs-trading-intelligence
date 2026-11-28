@@ -7,6 +7,8 @@ from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from hypothesis import given
+from hypothesis import strategies as st
 
 from hcs_trader.api import create_app
 from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
@@ -107,3 +109,42 @@ def test_rest_preview_rejects_bad_input(tmp_path: Path) -> None:
         "available_quote": "5000",
     }
     assert client.post("/api/v1/quant/size", json=payload).status_code == 422
+
+
+@given(
+    equity=st.decimals(min_value="100", max_value="1000000000", places=2),
+    entry=st.decimals(min_value="1", max_value="1000000", places=2),
+    fraction=st.decimals(min_value="0.0001", max_value="0.01", places=4),
+    cap=st.decimals(min_value="100", max_value="1000000000", places=2),
+    cash=st.decimals(min_value="100", max_value="1000000000", places=2),
+    cost=st.decimals(min_value="0", max_value="10", places=2),
+)
+def test_bounds_hold_for_arbitrary_decimal_inputs(
+    equity: Decimal,
+    entry: Decimal,
+    fraction: Decimal,
+    cap: Decimal,
+    cash: Decimal,
+    cost: Decimal,
+) -> None:
+    invalidation = (entry * Decimal("0.95")).quantize(Decimal("0.01"))
+    data = replace(
+        _BASE,
+        hot_equity=equity,
+        entry_price=entry,
+        invalidation_price=invalidation,
+        risk_fraction=fraction,
+        max_position_notional=cap,
+        available_quote=cash,
+        estimated_cost_per_unit=cost,
+    )
+    try:
+        result = size_long_position(data)
+    except SizingRejected:
+        return
+    tolerance = Decimal("0.000001")
+    assert result.quantity > 0
+    assert result.quantity * entry <= cap + tolerance
+    assert result.quantity <= cash / entry + tolerance
+    assert result.risk_amount <= equity * fraction + tolerance
+    assert result.notional <= cap + tolerance

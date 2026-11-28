@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from hcs_trader.cost_model import CostModel
 from hcs_trader.domain.execution import SpotOrder, SpotSide, spot_order_plan_hash
 from hcs_trader.domain.market_data import DataQuality, Quote
 from hcs_trader.domain.markets import MARKET_REGISTRY
@@ -310,7 +311,8 @@ class RiskEngine:
             if order.quantity > pf.base_balances.get(base, Decimal(0)):
                 return f"Sell quantity exceeds owned {base} inventory (spot only)"
             return None
-        fee = notional * fee_bps / _BPS
+        costs = CostModel(fee_bps=fee_bps)
+        fee = costs.fee(notional)
         if notional + fee > pf.available_quote_usd:
             return "Insufficient available quote balance including fee reserve"
         held = pf.exposure_usd.get(base, Decimal(0))
@@ -333,7 +335,7 @@ class RiskEngine:
                 return f"Projected {base} cluster exposure exceeds cap"
         if invalidation is None or invalidation <= 0:
             return "Buy requires a valid invalidation price for risk sizing"
-        risk_per_unit = price - invalidation + price * fee_bps / _BPS
+        risk_per_unit = price - invalidation + costs.fee(price)
         if risk_per_unit <= 0:
             return "Risk per unit is not positive: invalid invalidation price"
         if order.quantity > pf.hot_equity_usd * pol.risk_fraction / risk_per_unit:

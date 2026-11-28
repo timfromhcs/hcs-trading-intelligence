@@ -93,6 +93,7 @@ from hcs_trader.promotion import (
     list_shadow_runs_for_candidate,
     promote_strategy_candidate,
 )
+from hcs_trader.regime import regime_series
 from hcs_trader.risk import RiskRejected
 from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
 from hcs_trader.skills import list_skills
@@ -1416,6 +1417,36 @@ def create_app(
             return page
         except ApplicationError as error:
             raise _http_error(error) from error
+
+    @app.get("/api/v1/quant/regime")
+    def regime_preview(
+        interval: Annotated[int, Query(ge=1, le=1440)] = 60,
+        limit: Annotated[int, Query(ge=2, le=1000)] = 200,
+        lookback: Annotated[int, Query(ge=2, le=500)] = 20,
+        market: Annotated[str | None, Query(max_length=16)] = None,
+    ) -> dict[str, Any]:
+        """Trailing-only regime features from stored closed candles."""
+        try:
+            candles = service.candles(interval, limit, market)
+            points = regime_series(
+                [candle.close for candle in candles], lookback=lookback
+            )
+        except (ApplicationError, ValueError) as error:
+            raise HTTPException(422, str(error)) from error
+        return {
+            "interval": interval,
+            "market": market or "BTC/USD",
+            "lookback": lookback,
+            "points": [
+                {
+                    "index": point.index,
+                    "direction": point.direction,
+                    "slope_bps": str(point.slope_bps),
+                    "warm": point.warm,
+                }
+                for point in points
+            ],
+        }
 
     @app.post("/api/v1/quant/costs")
     def cost_preview(payload: CostRequest) -> dict[str, Any]:

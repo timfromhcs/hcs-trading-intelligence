@@ -1,6 +1,7 @@
 """Read-only status endpoints for the loopback application."""
 
 import asyncio
+import base64
 import csv
 import ipaddress
 import json
@@ -16,6 +17,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
@@ -408,6 +411,131 @@ class SystemCapabilities(Capabilities):
     chains: list[ChainCapability]
 
 
+def _app_version() -> str:
+    """Report the installed package version in OpenAPI; never hard-code it."""
+    try:
+        return package_version("hcs-trader")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
+def _cursor_offset(cursor: str | None) -> int:
+    """Decode an opaque pagination cursor; malformed values fail closed."""
+    if cursor is None:
+        return 0
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(422, "Invalid cursor") from error
+    if not decoded.startswith("o:") or not decoded[2:].isdigit():
+        raise HTTPException(422, "Invalid cursor")
+    offset = int(decoded[2:])
+    if offset < 0 or offset > 100_000:
+        raise HTTPException(422, "Invalid cursor")
+    return offset
+
+
+def _set_page_headers(
+    response: Response, *, offset: int, returned: int, has_more: bool
+) -> None:
+    response.headers["X-Total-Count"] = str(offset + returned + (1 if has_more else 0))
+    if has_more:
+        end = offset + returned
+        response.headers["X-Next-Cursor"] = base64.urlsafe_b64encode(
+            f"o:{end}".encode("ascii")
+        ).decode("ascii")
+
+
+class _ConditionalGet:
+    """Add a content ETag to GET responses and answer matching 304s.
+
+    Streaming responses and bodies above the cap are passed through untouched.
+    The hardening middleware still runs for every request.
+    """
+
+    def __init__(self, app: Any, *, max_bytes: int = 524_288) -> None:
+        self._app = app
+        self._max_bytes = max_bytes
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") != "GET"
+            or not str(scope.get("path", "")).startswith("/api/v1/")
+        ):
+            await self._app(scope, receive, send)
+            return
+        request_headers = {
+            key.decode("ascii").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        if_none_match = request_headers.get("if-none-match")
+        start: dict[str, Any] | None = None
+        body = bytearray()
+        passthrough = False
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal start, passthrough
+            if message["type"] == "http.response.start":
+                content_type = next(
+                    (
+                        value.decode("latin-1")
+                        for key, value in message.get("headers", [])
+                        if key.decode("ascii").lower() == "content-type"
+                    ),
+                    "",
+                )
+                if message["status"] != 200 or "text/event-stream" in content_type:
+                    passthrough = True
+                    await send(message)
+                    return
+                start = message
+                return
+            if message["type"] == "http.response.body" and not passthrough:
+                chunk = message.get("body", b"")
+                body.extend(chunk)
+                if len(body) > self._max_bytes or message.get("more_body"):
+                    passthrough = True
+                    if start is not None:
+                        await send(start)
+                    await send(message)
+                    return
+                if start is None:
+                    await send(message)
+                    return
+                etag = '"' + sha256(bytes(body)).hexdigest() + '"'
+                headers = [
+                    (key, value)
+                    for key, value in start.get("headers", [])
+                    if key.decode("ascii").lower() not in ("etag", "content-length")
+                ]
+                if if_none_match is not None and if_none_match == etag:
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 304,
+                            "headers": headers + [(b"etag", etag.encode("ascii"))],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": b""})
+                    return
+                await send(
+                    {
+                        **start,
+                        "headers": headers
+                        + [
+                            (b"etag", etag.encode("ascii")),
+                            (b"content-length", str(len(body)).encode("ascii")),
+                        ],
+                    }
+                )
+                await send(message)
+                return
+            await send(message)
+
+        await self._app(scope, receive, send_wrapper)
+
+
 def _http_error(error: ApplicationError) -> HTTPException:
     if isinstance(error, InvalidRequest):
         return HTTPException(422, str(error))
@@ -507,6 +635,7 @@ def create_app(
 
     app = FastAPI(
         title="HCS Trading Intelligence",
+        version=_app_version(),
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -519,6 +648,7 @@ def create_app(
         rate_limit=write_rate_limit,
         window=rate_window_seconds,
     )
+    app.add_middleware(_ConditionalGet)
 
     @app.get("/api/v1/health")
     def health() -> Health:
@@ -1018,17 +1148,24 @@ def create_app(
     def list_audit_events(
         response: Response,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        cursor: Annotated[str | None, Query(max_length=256)] = None,
     ) -> list[AuditEventResponse]:
         response.headers["Cache-Control"] = "no-store"
+        offset = _cursor_offset(cursor)
         try:
-            events = store.list_audit_events(limit=limit)
+            events = store.list_audit_events(limit=min(offset + limit + 1, 1000))
+            page = events[offset : offset + limit]
+            has_more = len(events) > offset + limit
+            _set_page_headers(
+                response, offset=offset, returned=len(page), has_more=has_more
+            )
             return [
                 AuditEventResponse(
                     event_id=e.event_id,
                     recorded_at=e.recorded_at,
                     kind=e.kind,
                 )
-                for e in events
+                for e in page
             ]
         except (sqlite3.Error, ValidationError) as error:
             raise HTTPException(503, "Audit event storage unavailable") from error
@@ -1194,11 +1331,20 @@ def create_app(
 
     @app.get("/api/v1/news/search")
     def news_search(
+        response: Response,
         q: Annotated[str, Query(min_length=1, max_length=100)],
         limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=256)] = None,
     ) -> list[NewsHit]:
+        offset = _cursor_offset(cursor)
         try:
-            return service.search_news(q, limit)
+            hits = service.search_news(q, min(offset + limit + 1, 1000))
+            page = hits[offset : offset + limit]
+            has_more = len(hits) > offset + limit
+            _set_page_headers(
+                response, offset=offset, returned=len(page), has_more=has_more
+            )
+            return page
         except ApplicationError as error:
             raise _http_error(error) from error
 

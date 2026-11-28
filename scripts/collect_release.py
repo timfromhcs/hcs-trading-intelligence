@@ -59,8 +59,11 @@ _MCPB_UPLOADS = (
 
 
 def _only(folder: Path, pattern: str) -> Path:
-    candidates = list(folder.glob(pattern))
-    if len(candidates) != 1 or not candidates[0].is_file():
+    # upload-artifact keeps the common ancestor of all uploaded paths, so the
+    # binaries land under dist/desktop-single/ next to the MCPB bundle. Search
+    # recursively but still require exactly one match.
+    candidates = [path for path in folder.rglob(pattern) if path.is_file()]
+    if len(candidates) != 1:
         raise ValueError(f"Expected one {pattern} in {folder.name}")
     return candidates[0]
 

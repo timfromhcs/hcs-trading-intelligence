@@ -273,6 +273,37 @@ def test_pyinstaller_exception_is_bound_to_the_reviewed_version() -> None:
     assert license_inventory.copyleft_violations([{**record, "version": "6.22.4"}])
 
 
+def test_extra_assets_are_collected_from_nested_artifact_paths(tmp_path: Path) -> None:
+    downloads = tmp_path / "collected"
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    for upload, platform in (
+        ("desktop-single-windows-latest", "windows"),
+        ("desktop-single-macos-latest", "macos"),
+        ("desktop-single-ubuntu-latest", "ubuntu"),
+    ):
+        nested = downloads / upload / "dist" / "desktop-single"
+        nested.mkdir(parents=True)
+        suffix = ".exe" if platform == "windows" else ""
+        (nested / f"HCS-Trading-Intelligence{suffix}").write_text(
+            upload, encoding="ascii"
+        )
+        (downloads / upload / "dist" / "mcpb" / f"{platform}.mcpb").parent.mkdir(
+            parents=True
+        )
+        (downloads / upload / "dist" / "mcpb" / f"{platform}.mcpb").write_text(
+            upload, encoding="ascii"
+        )
+    collect_extras(downloads, staging)
+    assert sorted(path.name for path in staging.iterdir()) == [
+        "HCS-Trading-Intelligence-linux-x64",
+        "HCS-Trading-Intelligence-macos-arm64",
+        "macos.mcpb",
+        "ubuntu.mcpb",
+        "windows.mcpb",
+    ]
+
+
 def test_extra_release_assets_are_collected_and_checksummed(tmp_path: Path) -> None:
     downloads = tmp_path / "collected"
     staging = tmp_path / "staging"

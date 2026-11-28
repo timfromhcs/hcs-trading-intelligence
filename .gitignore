@@ -14,3 +14,5 @@ src/hcs_trader/ui_assets/
 *.db
 coverage.xml
 mutants/
+
+.vercel

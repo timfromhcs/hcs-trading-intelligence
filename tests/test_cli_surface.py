@@ -23,6 +23,7 @@ def test_help_lists_only_reviewed_commands() -> None:
         "webfetch",
         "sources",
         "size",
+        "costs",
         "live-status",
         "live-enable",
         "live-revoke",

@@ -941,6 +941,14 @@ def main() -> None:
         size_parser.add_argument(f"--{argument}", required=True)
     size_parser.add_argument("--cost-per-unit", default="0")
     size_parser.add_argument("--min-quantity", default="0")
+    costs_parser = commands.add_parser(
+        "costs", help="Side-effect-free shared cost-model preview"
+    )
+    costs_parser.add_argument("--reference-price", required=True)
+    costs_parser.add_argument("--side", choices=["buy", "sell"], required=True)
+    costs_parser.add_argument("--fee-bps", default="25")
+    costs_parser.add_argument("--spread-bps", default="10")
+    costs_parser.add_argument("--slippage-bps", default="5")
     commands.add_parser("live-status", help="Show the persisted LIVE state and limits")
     revoke_parser = commands.add_parser(
         "live-revoke", help="Return to PAPER and record the revocation"
@@ -1262,6 +1270,32 @@ def main() -> None:
         create_mcp_server(mcp_store.path).run(transport="stdio")
     elif arguments.command == "mcp-http":
         mcp_http_command(arguments)
+    elif arguments.command == "costs":
+        from hcs_trader.cost_model import CostModel
+
+        try:
+            model = CostModel(
+                fee_bps=Decimal(arguments.fee_bps),
+                spread_bps=Decimal(arguments.spread_bps),
+                slippage_bps=Decimal(arguments.slippage_bps),
+            )
+            price = model.execution_price(
+                Decimal(arguments.reference_price), arguments.side
+            )
+        except (ValueError, ArithmeticError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
+        print(
+            json.dumps(
+                {
+                    "fee_rate": str(model.fee_rate),
+                    "impact_rate": str(model.impact_rate),
+                    "execution_price": str(price),
+                    "authorization": "NONE",
+                },
+                indent=2,
+            )
+        )
     elif arguments.command == "size":
         from hcs_trader.sizing import SizingInput, SizingRejected, size_long_position
 
